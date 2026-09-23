@@ -62,13 +62,15 @@ for want in [
 }
 
 # Status-report hits: the 2026Q1 pkgbasify + pkgdist entries and the 2026Q2
-# SBOM/pkgbase aside; none is about kernel packages.
+# SBOM/pkgbase aside; none is about kernel packages. The 2026Q1 "FreeBSD
+# Foundation" team entry is deliberately NOT a hit: it only links to the
+# pkgbasify/pkgdist entries (in-page <a href="#..."> cross-references),
+# which the parser strips so each project is reported once, by its own entry.
 let hits = $r.status_report_hits
-if ($hits | length) != 3 { fail $"want 3 status-report hits, got ($hits | length)" }
-let titles = ($hits | get title)
-for t in ["More robust pkgbase conversion" "Kernel Benchmark, MAINTAINERS, and pkgdist" "FreeBSD, CRA, EuroBSDCon, and Security Team"] {
-    if not ($t in $titles) { fail $"missing hit: ($t)" }
-}
+let titles = ($hits | get title | sort)
+let want_titles = (["More robust pkgbase conversion" "Kernel Benchmark, MAINTAINERS, and pkgdist" "FreeBSD, CRA, EuroBSDCon, and Security Team"] | sort)
+if $titles != $want_titles { fail $"status-report hit titles = ($titles | to nuon), want ($want_titles | to nuon)" }
+if ("FreeBSD Foundation" in $titles) { fail "cross-reference-only entry (FreeBSD Foundation) must not be a hit" }
 let pkgbasify = ($hits | where title == "More robust pkgbase conversion" | first)
 if $pkgbasify.terms != ["pkgbase" "pkgbasify"] { fail $"pkgbasify terms = ($pkgbasify.terms)" }
 if $pkgbasify.url != "https://www.freebsd.org/status/report-2026-01-2026-03/#_more_robust_pkgbase_conversion" { fail $"hit url = ($pkgbasify.url)" }
@@ -116,6 +118,16 @@ let s3 = (pw-json $d3).out
 if $s3.custom_kernel_pkgbase.status != "knob" { fail "report hit must not change the source-derived status" }
 if $s3.verdict != "reevaluate" { fail "kernel-related report hit should flip verdict to reevaluate" }
 if not ($s3.status_report_hits | any {|h| $h.kernel_related and $h.title == "pkgbase custom kernels" }) { fail "kernel-related hit not flagged" }
+
+# --- 4b. in-page cross-links alone never make a hit; prose does -----------
+let d6 = (scratch)
+'<h3 id="_xref_only">Team report</h3><ul><li><p><a href="#_pkgbase_kernels">pkgbase custom kernel packages</a></p></li></ul><h3 id="_prose">Prose entry</h3><p>We shipped pkgdist.</p><p><a href="https://example.org/pkgbase">external pkgbase link</a></p>' | save --append ($d6 | path join report-2026-04-2026-06.txt)
+let s6 = (pw-json $d6).out
+let t6 = ($s6.status_report_hits | get title)
+if ("Team report" in $t6) { fail "entry with only in-page cross-links became a hit" }
+if not ("Prose entry" in $t6) { fail "entry mentioning pkgdist in prose was not a hit" }
+if $s6.verdict != "keep-source-built" { fail "cross-link text mentioning kernel packages must not trigger reevaluate" }
+rm -rf $d6
 
 # --- 5. KERNCONF-named kernel package disappears -> unsupported -------------
 let d4 = (scratch)

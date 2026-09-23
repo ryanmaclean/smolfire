@@ -33,7 +33,7 @@
 # Covered by CI: tests/pkgbase-watch-test.nu (fixture mode, no network).
 # Scheduled: .github/workflows/pkgbase-watch.yml (quarterly).
 
-const TOOL_VERSION = "1.0.0"
+const TOOL_VERSION = "1.0.1"
 const STATUS_BASE = "https://www.freebsd.org/status/"
 const PKG_MAKEFILE_URL = "https://cgit.freebsd.org/ports/plain/ports-mgmt/pkg/Makefile"
 const MAKEFILE_INC1_URL = "https://cgit.freebsd.org/src/plain/Makefile.inc1"
@@ -117,7 +117,17 @@ export def parse-report-entries [html: string] {
             let head = ($chunk | parse --regex '^id="(?<anchor>[^"]*)"[^>]*>(?<title>.*?)</h3>' | get -o 0)
             if $head == null { null } else {
                 # Body: after this </h3>, up to the next <h2> (section change).
-                let body = ($chunk | str replace -r '(?s)^.*?</h3>' '' | split row '<h2 ' | first)
+                # In-page cross-reference links (<a href="#...">Other entry
+                # title</a>) are dropped: team reports such as "FreeBSD
+                # Foundation" list sponsored projects by linking to their
+                # entries, and those link texts ("More robust pkgbase
+                # conversion") would otherwise make the linking entry a
+                # duplicate hit. A hit must mention a term in its own prose.
+                let body = ($chunk
+                    | str replace -r '(?s)^.*?</h3>' ''
+                    | split row '<h2 '
+                    | first
+                    | str replace -a -r '(?s)<a\s+href="#[^"]*"[^>]*>.*?</a>' ' ')
                 {anchor: $head.anchor, title: (html-to-text $head.title), text: (html-to-text $body)}
             }
         }

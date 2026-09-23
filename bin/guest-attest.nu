@@ -7,7 +7,7 @@
 # all artifact paths and the PCR digest.
 #
 # Prerequisites (FreeBSD port):
-#   security/tpm2-tools — provides tpm2_createprimary, tpm2_createak,
+#   security/tpm2-tools — provides tpm2_createek, tpm2_createak,
 #   tpm2_quote, tpm2_pcrread.
 #
 # Usage:
@@ -40,7 +40,7 @@ def gen-uuid [] {
 
 # Check that all required binaries exist in PATH.
 def check-prereqs [] {
-    let required = ["tpm2_createprimary" "tpm2_createak" "tpm2_quote" "tpm2_pcrread"]
+    let required = ["tpm2_createek" "tpm2_createak" "tpm2_quote" "tpm2_pcrread"]
     for bin in $required {
         if (which $bin | length) == 0 {
             return {ok: false, missing: $bin}
@@ -160,13 +160,16 @@ export def main [
     let attest_toml = [$output_dir "attestation.toml"] | path join
     let expected_pcr_file = [$output_dir "expected_pcr.txt"] | path join
 
-    # Step 1: Create primary key in Owner hierarchy
+    # Step 1: Create endorsement key (EK) to parent the AK.
+    # tpm2_createak drives a policy session matching the EK template's auth
+    # policy (tpm2_createak(1): "-C: The endorsement key object"), so its
+    # parent MUST be a tpm2_createek EK: a generic tpm2_createprimary parent
+    # makes createak fail with 0x99D "a policy check failed" (tpm2-tools#3475).
+    # ECC is kept to match the verifier's ECC quote path.
     run-tpm2 "guest_attest_createprimary" [
-        "tpm2_createprimary"
-        "-C" "o"
-        "-g" "sha256"
-        "-G" "ecc"
+        "tpm2_createek"
         "-c" $primary_ctx
+        "-G" "ecc"
     ]
 
     # Step 2: Create Attestation Key under the primary key

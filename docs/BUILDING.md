@@ -1,13 +1,13 @@
 # Building smolfire
 
-One command builds the complete smolfire qcow2 image from a clean FreeBSD source tree.
+The primary product path is the **SMOLFIRE microVM**: one PVH-bootable ELF with
+an embedded static `/rescue` MFS root. The older qcow2 image path remains
+available as a compatibility target.
 
 ## Prerequisites
 
-- FreeBSD 15 aarch64 host (the `<aarch64-builder>` VM on `<hypervisor-host>`, or any FreeBSD aarch64 box)
-- At least 50 GiB free in `/usr/obj` (buildworld fills ~18–40 GiB; allow headroom)
-- At least 10 GiB free after buildworld completes (cloudware-release also builds the full pkgbase repo under /usr/obj)
-- Root access — `make release` and `make cloudware-release` both require a chroot
+- FreeBSD 15 host with `/usr/src` checked out at `releng/15.0`
+- Root access
 - `/usr/src` checked out at `releng/15.0`:
   ```sh
   git clone -b releng/15.0 https://git.freebsd.org/src.git /usr/src
@@ -15,8 +15,58 @@ One command builds the complete smolfire qcow2 image from a clean FreeBSD source
 - Nushell **0.115.1**: `pkg install nushell` (CI pins this version in
   `.github/nu-version`; 0.112.2 fails on `str lowercase` in `bin/coord-tick.nu`,
   and 0.111 fails on `get -o`)
+- For the **primary microVM path**: an amd64 host (the artifact and gates are amd64-only today)
+- For the **qcow2 compatibility path**: at least 50 GiB free in `/usr/obj`, at
+  least 10 GiB free after `buildworld`, and enough privilege for the
+  `make release` / `make cloudware-release` chroots
 
-## Step 0 — Preflight check (no writes, no builds)
+## Primary path — one-ELF SMOLFIRE microVM
+
+This path builds the artifact used by the Firecracker and QEMU `microvm` gates.
+It does **not** run `buildworld`, `pkgbase`, or `cloudware-release`.
+
+### Step 0 — Install the SMOLFIRE kernconfs into `/usr/src`
+
+```sh
+sudo cp sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/
+```
+
+### Step 1 — Build the one-ELF microVM
+
+```sh
+sudo sh bin/build-smolfire.sh
+```
+
+This script:
+
+1. Assembles the static `/rescue` MFS rootfs
+2. Applies the PVH early-clock/delay patch to `/usr/src/sys/x86/xen/pv.c` if needed
+3. Runs `kernel-toolchain`
+4. Runs `buildkernel KERNCONF=SMOLFIRE`
+
+Artifacts:
+
+- `/root/smolfire-kernel` — release artifact; the whole OS in one ELF
+- `/root/smolfire-kernel-tslog` — optional measurement-only artifact when `SMOLFIRE_TSLOG=1`
+- `/var/tmp/smolfire-build.log` — build log
+
+Boot it directly under QEMU `microvm`:
+
+```sh
+qemu-system-x86_64 -M microvm -accel kvm -cpu host -m 512M \
+  -kernel /root/smolfire-kernel \
+  -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0" \
+  -display none -serial mon:stdio
+```
+
+Wait for `SMOLFIRE_READY`, then use the interactive serial shell.
+
+## Compatibility path — full qcow2 image
+
+Use this path only when you need a disk image, pkgbase/image trimming work, or
+the older q35/qcow2 environment.
+
+### Step 0 — Preflight check (no writes, no builds)
 
 Run this first. It checks root, disk space, source tree, kernel config, and
 `/etc/src.conf` without making any changes:
@@ -28,7 +78,7 @@ sudo nu bin/build-smolfire-vm.nu --check
 Fix any reported ERRORs before proceeding. WARNINGs about missing kernel configs
 or `/etc/src.conf` are auto-resolved by the setup phase.
 
-## Step 1 — Full build
+### Step 1 — Full build
 
 ```sh
 sudo nu bin/build-smolfire-vm.nu
@@ -54,7 +104,7 @@ Build output streams to `/var/tmp/smolfire-build.log`. Watch progress with:
 tail -f /var/tmp/smolfire-build.log
 ```
 
-## Step 2 — Where the qcow2 ends up
+### Step 2 — Where the qcow2 ends up
 
 ```
 # cloudware-release writes to the release objdir root, e.g.:
@@ -64,14 +114,16 @@ tail -f /var/tmp/smolfire-build.log
 
 The script prints the exact path, size, sha256, and elapsed time on completion.
 
-## Building in a pipeline (no build host required)
+## Building in CI / pipelines
 
-Two CI paths exist; neither needs a human at an SSH prompt:
+The microVM and qcow2 paths are intentionally separate so microVM regressions do
+not depend on full-image/package work.
 
-| Workflow | Runner | What it does |
-|---|---|---|
-| `.github/workflows/build-image-hosted.yml` | **GitHub-hosted** `ubuntu-latest` (x64 runners expose `/dev/kvm`) | Boots a stock FreeBSD 15.0 BASIC-CLOUDINIT VM under KVM, shallow-clones `releng/15.0`, runs `bin/build-smolfire-vm.nu` inside, then runs the **size gate** and (amd64) the **KVM boot gate** on the runner and uploads the qcow2 as a workflow artifact. Dispatch with `arch: amd64` or `arch: aarch64` (aarch64 is cross-built; its boot gate needs ARM hardware — see `docs/BHYVE-GATE-AMD64.md`). |
-| `.github/workflows/build-image.yml` | self-hosted Linux/KVM runner | The original PATH-B TPM-image pipeline with a pre-staged src tree. |
+| Workflow | Role | Runner | What it does |
+|---|---|---|---|
+| `.github/workflows/smolfire.yml` | **Primary microVM CI** | **GitHub-hosted** `ubuntu-latest` (`/dev/kvm`) | Boots a stock FreeBSD 15.0 BASIC-CLOUDINIT VM under KVM, builds `bin/build-smolfire.sh` inside it, then gates the one-ELF artifact separately on **size**, **Firecracker network**, **Firecracker boot time**, **Firecracker shell**, and **QEMU `microvm`** compatibility. |
+| `.github/workflows/build-image-hosted.yml` | qcow2 compatibility CI | **GitHub-hosted** `ubuntu-latest` (`/dev/kvm`) | Boots a stock FreeBSD 15.0 BASIC-CLOUDINIT VM under KVM, shallow-clones `releng/15.0`, runs `bin/build-smolfire-vm.nu` inside, then runs the qcow2 **size gate** and (amd64) the **KVM boot gate** on the runner and uploads the qcow2 as a workflow artifact. Dispatch with `arch: amd64` or `arch: aarch64` (aarch64 is cross-built; its boot gate needs ARM hardware — see `docs/BHYVE-GATE-AMD64.md`). |
+| `.github/workflows/build-image.yml` | legacy/self-hosted qcow2 compatibility CI | self-hosted Linux/KVM runner | The original PATH-B TPM-image pipeline with a pre-staged src tree. |
 
 Hosted-runner caveats: buildworld at `-j4` inside the nested VM takes ~2.5–4 h
 (job timeout is set just under the 6 h ceiling); first runs of the cloud-init
@@ -105,7 +157,7 @@ nu bin/sizereport.nu smolfire-build-vm.log        # tables, largest first
 nu bin/sizereport.nu smolfire-build-vm.log --top 30
 ```
 
-## Partial runs
+## Partial runs (qcow2 compatibility path)
 
 If buildworld already completed and the obj tree is intact:
 
@@ -119,7 +171,7 @@ If you only want buildworld + buildkernel and not the image yet:
 sudo nu bin/build-smolfire-vm.nu --skip-release
 ```
 
-## amd64 cross-compile
+## amd64 cross-compile (qcow2 compatibility path)
 
 On an aarch64 host, build the amd64 image with:
 
@@ -129,7 +181,7 @@ sudo nu bin/build-smolfire-vm.nu --arch amd64
 
 This sets `TARGET=amd64 TARGET_ARCH=amd64` for all make invocations.
 
-## riscv64 (experimental)
+## riscv64 (experimental qcow2 compatibility path)
 
 > **EXPERIMENTAL — untested.** FreeBSD riscv64 is a **Tier 2** platform;
 > QEMU `virt` (plain rv64gc baseline) is the only supported-in-spirit

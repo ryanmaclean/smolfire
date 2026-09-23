@@ -1,5 +1,7 @@
 # smolFire lower-bound runtime and lineage architecture — 2026-09-23
 
+> Tracking umbrella: smolFire #78
+
 ## Goal
 
 Find the **smallest and fastest permissively licensed execution substrate** that can run agent work while making state transition, history, provenance, and lineage native enough that the same logic is not reimplemented in a queue, database, trace store, VCS, and filesystem.
@@ -289,7 +291,16 @@ smolFire:
 
 BOP:
 
-- #5 Evaluate Jev/System One as BOP's fast decision plane
+- ryanmaclean/bop#5 Evaluate Jev/System One as BOP's fast decision plane
+- ryanmaclean/bop#7 Filesystem-version/run identity interface
+
+Genoa:
+
+- ryanmaclean/genoa#1 Add smolFire / NetBSD MICROVM profiles and state-disk manifests
+
+Datadog:
+
+- smolFire #76 Publish/sync the lower-bound runtime Notebook payload
 
 ## Near-term execution order
 

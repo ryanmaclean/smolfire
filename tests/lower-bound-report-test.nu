@@ -6,7 +6,10 @@ def fail [msg: string] {
     exit 1
 }
 
-let raw = (^$nu.current-exe bin/lower-bound-report.nu --json | complete)
+const REPORT = path self | path dirname | path dirname | path join "bin" "lower-bound-report.nu"
+const DOC = path self | path dirname | path dirname | path join "docs" "lower-bound-rump-rumprun.json"
+
+let raw = (^$nu.current-exe $REPORT --from $DOC --json | complete)
 if $raw.exit_code != 0 {
     fail $"--json exited ($raw.exit_code): ($raw.stderr)"
 }
@@ -31,7 +34,7 @@ if $rumprun.build.state_disk_size_bytes != 67108864 {
     fail $"state_disk_size_bytes = ($rumprun.build.state_disk_size_bytes), want 67108864"
 }
 
-let md = (^$nu.current-exe bin/lower-bound-report.nu --markdown | complete)
+let md = (^$nu.current-exe $REPORT --from $DOC --markdown | complete)
 if $md.exit_code != 0 {
     fail $"--markdown exited ($md.exit_code): ($md.stderr)"
 }

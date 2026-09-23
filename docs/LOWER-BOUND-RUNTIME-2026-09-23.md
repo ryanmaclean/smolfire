@@ -8,9 +8,9 @@
 >
 > Tracking issue: [smolfire#76](https://github.com/ryanmaclean/smolfire/issues/76)
 >
-> Datadog notebook URL: _pending publish_
+> Datadog notebook URL: https://app.datadoghq.com/notebook/15638258
 >
-> Datadog notebook ID: _pending publish_
+> Datadog notebook ID: `15638258`
 
 ## Goal
 

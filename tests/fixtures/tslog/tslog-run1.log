@@ -1,0 +1,35 @@
+spawn /mnt/smolfire-ci/firecracker --no-api --config-file /mnt/smolfire-ci/fc-tslog.json
+Copyright (c) 1992-2025 The FreeBSD Project.
+SMOLFIRE_NET_OK net-123
+SMOLFIRE_READY
+
+TIME_TO_READY=600ms
+SMOLFIRE_TSLOG_META tsc_freq=1000000000 ncpu=1 ident=SMOLFIRE-TSLOG
+SMOLFIRE_TSLOG_BEGIN
+0xffffffff81e00000 100000000 ENTER hammer_time
+0xffffffff81e00000 130000000 ENTER init_TSC
+0xffffffff81e00000 150000000 EXIT init_TSC
+0xffffffff81e00000 160000000 EXIT hammer_time
+0xffffffff81e00000 170000000 ENTER mi_startup
+0xffffffff81e00000 180000000 ENTER SYSINIT vm_mem
+0xffffffff81e00000 200000000 EXIT SYSINIT vm_mem
+0xffffffff81e00000 210000000 ENTER SYSINIT configure1
+0xffffffff81e00000 220000000 ENTER device_attach vtnet0
+vtnet0: <VirtIO Networking Adapter> on virtio_mmio0
+0xffffffff81e00000 260000000 EXIT device_attach vtnet0
+0xffffffff81e00000 300000000 EXIT SYSINIT configure1
+0xfffff80003a1b000 320000000 THREAD init
+0xfffff80003a1b000 330000000 ENTER start_init
+0xfffff80003a1b000 340000000 ENTER vfs_mountroot
+0xfffff80003a1b000 380000000 EXIT vfs_mountroot
+0xfffff80003a1b000 400000000 EXIT start_init
+SMOLFIRE_TSLOG_END
+SMOLFIRE_TSLOG_USER_BEGIN
+1 0 320000000 0 "/sbin/init" "/sbin/init"
+2 1 410000000 0 "/bin/sh" "/etc/rc"
+3 2 420000000 440000000 "/rescue/hostname" "/rescue/hostname"
+9 2 480000000 500000000 "/rescue/echo" "/rescue/echo"
+SMOLFIRE_TSLOG_USER_END
+SMOLFIRE_TSLOG_DONE
+
+TSLOG_CAPTURE=ok

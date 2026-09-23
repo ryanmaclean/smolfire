@@ -1,10 +1,11 @@
 {
-  "project": "smolBSD coordinator",
-  "version": "1.1",
+  "project": "smolfire coordinator",
+  "version": "1.2",
   "branchName": "main",
   "qualityChecks": [
     "nu tests/mbox-parse-test.nu",
     "nu tests/coord-tick-test.nu",
+    "nu tests/coord-fsm-tests.nu",
     "sh tests/run-all.sh"
   ],
   "userStories": [
@@ -43,7 +44,7 @@
       "description": "As a maintainer, I need retries capped with backoff and escalation so blocked work does not loop forever.",
       "filesHint": [
         "bin/coord-tick.nu",
-        "tests/coord-fsm-tests.nu",
+        "tests/coord-escalate-test.nu",
         "docs/superpowers/specs/2026-04-30-mailbox-jec-handoff-design.md"
       ],
       "passes": false,
@@ -72,9 +73,9 @@
         "bin/coord-tick.nu",
         "tests/coord-fsm-tests.nu"
       ],
-      "passes": false,
+      "passes": true,
       "status": "passing",
-      "evidence": "coord-tick.nu emits log-event for every FSM transition"
+      "evidence": "coord-fsm-tests.nu 9/9 pass incl. determinism assertions; wired into run-all.sh and qualityChecks. coord-tick.nu routes every FSM transition/verdict through log-transition/log-verdict (single telemetry-record constructor, schema_version v1: schema_version,ts,event,state_from,state_to,task_id,verdict,attempt,reason,message_id). Tests 6-9 assert identical ordered columns per event kind, closed enums for state_from/state_to/verdict/reason, expected sequences for full-cycle/halt/fail-retry/escalate/malformed runs, and run-to-run equality modulo ts/message-id timestamps; renaming or reordering a field makes the gate exit 1."
     }
   ]
 }

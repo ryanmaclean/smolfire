@@ -1,0 +1,6 @@
+[   1.0000000] NetBSD 11.0 (MICROVM)
+booting prototype rootfs
+SMOLFIRE_NETBSD_READY
+SMOLFIRE_NETBSD_STATE_OK dev=ld0a mount=/state fs=lfs mode=rw
+SMOLFIRE_NETBSD_WORKLOAD verdict=pass fs=lfs ops=128 files=16 snapshots=2 fsync_p50_ms=1.7 dirty_replay=0
+TIME_TO_READY=73ms

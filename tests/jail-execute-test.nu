@@ -26,7 +26,9 @@ def make-temp-dir [] { ^mktemp -d | str trim }
 
 # Write the stub binaries into <tmp>/bin. Every stub appends "<name> <args>"
 # to $MOCK_LOG. Behaviour knobs (env): MOCK_JAIL_CREATE_FAIL, MOCK_JAIL_REMOVE_FAIL,
-# MOCK_RACCT (value of kern.racct.enable, default 1).
+# MOCK_RACCT (value of kern.racct.enable, default 1), MOCK_FREEBSD_VERSION_K
+# (value of `freebsd-version -k`, default a patched "15.0-RELEASE-p13"),
+# MOCK_MAC_DO_RULES (value of `security.mac.do.rules`, default a gid-pinned rule).
 def make-stubs [tmp: string, --no-mdo] {
     let bin = [$tmp "bin"] | path join
     mkdir $bin
@@ -65,6 +67,7 @@ exit 0
 case \"$2\" in
   kern.racct.enable\) echo \"${MOCK_RACCT:-1}\" ;;
   security.mac.do.enabled\) echo 1 ;;
+  security.mac.do.rules\) echo \"${MOCK_MAC_DO_RULES:-uid=1001>uid=0:gid=0}\" ;;
 esac
 exit 0
 "
@@ -73,6 +76,11 @@ exit 0
         umount: $"#!/bin/sh\n($log)\nexit 0\n"
         install: $"#!/bin/sh\n($log)\nexit 0\n"
         mdo:    $"#!/bin/sh\n($log)\n[ \"$1\" = -i ] && shift\nexec \"$@\"\n"
+        "freebsd-version": $"#!/bin/sh
+($log)
+echo \"${MOCK_FREEBSD_VERSION_K:-15.0-RELEASE-p13}\"
+exit 0
+"
     }
     for kv in ($stubs | transpose name body) {
         if $no_mdo and $kv.name == "mdo" { continue }
@@ -495,7 +503,10 @@ do {
     }
     assert equal $r.verdict "fail"
     assert ($r.error | str contains "mac_do")
-    assert equal (mock-log $tmp) []
+    # The read-only §3 preflight (freebsd-version -k, sysctl mac.do.rules) runs
+    # before the privilege check and is expected; nothing state-changing is.
+    let side_effects = mock-log $tmp | where {|l| not ($l | str starts-with "freebsd-version") and not ($l | str starts-with "sysctl") }
+    assert equal $side_effects [] "no jail/rctl/zfs/podman/mdo call, only read-only preflight probes"
     ^rm -rf $tmp
 }
 
@@ -677,6 +688,134 @@ do {
     assert ((do $idx "zfs clone") < (do $idx "install")) "after the clone"
     assert ((do $idx "install") < (do $idx "jail -c")) "before the jail starts"
     assert (not ((open --raw ([$tmp2 "last.conf"] | path join)) | str contains "resolv.conf")) "no mount for zfs"
+    ^rm -rf $tmp2
+}
+
+# ── FreeBSD-SA-26:59.mac_do (CVE-2026-58092) hardening ────────────────────────
+# A security.mac.do.rules entry without an explicit target gid can leave the
+# switched credential's primary gid at 0 on an unpatched host. §3 pins the
+# floor at 15.0-RELEASE-p13 / 15.1-RELEASE-p3 (also covers SA-26:25.thr and
+# SA-26:18.setcred) and every documented rule now names gid=.
+
+print "test 30: freebsd-version -k parsing and patch-floor comparison"
+do {
+    assert equal (parse-freebsd-version-k "15.0-RELEASE-p13") {ok: true, major: 15, minor: 0, patch: 13, raw: "15.0-RELEASE-p13", error: ""}
+    assert equal (parse-freebsd-version-k "15.1-RELEASE-p3").patch 3
+    assert equal (parse-freebsd-version-k "15.0-RELEASE").patch 0 "no -pN suffix means p0"
+    assert (not (parse-freebsd-version-k "15.0-CURRENT").ok) "non-RELEASE strings can't be trusted"
+    assert (not (parse-freebsd-version-k "garbage").ok)
+
+    assert (patch-level-ok? (parse-freebsd-version-k "15.0-RELEASE-p13")) "at the floor"
+    assert (patch-level-ok? (parse-freebsd-version-k "15.0-RELEASE-p20")) "above the floor"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "15.0-RELEASE-p12"))) "one below the floor"
+    assert (patch-level-ok? (parse-freebsd-version-k "15.1-RELEASE-p3")) "15.1 floor"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "15.1-RELEASE-p2"))) "15.1 below floor"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "14.3-RELEASE-p10"))) "an older branch is never the required floor"
+    assert (patch-level-ok? (parse-freebsd-version-k "15.2-RELEASE-p0")) "a branch newer than either advisory shipped against"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "not-a-version"))) "unparseable can't be confirmed patched"
+}
+
+print "test 31: preflight-patch-level — patched passes silently, unpatched refuses, override warns"
+do {
+    let patched = preflight-patch-level "15.0-RELEASE-p13" false
+    assert $patched.ok
+    assert equal $patched.error ""
+    assert equal $patched.warn ""
+
+    let refused = preflight-patch-level "15.0-RELEASE-p5" false
+    assert (not $refused.ok)
+    assert ($refused.error | str starts-with "jail executor requires a patched FreeBSD host") $"clear error: ($refused.error)"
+    assert ($refused.error | str contains "15.0-RELEASE-p5")
+    assert ($refused.error | str contains "SA-26:59")
+    assert ($refused.error | str contains "--allow-unpatched")
+
+    let overridden = preflight-patch-level "15.0-RELEASE-p5" true
+    assert $overridden.ok "override lets it through"
+    assert equal $overridden.error ""
+    assert ($overridden.warn | str contains "15.0-RELEASE-p5")
+    assert ($overridden.warn | str contains "allow-unpatched")
+
+    # result-exit maps both refusal shapes to exit 2, like the non-FreeBSD one
+    assert equal (result-exit {verdict: "fail", boot_sec: 0, outputs: [], error: $refused.error}) 2 "unpatched-host refusal exits 2"
+    assert equal (result-exit {verdict: "fail", boot_sec: 0, outputs: [], error: (host-check "linux").error}) 2 "non-FreeBSD refusal still exits 2"
+    assert equal (result-exit {verdict: "fail", boot_sec: 0, outputs: [], error: "some other failure"}) 1 "ordinary failures stay exit 1"
+    assert equal (result-exit {verdict: "pass", boot_sec: 1, outputs: []}) 0
+}
+
+print "test 32: mac_do rule gid= audit"
+do {
+    assert equal (mac-do-rules-missing-gid "") []
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0:gid=0") []
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0") ["uid=1001>uid=0"]
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0:gid=0,uid=1002>uid=0") ["uid=1002>uid=0"]
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0, uid=1002>gid=68") ["uid=1001>uid=0"] "only the first rule lacks gid="
+}
+
+print "test 33: patch-floor preflight wired into run-jail-task"
+do {
+    if $is_root { print "  (skipped as root: this case exercises the mdo hop)"; return }
+
+    # patched (default stub) → normal happy path, no warnings key at all
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let ok = with-stubs $tmp $bin {} {
+        run-jail-task "t-patched" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp) --salt "aaaaaa" --os freebsd
+    }
+    assert equal $ok.verdict "pass" $"patched host runs clean: ($ok | to nuon)"
+    assert (not ("warnings" in ($ok | columns))) "no warnings on a clean, patched host"
+    ^rm -rf $tmp
+
+    # unpatched, no override → refused before anything runs (exit 2 via result-exit)
+    let tmp2 = make-temp-dir
+    let bin2 = make-stubs $tmp2
+    let refused = with-stubs $tmp2 $bin2 {MOCK_FREEBSD_VERSION_K: "15.0-RELEASE-p5"} {
+        run-jail-task "t-unpatched" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp2) --salt "bbbbbb" --os freebsd
+    }
+    assert equal $refused.verdict "fail"
+    assert ($refused.error | str starts-with "jail executor requires a patched FreeBSD host") $"clear refusal: ($refused.error)"
+    assert ($refused.error | str contains "15.0-RELEASE-p5")
+    assert equal (result-exit $refused) 2 "refusal maps to exit 2"
+    assert equal ((mock-log $tmp2) | where {|l| $l | str starts-with "jail "} | length) 0 "no jail was ever created"
+    assert (not ((jr $tmp2) | path exists)) "no jail-root dir created"
+    ^rm -rf $tmp2
+
+    # unpatched, --allow-unpatched → proceeds, warning surfaces in the record
+    let tmp3 = make-temp-dir
+    let bin3 = make-stubs $tmp3
+    let overridden = with-stubs $tmp3 $bin3 {MOCK_FREEBSD_VERSION_K: "15.0-RELEASE-p5"} {
+        run-jail-task "t-override" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp3) --salt "cccccc" --os freebsd --allow-unpatched
+    }
+    assert equal $overridden.verdict "pass" $"override still runs: ($overridden | to nuon)"
+    assert ("warnings" in ($overridden | columns)) "override surfaces a warning"
+    assert (($overridden.warnings | any {|w| $w | str contains "15.0-RELEASE-p5"})) $"warning names the version: ($overridden.warnings)"
+    assert equal (result-exit $overridden) 0 "override still exits 0"
+    ^rm -rf $tmp3
+}
+
+print "test 34: gid-less mac_do rule warns, does not refuse"
+do {
+    if $is_root { print "  (skipped as root: this case exercises the mdo hop)"; return }
+
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let r = with-stubs $tmp $bin {MOCK_MAC_DO_RULES: "uid=1001>uid=0"} {
+        run-jail-task "t-gidless" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp) --salt "dddddd" --os freebsd
+    }
+    assert equal $r.verdict "pass" $"gid-less rule warns, doesn't block: ($r | to nuon)"
+    assert ("warnings" in ($r | columns)) "missing-gid warning surfaces"
+    assert (($r.warnings | any {|w| $w | str contains "gid="})) $"names the gap: ($r.warnings)"
+    assert (($r.warnings | any {|w| $w | str contains "uid=1001>uid=0"})) "names the offending rule"
+    assert (($r.warnings | any {|w| $w | str contains "SA-26:59"})) "cites the advisory"
+    ^rm -rf $tmp
+
+    # a rule that already names gid= (the default stub value) produces no warning
+    let tmp2 = make-temp-dir
+    let bin2 = make-stubs $tmp2
+    let clean = with-stubs $tmp2 $bin2 {} {
+        run-jail-task "t-gidfull" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp2) --salt "eeeeee" --os freebsd
+    }
+    assert equal $clean.verdict "pass"
+    assert (not ("warnings" in ($clean | columns))) "no warning when every rule names gid="
     ^rm -rf $tmp2
 }
 

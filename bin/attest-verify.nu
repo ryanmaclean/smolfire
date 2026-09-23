@@ -139,17 +139,33 @@ def verify-signature [
 # Mirrors the exact guest commands in bin/guest-attest.nu:
 #   guest: tpm2_createak -C <primary> -g sha256 -G ecc -c ak.ctx -u ak.pub
 #          tpm2_quote -c ak.ctx -l sha256:0,7 -q $nonce -m quote.msg -s quote.sig
-#   here:  tpm2_checkquote -u ak.pub -m quote.msg -s quote.sig -f plain -g sha256 -q <hex-nonce>
+#   here:  tpm2_checkquote -u ak.pub -m quote.msg -s quote.sig -f tss -g sha256 -q <hex-nonce>
+# Format-flag semantics (tpm2-tools): tpm2_quote -s writes the signature in
+# the DEFAULT tss (TPMT_SIGNATURE) format — the guest quote step passes no -f
+# flag, so quote.sig is tss. tpm2_checkquote -f must therefore be `tss` to
+# parse it; `-f plain` expects a raw r||s blob, fails parsing, and would
+# wrongly fall through to the RSA-only openssl path (which correctly
+# rejects ECC quotes). Explicit `-f tss` (not dropping the flag) so the
+# expected format is pinned at the call site.
 # Exit 0 = valid. Missing binary or any tool error -> false (caller falls
-# back to the openssl RSA-fixture path). Never throws.
+# back to the openssl RSA-fixture path). Never throws. On tool failure the
+# trimmed stderr is logged so the next CI failure is diagnosable without a
+# trace run.
 def verify-with-tpm2-tools [quote_file: string, sig_file: string, ak_file: string, nonce: string] {
     if (which tpm2_checkquote | is-empty) {
         return false
     }
     try {
-        let result = (^tpm2_checkquote -u $ak_file -m $quote_file -s $sig_file -f plain -g sha256 -q $nonce | complete)
+        let result = (^tpm2_checkquote -u $ak_file -m $quote_file -s $sig_file -f tss -g sha256 -q $nonce | complete)
+        if $result.exit_code != 0 {
+            let trimmed = ($result.stderr | str trim)
+            log $"verifier: tpm2_checkquote failed \(exit=($result.exit_code)\): ($trimmed)"
+        }
         $result.exit_code == 0
-    } catch { false }
+    } catch {|err|
+        log $"verifier: tpm2_checkquote error: ($err.msg)"
+        false
+    }
 }
 
 # Verify using openssl RSA signature (RSA TEST FIXTURES only).
@@ -230,17 +246,24 @@ def emit-attestation [
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 # Compute SHA-256 fingerprint of AK public key.
+# Portable hex via `openssl dgst -sha256` (default output already contains
+# the hex digest, e.g. `SHA2-256(stdin)= <hex>`; take the last field with
+# awk — same idiom as compute-pcr-digest in bin/guest-attest.nu, works on
+# stock ubuntu-latest and FreeBSD openssl). NOTE: `openssl enc` has NO -hex
+# flag, so no `enc` step here.
 def ak-fingerprint [ak_public_b64: string] {
     try {
-        let fp = (echo $ak_public_b64 | ^base64 -d | ^openssl dgst -sha256 -binary | ^openssl enc -hex 2>/dev/null | str trim)
-        $fp
+        let fp = (echo $ak_public_b64 | ^base64 -d | ^openssl dgst -sha256 | ^awk '{print $NF}' | str trim | str lowercase)
+        if ($fp | is-empty) { "unknown" } else { $fp }
     } catch { "unknown" }
 }
 
 # Compute SHA-256 fingerprint of a raw AK public key file.
+# Same portable `dgst -sha256 | awk '{print $NF}'` hex idiom as above.
 def ak-fingerprint-file [ak_path: string] {
     try {
-        ^openssl dgst -sha256 -binary $ak_path | ^openssl enc -hex 2>/dev/null | str trim
+        let fp = (^openssl dgst -sha256 $ak_path | ^awk '{print $NF}' | str trim | str lowercase)
+        if ($fp | is-empty) { "unknown" } else { $fp }
     } catch { "unknown" }
 }
 

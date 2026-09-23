@@ -85,6 +85,9 @@ jobs:
       - name: smolfire rootfs assembly test
         run: nu tests/smolfire-rootfs-test.nu
 
+      - name: tslog-phases aggregator test
+        run: nu tests/tslog-phases-test.nu
+
       - name: spool-archive tests
         run: nu tests/spool-archive-test.nu
 

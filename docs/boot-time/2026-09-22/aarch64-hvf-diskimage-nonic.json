@@ -1,0 +1,129 @@
+{
+  "schema": "smolfire.boot-phases/v1",
+  "method": "serial-timestamp",
+  "env": {
+    "host": "MacBookPro18,4",
+    "cpu": "Apple M1 Max",
+    "macos": "26.6.2",
+    "qemu": "QEMU emulator version 10.2.1",
+    "accel": "hvf",
+    "mem": "256M",
+    "cpus": 2,
+    "nic": "none",
+    "poll_ms": 10,
+    "loadavg_before": "{ 275.95 284.06 250.05 }",
+    "loadavg_after": "{ 242.33 275.49 248.14 }",
+    "date": "2026-09-23T00:03:56-0700"
+  },
+  "image": {
+    "path": "build/FreeBSD-15-aarch64-smolbsd.qcow2 -> APFS clone after one clean ACPI shutdown (clears the dirty-fs fsck); booted snapshot=on",
+    "sha256": "f7d560db57c0e9f9453a199841aaf436645b6023678f07068496d55fa7983b57",
+    "source_sha256": "6d2a81cf448d596ac40a0e741eb76cfbc764193b413a7996126ff07379d0da3b"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "timed_out": false,
+      "markers_ms": {
+        "first_byte": 129,
+        "loader": 5368,
+        "kernel": 5506,
+        "root_mount": 5575,
+        "rc": 5741,
+        "login": 10139
+      },
+      "phases_ms": {
+        "firmware": 5368,
+        "loader": 138,
+        "kernel": 69,
+        "mount_to_rc": 166,
+        "rc_to_login": 4398,
+        "total": 10139
+      }
+    },
+    {
+      "run": 2,
+      "timed_out": false,
+      "markers_ms": {
+        "first_byte": 89,
+        "loader": 5351,
+        "kernel": 5404,
+        "root_mount": 5456,
+        "rc": 5583,
+        "login": 7242
+      },
+      "phases_ms": {
+        "firmware": 5351,
+        "loader": 53,
+        "kernel": 52,
+        "mount_to_rc": 127,
+        "rc_to_login": 1659,
+        "total": 7242
+      }
+    },
+    {
+      "run": 3,
+      "timed_out": false,
+      "markers_ms": {
+        "first_byte": 72,
+        "loader": 5251,
+        "kernel": 5479,
+        "root_mount": 5671,
+        "rc": 6284,
+        "login": 12357
+      },
+      "phases_ms": {
+        "firmware": 5251,
+        "loader": 228,
+        "kernel": 192,
+        "mount_to_rc": 613,
+        "rc_to_login": 6073,
+        "total": 12357
+      }
+    }
+  ],
+  "summary": [
+    {
+      "phase": "firmware",
+      "n": 3,
+      "median_ms": 5351,
+      "min_ms": 5251,
+      "max_ms": 5368
+    },
+    {
+      "phase": "loader",
+      "n": 3,
+      "median_ms": 138,
+      "min_ms": 53,
+      "max_ms": 228
+    },
+    {
+      "phase": "kernel",
+      "n": 3,
+      "median_ms": 69,
+      "min_ms": 52,
+      "max_ms": 192
+    },
+    {
+      "phase": "mount_to_rc",
+      "n": 3,
+      "median_ms": 166,
+      "min_ms": 127,
+      "max_ms": 613
+    },
+    {
+      "phase": "rc_to_login",
+      "n": 3,
+      "median_ms": 4398,
+      "min_ms": 1659,
+      "max_ms": 6073
+    },
+    {
+      "phase": "total",
+      "n": 3,
+      "median_ms": 10139,
+      "min_ms": 7242,
+      "max_ms": 12357
+    }
+  ]
+}

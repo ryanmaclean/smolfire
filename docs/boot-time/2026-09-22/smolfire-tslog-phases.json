@@ -1,0 +1,1529 @@
+{
+  "schema": "smolfire.tslog-phases/v1",
+  "method": "TSLOG (kernel debug.tslog + debug.tslog_user) + expect wall clock",
+  "release_wall_to_ready_ms": {
+    "n": 3,
+    "median": 476.0,
+    "min": 399.0,
+    "max": 477.0,
+    "values": [
+      477,
+      476,
+      399
+    ]
+  },
+  "phases": [
+    {
+      "phase": "vmm_to_vcpu",
+      "n": 3,
+      "median": 5.0,
+      "min": 3.8,
+      "max": 5.7
+    },
+    {
+      "phase": "vcpu_to_kernel",
+      "n": 3,
+      "median": 5.8,
+      "min": 5.8,
+      "max": 6.2
+    },
+    {
+      "phase": "early_kernel",
+      "n": 3,
+      "median": 5.7,
+      "min": 5.3,
+      "max": 6.3
+    },
+    {
+      "phase": "sysinit_devices",
+      "n": 3,
+      "median": 440.3,
+      "min": 410.3,
+      "max": 452.7
+    },
+    {
+      "phase": "root_mount",
+      "n": 3,
+      "median": 2.6,
+      "min": 2.4,
+      "max": 2.7
+    },
+    {
+      "phase": "start_init_other",
+      "n": 3,
+      "median": 0.5,
+      "min": 0.5,
+      "max": 0.5
+    },
+    {
+      "phase": "init_rc_to_ready",
+      "n": 3,
+      "median": 33.1,
+      "min": 30.0,
+      "max": 34.0
+    },
+    {
+      "phase": "wall_to_ready",
+      "n": 3,
+      "median": 494.0,
+      "min": 464.0,
+      "max": 501.0
+    },
+    {
+      "phase": "kernel_first_to_ready",
+      "n": 3,
+      "median": 482.9,
+      "min": 452.5,
+      "max": 491.4
+    }
+  ],
+  "top_sysinit_median": [
+    {
+      "name": "clocks",
+      "runs": 3,
+      "median_incl_ms": 160.1
+    },
+    {
+      "name": "cpu",
+      "runs": 3,
+      "median_incl_ms": 143.6
+    },
+    {
+      "name": "configure2",
+      "runs": 3,
+      "median_incl_ms": 84.2
+    },
+    {
+      "name": "version",
+      "runs": 3,
+      "median_incl_ms": 11.1
+    },
+    {
+      "name": "announce",
+      "runs": 3,
+      "median_incl_ms": 7.6
+    },
+    {
+      "name": "stack_chk",
+      "runs": 3,
+      "median_incl_ms": 6.5
+    },
+    {
+      "name": "apic_setup_io",
+      "runs": 3,
+      "median_incl_ms": 5.3
+    },
+    {
+      "name": "rdseedmodule",
+      "runs": 3,
+      "median_incl_ms": 4.2
+    },
+    {
+      "name": "apic_setup_local",
+      "runs": 3,
+      "median_incl_ms": 2.9
+    },
+    {
+      "name": "trademark",
+      "runs": 3,
+      "median_incl_ms": 2.5
+    }
+  ],
+  "runs": [
+    {
+      "file": "tslog-run1.log",
+      "tsc_freq": 2445431964,
+      "records": 9086,
+      "rejected_lines": 0,
+      "epoch_vm_relative": true,
+      "phases_ms": {
+        "vmm_to_vcpu": 3.8,
+        "vcpu_to_kernel": 5.8,
+        "early_kernel": 5.7,
+        "sysinit_devices": 452.7,
+        "root_mount": 2.6,
+        "start_init_other": 0.5,
+        "init_rc_to_ready": 30.0,
+        "wall_to_ready": 501.0,
+        "kernel_first_to_ready": 491.4
+      },
+      "top_sysinit": [
+        {
+          "name": "clocks",
+          "incl_ms": 172.5,
+          "self_ms": 0.1
+        },
+        {
+          "name": "cpu",
+          "incl_ms": 143.6,
+          "self_ms": 0.1
+        },
+        {
+          "name": "configure2",
+          "incl_ms": 84.2,
+          "self_ms": 0.0
+        },
+        {
+          "name": "version",
+          "incl_ms": 11.1,
+          "self_ms": 0.0
+        },
+        {
+          "name": "announce",
+          "incl_ms": 7.6,
+          "self_ms": 0.0
+        },
+        {
+          "name": "stack_chk",
+          "incl_ms": 6.5,
+          "self_ms": 0.0
+        },
+        {
+          "name": "apic_setup_io",
+          "incl_ms": 5.3,
+          "self_ms": 1.6
+        },
+        {
+          "name": "rdseedmodule",
+          "incl_ms": 4.2,
+          "self_ms": 0.0
+        },
+        {
+          "name": "apic_setup_local",
+          "incl_ms": 2.9,
+          "self_ms": 0.0
+        },
+        {
+          "name": "trademark",
+          "incl_ms": 2.5,
+          "self_ms": 0.0
+        },
+        {
+          "name": "random_devicemodule",
+          "incl_ms": 1.7,
+          "self_ms": 0.0
+        },
+        {
+          "name": "timecounter",
+          "incl_ms": 1.4,
+          "self_ms": 0.0
+        }
+      ],
+      "top_self": [
+        {
+          "name": "clockcalib",
+          "parent": "SYSINIT clocks",
+          "incl_ms": 159.4,
+          "self_ms": 159.4
+        },
+        {
+          "name": "DELAY",
+          "parent": "SYSINIT cpu",
+          "incl_ms": 1e+2,
+          "self_ms": 1e+2
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 11.6,
+          "self_ms": 11.6
+        },
+        {
+          "name": "clockcalib",
+          "parent": "SYSINIT clocks",
+          "incl_ms": 10.6,
+          "self_ms": 10.6
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 9.9,
+          "self_ms": 9.9
+        },
+        {
+          "name": "DEVICE_ATTACH acpi",
+          "parent": "DEVICE_ATTACH nexus",
+          "incl_ms": 60.5,
+          "self_ms": 9.9
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 9.1,
+          "self_ms": 9.1
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.4,
+          "self_ms": 7.8
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.1,
+          "self_ms": 7.6
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.1,
+          "self_ms": 7.6
+        },
+        {
+          "name": "_vprintf",
+          "parent": "SYSINIT announce",
+          "incl_ms": 7.6,
+          "self_ms": 7.6
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.4,
+          "self_ms": 7.5
+        }
+      ],
+      "top_self_by_name": [
+        {
+          "name": "clockcalib",
+          "calls": 2,
+          "self_ms": 170.0,
+          "incl_ms": 170.0
+        },
+        {
+          "name": "_vprintf",
+          "calls": 106,
+          "self_ms": 126.5,
+          "incl_ms": 126.5
+        },
+        {
+          "name": "DELAY",
+          "calls": 17,
+          "self_ms": 101.5,
+          "incl_ms": 101.5
+        },
+        {
+          "name": "_sleep",
+          "calls": 686,
+          "self_ms": 64.9,
+          "incl_ms": 64.9
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "calls": 8,
+          "self_ms": 30.7,
+          "incl_ms": 37.2
+        },
+        {
+          "name": "DEVICE_ATTACH acpi",
+          "calls": 1,
+          "self_ms": 9.9,
+          "incl_ms": 60.5
+        },
+        {
+          "name": "keg_alloc_slab",
+          "calls": 1694,
+          "self_ms": 6.9,
+          "incl_ms": 7.1
+        },
+        {
+          "name": "DEVICE_ATTACH nexus",
+          "calls": 1,
+          "self_ms": 6.1,
+          "incl_ms": 84.2
+        },
+        {
+          "name": "DEVICE_ATTACH kvmclock",
+          "calls": 1,
+          "self_ms": 2.7,
+          "incl_ms": 5.2
+        },
+        {
+          "name": "DEVICE_PROBE virtio_mmio",
+          "calls": 6,
+          "self_ms": 1.8,
+          "incl_ms": 1.8
+        },
+        {
+          "name": "DEVICE_ATTACH virtio_mmio",
+          "calls": 1,
+          "self_ms": 1.7,
+          "incl_ms": 10.5
+        },
+        {
+          "name": "SYSINIT apic_setup_io",
+          "calls": 1,
+          "self_ms": 1.6,
+          "incl_ms": 5.3
+        },
+        {
+          "name": "DEVICE_ATTACH uart",
+          "calls": 4,
+          "self_ms": 1.4,
+          "incl_ms": 2.8
+        },
+        {
+          "name": "xen_pvh_parse_preload_data",
+          "calls": 1,
+          "self_ms": 1.4,
+          "incl_ms": 1.4
+        },
+        {
+          "name": "vm_phys_finish_init",
+          "calls": 61,
+          "self_ms": 1.1,
+          "incl_ms": 1.1
+        }
+      ],
+      "user_procs": [
+        {
+          "pid": 10,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 194.2,
+          "dur_ms": null
+        },
+        {
+          "pid": 1,
+          "ppid": 0,
+          "exec": "/sbin/init",
+          "start_ms": 194.3,
+          "dur_ms": null
+        },
+        {
+          "pid": 11,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 194.3,
+          "dur_ms": null
+        },
+        {
+          "pid": 12,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 199.7,
+          "dur_ms": null
+        },
+        {
+          "pid": 2,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 199.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 13,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 201.7,
+          "dur_ms": null
+        },
+        {
+          "pid": 3,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 201.9,
+          "dur_ms": null
+        },
+        {
+          "pid": 4,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 461.3,
+          "dur_ms": null
+        },
+        {
+          "pid": 5,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 461.4,
+          "dur_ms": null
+        },
+        {
+          "pid": 6,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 461.4,
+          "dur_ms": null
+        },
+        {
+          "pid": 7,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 461.4,
+          "dur_ms": null
+        },
+        {
+          "pid": 8,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 461.5,
+          "dur_ms": null
+        },
+        {
+          "pid": 9,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 461.5,
+          "dur_ms": null
+        },
+        {
+          "pid": 14,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 461.5,
+          "dur_ms": null
+        },
+        {
+          "pid": 15,
+          "ppid": 1,
+          "exec": "/etc/rc",
+          "start_ms": 471.2,
+          "dur_ms": null
+        },
+        {
+          "pid": 16,
+          "ppid": 15,
+          "exec": "hostname",
+          "start_ms": 476.0,
+          "dur_ms": 1.1
+        },
+        {
+          "pid": 17,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 477.2,
+          "dur_ms": 2.3
+        },
+        {
+          "pid": 18,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 479.6,
+          "dur_ms": 0.8
+        },
+        {
+          "pid": 19,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 480.5,
+          "dur_ms": 0.5
+        },
+        {
+          "pid": 20,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 481.1,
+          "dur_ms": 0.4
+        },
+        {
+          "pid": 21,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 481.5,
+          "dur_ms": 9.9
+        },
+        {
+          "pid": 22,
+          "ppid": 15,
+          "exec": "route",
+          "start_ms": 491.5,
+          "dur_ms": 0.6
+        },
+        {
+          "pid": 23,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 492.1,
+          "dur_ms": 0.5
+        },
+        {
+          "pid": 24,
+          "ppid": 15,
+          "exec": "fetch",
+          "start_ms": 492.7,
+          "dur_ms": 2.2
+        },
+        {
+          "pid": 25,
+          "ppid": 15,
+          "exec": "/rescue/echo",
+          "start_ms": 496.1,
+          "dur_ms": 1.1
+        },
+        {
+          "pid": 26,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 497.3,
+          "dur_ms": 0.5
+        },
+        {
+          "pid": 27,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 497.9,
+          "dur_ms": 0.4
+        },
+        {
+          "pid": 28,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 498.3,
+          "dur_ms": 0.4
+        },
+        {
+          "pid": 29,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 501.9,
+          "dur_ms": 14261.7
+        },
+        {
+          "pid": 30,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 14765.2,
+          "dur_ms": null
+        },
+        {
+          "pid": 31,
+          "ppid": 15,
+          "exec": "sed",
+          "start_ms": 14765.8,
+          "dur_ms": null
+        }
+      ]
+    },
+    {
+      "file": "tslog-run2.log",
+      "tsc_freq": 2445432027,
+      "records": 9086,
+      "rejected_lines": 0,
+      "epoch_vm_relative": true,
+      "phases_ms": {
+        "vmm_to_vcpu": 5.0,
+        "vcpu_to_kernel": 6.2,
+        "early_kernel": 6.3,
+        "sysinit_devices": 440.3,
+        "root_mount": 2.7,
+        "start_init_other": 0.5,
+        "init_rc_to_ready": 33.1,
+        "wall_to_ready": 494.0,
+        "kernel_first_to_ready": 482.9
+      },
+      "top_sysinit": [
+        {
+          "name": "clocks",
+          "incl_ms": 160.1,
+          "self_ms": 0.1
+        },
+        {
+          "name": "cpu",
+          "incl_ms": 143.6,
+          "self_ms": 0.1
+        },
+        {
+          "name": "configure2",
+          "incl_ms": 84.8,
+          "self_ms": 0.0
+        },
+        {
+          "name": "version",
+          "incl_ms": 11.5,
+          "self_ms": 0.0
+        },
+        {
+          "name": "announce",
+          "incl_ms": 7.7,
+          "self_ms": 0.0
+        },
+        {
+          "name": "stack_chk",
+          "incl_ms": 6.1,
+          "self_ms": 0.0
+        },
+        {
+          "name": "apic_setup_io",
+          "incl_ms": 5.1,
+          "self_ms": 1.6
+        },
+        {
+          "name": "rdseedmodule",
+          "incl_ms": 3.9,
+          "self_ms": 0.0
+        },
+        {
+          "name": "apic_setup_local",
+          "incl_ms": 2.7,
+          "self_ms": 0.0
+        },
+        {
+          "name": "trademark",
+          "incl_ms": 2.5,
+          "self_ms": 0.0
+        },
+        {
+          "name": "timecounter",
+          "incl_ms": 1.5,
+          "self_ms": 0.0
+        },
+        {
+          "name": "vm_mem",
+          "incl_ms": 1.4,
+          "self_ms": 1.1
+        }
+      ],
+      "top_self": [
+        {
+          "name": "clockcalib",
+          "parent": "SYSINIT clocks",
+          "incl_ms": 155.2,
+          "self_ms": 155.2
+        },
+        {
+          "name": "DELAY",
+          "parent": "SYSINIT cpu",
+          "incl_ms": 1e+2,
+          "self_ms": 1e+2
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 12.7,
+          "self_ms": 12.7
+        },
+        {
+          "name": "DEVICE_ATTACH acpi",
+          "parent": "DEVICE_ATTACH nexus",
+          "incl_ms": 63.0,
+          "self_ms": 10.3
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 10.0,
+          "self_ms": 10.0
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 9.4,
+          "self_ms": 9.4
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.8,
+          "self_ms": 8.3
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.3,
+          "self_ms": 7.9
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.8,
+          "self_ms": 7.9
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.3,
+          "self_ms": 7.7
+        },
+        {
+          "name": "_vprintf",
+          "parent": "SYSINIT announce",
+          "incl_ms": 7.7,
+          "self_ms": 7.7
+        },
+        {
+          "name": "_vprintf",
+          "parent": "SYSINIT version",
+          "incl_ms": 7.1,
+          "self_ms": 7.1
+        }
+      ],
+      "top_self_by_name": [
+        {
+          "name": "clockcalib",
+          "calls": 2,
+          "self_ms": 157.7,
+          "incl_ms": 157.7
+        },
+        {
+          "name": "_vprintf",
+          "calls": 106,
+          "self_ms": 125.0,
+          "incl_ms": 125.0
+        },
+        {
+          "name": "DELAY",
+          "calls": 17,
+          "self_ms": 101.5,
+          "incl_ms": 101.5
+        },
+        {
+          "name": "_sleep",
+          "calls": 686,
+          "self_ms": 72.9,
+          "incl_ms": 72.9
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "calls": 8,
+          "self_ms": 32.0,
+          "incl_ms": 38.5
+        },
+        {
+          "name": "DEVICE_ATTACH acpi",
+          "calls": 1,
+          "self_ms": 10.3,
+          "incl_ms": 63.0
+        },
+        {
+          "name": "keg_alloc_slab",
+          "calls": 1694,
+          "self_ms": 7.4,
+          "incl_ms": 7.6
+        },
+        {
+          "name": "DEVICE_ATTACH nexus",
+          "calls": 1,
+          "self_ms": 5.3,
+          "incl_ms": 84.8
+        },
+        {
+          "name": "DEVICE_ATTACH kvmclock",
+          "calls": 1,
+          "self_ms": 2.6,
+          "incl_ms": 4.8
+        },
+        {
+          "name": "DEVICE_PROBE virtio_mmio",
+          "calls": 6,
+          "self_ms": 2.0,
+          "incl_ms": 2.0
+        },
+        {
+          "name": "SYSINIT apic_setup_io",
+          "calls": 1,
+          "self_ms": 1.6,
+          "incl_ms": 5.1
+        },
+        {
+          "name": "xen_pvh_parse_preload_data",
+          "calls": 1,
+          "self_ms": 1.6,
+          "incl_ms": 1.6
+        },
+        {
+          "name": "DEVICE_ATTACH uart",
+          "calls": 4,
+          "self_ms": 1.5,
+          "incl_ms": 2.8
+        },
+        {
+          "name": "DEVICE_ATTACH virtio_mmio",
+          "calls": 1,
+          "self_ms": 1.5,
+          "incl_ms": 9.9
+        },
+        {
+          "name": "vm_phys_finish_init",
+          "calls": 61,
+          "self_ms": 1.2,
+          "incl_ms": 1.2
+        }
+      ],
+      "user_procs": [
+        {
+          "pid": 10,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 195.0,
+          "dur_ms": null
+        },
+        {
+          "pid": 1,
+          "ppid": 0,
+          "exec": "/sbin/init",
+          "start_ms": 195.2,
+          "dur_ms": null
+        },
+        {
+          "pid": 11,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 195.2,
+          "dur_ms": null
+        },
+        {
+          "pid": 12,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 200.5,
+          "dur_ms": null
+        },
+        {
+          "pid": 2,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 200.5,
+          "dur_ms": null
+        },
+        {
+          "pid": 13,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 202.0,
+          "dur_ms": null
+        },
+        {
+          "pid": 3,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 202.1,
+          "dur_ms": null
+        },
+        {
+          "pid": 4,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 449.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 5,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 449.9,
+          "dur_ms": null
+        },
+        {
+          "pid": 6,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 449.9,
+          "dur_ms": null
+        },
+        {
+          "pid": 7,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 449.9,
+          "dur_ms": null
+        },
+        {
+          "pid": 8,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 450.0,
+          "dur_ms": null
+        },
+        {
+          "pid": 9,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 450.0,
+          "dur_ms": null
+        },
+        {
+          "pid": 14,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 450.0,
+          "dur_ms": null
+        },
+        {
+          "pid": 15,
+          "ppid": 1,
+          "exec": "/etc/rc",
+          "start_ms": 459.9,
+          "dur_ms": null
+        },
+        {
+          "pid": 16,
+          "ppid": 15,
+          "exec": "hostname",
+          "start_ms": 464.8,
+          "dur_ms": 1.1
+        },
+        {
+          "pid": 17,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 466.0,
+          "dur_ms": 2.9
+        },
+        {
+          "pid": 18,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 469.0,
+          "dur_ms": 1.1
+        },
+        {
+          "pid": 19,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 470.2,
+          "dur_ms": 0.7
+        },
+        {
+          "pid": 20,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 471.0,
+          "dur_ms": 1.2
+        },
+        {
+          "pid": 21,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 472.2,
+          "dur_ms": 10.0
+        },
+        {
+          "pid": 22,
+          "ppid": 15,
+          "exec": "route",
+          "start_ms": 482.3,
+          "dur_ms": 0.6
+        },
+        {
+          "pid": 23,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 482.9,
+          "dur_ms": 0.9
+        },
+        {
+          "pid": 24,
+          "ppid": 15,
+          "exec": "fetch",
+          "start_ms": 483.9,
+          "dur_ms": 2.2
+        },
+        {
+          "pid": 25,
+          "ppid": 15,
+          "exec": "/rescue/echo",
+          "start_ms": 487.2,
+          "dur_ms": 1.8
+        },
+        {
+          "pid": 26,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 489.1,
+          "dur_ms": 0.7
+        },
+        {
+          "pid": 27,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 489.9,
+          "dur_ms": 0.5
+        },
+        {
+          "pid": 28,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 490.4,
+          "dur_ms": 1.2
+        },
+        {
+          "pid": 29,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 494.7,
+          "dur_ms": 13630.6
+        },
+        {
+          "pid": 30,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 14127.0,
+          "dur_ms": null
+        },
+        {
+          "pid": 31,
+          "ppid": 15,
+          "exec": "sed",
+          "start_ms": 14127.5,
+          "dur_ms": null
+        }
+      ]
+    },
+    {
+      "file": "tslog-run3.log",
+      "tsc_freq": 2445430184,
+      "records": 9086,
+      "rejected_lines": 0,
+      "epoch_vm_relative": true,
+      "phases_ms": {
+        "vmm_to_vcpu": 5.7,
+        "vcpu_to_kernel": 5.8,
+        "early_kernel": 5.3,
+        "sysinit_devices": 410.3,
+        "root_mount": 2.4,
+        "start_init_other": 0.5,
+        "init_rc_to_ready": 34.0,
+        "wall_to_ready": 464.0,
+        "kernel_first_to_ready": 452.5
+      },
+      "top_sysinit": [
+        {
+          "name": "cpu",
+          "incl_ms": 145.3,
+          "self_ms": 0.1
+        },
+        {
+          "name": "clocks",
+          "incl_ms": 128.7,
+          "self_ms": 0.1
+        },
+        {
+          "name": "configure2",
+          "incl_ms": 84.1,
+          "self_ms": 0.0
+        },
+        {
+          "name": "version",
+          "incl_ms": 11.1,
+          "self_ms": 0.0
+        },
+        {
+          "name": "stack_chk",
+          "incl_ms": 6.7,
+          "self_ms": 0.0
+        },
+        {
+          "name": "announce",
+          "incl_ms": 6.7,
+          "self_ms": 0.0
+        },
+        {
+          "name": "apic_setup_io",
+          "incl_ms": 5.5,
+          "self_ms": 1.8
+        },
+        {
+          "name": "rdseedmodule",
+          "incl_ms": 4.2,
+          "self_ms": 0.0
+        },
+        {
+          "name": "apic_setup_local",
+          "incl_ms": 3.1,
+          "self_ms": 0.0
+        },
+        {
+          "name": "trademark",
+          "incl_ms": 2.5,
+          "self_ms": 0.0
+        },
+        {
+          "name": "random_devicemodule",
+          "incl_ms": 1.8,
+          "self_ms": 0.0
+        },
+        {
+          "name": "timecounter",
+          "incl_ms": 1.4,
+          "self_ms": 0.0
+        }
+      ],
+      "top_self": [
+        {
+          "name": "clockcalib",
+          "parent": "SYSINIT clocks",
+          "incl_ms": 125.6,
+          "self_ms": 125.6
+        },
+        {
+          "name": "DELAY",
+          "parent": "SYSINIT cpu",
+          "incl_ms": 1e+2,
+          "self_ms": 1e+2
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 12.6,
+          "self_ms": 12.6
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 10.6,
+          "self_ms": 10.6
+        },
+        {
+          "name": "_sleep",
+          "parent": "",
+          "incl_ms": 9.6,
+          "self_ms": 9.6
+        },
+        {
+          "name": "DEVICE_ATTACH acpi",
+          "parent": "DEVICE_ATTACH nexus",
+          "incl_ms": 60.0,
+          "self_ms": 9.6
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.1,
+          "self_ms": 7.7
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.2,
+          "self_ms": 7.7
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.2,
+          "self_ms": 7.6
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "parent": "DEVICE_ATTACH acpi",
+          "incl_ms": 9.6,
+          "self_ms": 7.6
+        },
+        {
+          "name": "_vprintf",
+          "parent": "SYSINIT version",
+          "incl_ms": 6.8,
+          "self_ms": 6.8
+        },
+        {
+          "name": "_vprintf",
+          "parent": "SYSINIT stack_chk",
+          "incl_ms": 6.7,
+          "self_ms": 6.7
+        }
+      ],
+      "top_self_by_name": [
+        {
+          "name": "clockcalib",
+          "calls": 2,
+          "self_ms": 126.5,
+          "incl_ms": 126.5
+        },
+        {
+          "name": "_vprintf",
+          "calls": 106,
+          "self_ms": 126.3,
+          "incl_ms": 126.3
+        },
+        {
+          "name": "DELAY",
+          "calls": 17,
+          "self_ms": 101.5,
+          "incl_ms": 101.5
+        },
+        {
+          "name": "_sleep",
+          "calls": 686,
+          "self_ms": 74.9,
+          "incl_ms": 74.9
+        },
+        {
+          "name": "DEVICE_PROBE uart",
+          "calls": 8,
+          "self_ms": 30.8,
+          "incl_ms": 37.2
+        },
+        {
+          "name": "DEVICE_ATTACH acpi",
+          "calls": 1,
+          "self_ms": 9.6,
+          "incl_ms": 60.0
+        },
+        {
+          "name": "keg_alloc_slab",
+          "calls": 1694,
+          "self_ms": 7.6,
+          "incl_ms": 7.8
+        },
+        {
+          "name": "DEVICE_ATTACH nexus",
+          "calls": 1,
+          "self_ms": 6.3,
+          "incl_ms": 84.1
+        },
+        {
+          "name": "DEVICE_ATTACH kvmclock",
+          "calls": 1,
+          "self_ms": 2.8,
+          "incl_ms": 5.3
+        },
+        {
+          "name": "DEVICE_PROBE virtio_mmio",
+          "calls": 6,
+          "self_ms": 1.8,
+          "incl_ms": 1.8
+        },
+        {
+          "name": "SYSINIT apic_setup_io",
+          "calls": 1,
+          "self_ms": 1.8,
+          "incl_ms": 5.5
+        },
+        {
+          "name": "DEVICE_ATTACH virtio_mmio",
+          "calls": 1,
+          "self_ms": 1.6,
+          "incl_ms": 10.6
+        },
+        {
+          "name": "xen_pvh_parse_preload_data",
+          "calls": 1,
+          "self_ms": 1.5,
+          "incl_ms": 1.5
+        },
+        {
+          "name": "DEVICE_ATTACH uart",
+          "calls": 4,
+          "self_ms": 1.4,
+          "incl_ms": 2.8
+        },
+        {
+          "name": "vm_phys_finish_init",
+          "calls": 61,
+          "self_ms": 1.2,
+          "incl_ms": 1.2
+        }
+      ],
+      "user_procs": [
+        {
+          "pid": 10,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 195.1,
+          "dur_ms": null
+        },
+        {
+          "pid": 1,
+          "ppid": 0,
+          "exec": "/sbin/init",
+          "start_ms": 195.3,
+          "dur_ms": null
+        },
+        {
+          "pid": 11,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 195.3,
+          "dur_ms": null
+        },
+        {
+          "pid": 12,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 200.9,
+          "dur_ms": null
+        },
+        {
+          "pid": 2,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 200.9,
+          "dur_ms": null
+        },
+        {
+          "pid": 13,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 202.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 3,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 203.0,
+          "dur_ms": null
+        },
+        {
+          "pid": 4,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 418.7,
+          "dur_ms": null
+        },
+        {
+          "pid": 5,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 418.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 6,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 418.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 7,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 418.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 8,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 418.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 9,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 418.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 14,
+          "ppid": 0,
+          "exec": "",
+          "start_ms": 418.8,
+          "dur_ms": null
+        },
+        {
+          "pid": 15,
+          "ppid": 1,
+          "exec": "/etc/rc",
+          "start_ms": 428.4,
+          "dur_ms": null
+        },
+        {
+          "pid": 16,
+          "ppid": 15,
+          "exec": "hostname",
+          "start_ms": 433.5,
+          "dur_ms": 1.4
+        },
+        {
+          "pid": 17,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 435.0,
+          "dur_ms": 2.9
+        },
+        {
+          "pid": 18,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 438.0,
+          "dur_ms": 1.2
+        },
+        {
+          "pid": 19,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 439.3,
+          "dur_ms": 0.6
+        },
+        {
+          "pid": 20,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 440.0,
+          "dur_ms": 0.6
+        },
+        {
+          "pid": 21,
+          "ppid": 15,
+          "exec": "ifconfig",
+          "start_ms": 440.6,
+          "dur_ms": 10.7
+        },
+        {
+          "pid": 22,
+          "ppid": 15,
+          "exec": "route",
+          "start_ms": 451.3,
+          "dur_ms": 0.6
+        },
+        {
+          "pid": 23,
+          "ppid": 15,
+          "exec": "kenv",
+          "start_ms": 452.0,
+          "dur_ms": 0.5
+        },
+        {
+          "pid": 24,
+          "ppid": 15,
+          "exec": "fetch",
+          "start_ms": 452.6,
+          "dur_ms": 2.5
+        },
+        {
+          "pid": 25,
+          "ppid": 15,
+          "exec": "/rescue/echo",
+          "start_ms": 456.2,
+          "dur_ms": 2.0
+        },
+        {
+          "pid": 26,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 458.4,
+          "dur_ms": 1.3
+        },
+        {
+          "pid": 27,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 459.7,
+          "dur_ms": 0.7
+        },
+        {
+          "pid": 28,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 460.5,
+          "dur_ms": 0.5
+        },
+        {
+          "pid": 29,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 464.0,
+          "dur_ms": 14530.5
+        },
+        {
+          "pid": 30,
+          "ppid": 15,
+          "exec": "sysctl",
+          "start_ms": 14996.3,
+          "dur_ms": null
+        },
+        {
+          "pid": 31,
+          "ppid": 15,
+          "exec": "sed",
+          "start_ms": 14996.9,
+          "dur_ms": null
+        }
+      ]
+    }
+  ]
+}

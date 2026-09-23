@@ -54,6 +54,8 @@ jobs:
         shell: bash
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Validate run_id input
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
@@ -68,7 +70,29 @@ jobs:
           sudo chmod 666 /dev/kvm
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils swtpm swtpm-tools sshpass openssh-client
+            qemu-system-x86 qemu-utils swtpm swtpm-tools sshpass openssh-client \
+            tpm2-tools
+          # tpm2-tools on the HOST: the A5 verifier's ECC path shells out to
+          # the real tpm2_checkquote (bin/attest-verify.nu).
+
+      - name: Install Nushell
+        run: |
+          # Single source of truth for the Nushell version used by every workflow
+          # and expected locally: .github/nu-version (bump it there, nowhere else).
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          ARCH=$(uname -m | sed 's/arm64/aarch64/')
+          case "$(uname -s)" in
+            Linux)  TRIPLE="${ARCH}-unknown-linux-musl" ;;
+            Darwin) TRIPLE="${ARCH}-apple-darwin" ;;
+          esac
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Show Nushell version
+        run: nu --version
 
       - name: Fetch built image artifact
         uses: actions/download-artifact@v4
@@ -134,8 +158,8 @@ jobs:
                    -o PreferredAuthentications=password -o ServerAliveInterval=15
                    -p "$SSH_PORT" root@127.0.0.1)
           # Transition guard: artifacts from pre-eviction builds still have it.
-          if sshpass -p smolfire ssh "${SSHOPTS[@]}" 'command -v tpm2_pcrread' >/dev/null 2>&1; then
-            echo "tpm2-tools already present (pre-eviction artifact) — skipping install"
+          if sshpass -p smolfire ssh "${SSHOPTS[@]}" 'command -v tpm2_pcrread && command -v nu' >/dev/null 2>&1; then
+            echo "tpm2-tools + nushell already present (pre-eviction artifact) — skipping install"
             exit 0
           fi
           # certctl rehash: FreeBSD-caroot ships certs under /usr/share/certs
@@ -147,9 +171,9 @@ jobs:
                 set -e
                 certctl rehash || true
                 env ASSUME_ALWAYS_YES=yes IGNORE_OSVERSION=yes /usr/sbin/pkg bootstrap
-                env ASSUME_ALWAYS_YES=yes IGNORE_OSVERSION=yes pkg install -y tpm2-tools
-                command -v tpm2_pcrread'; then
-            echo "INSTALL FAIL: pkg bootstrap/install of tpm2-tools failed over SLIRP."
+                env ASSUME_ALWAYS_YES=yes IGNORE_OSVERSION=yes pkg install -y tpm2-tools nushell
+                command -v tpm2_pcrread && command -v nu'; then
+            echo "INSTALL FAIL: pkg bootstrap/install of tpm2-tools/nushell failed over SLIRP."
             echo "This is a network/repo/trust infra failure, NOT a TPM regression:"
             echo "check DNS (10.0.2.3), pkg.FreeBSD.org reachability, /etc/ssl/certs,"
             echo "and ABI/osversion in the log above."
@@ -220,6 +244,85 @@ jobs:
           else echo "T6 FAIL: PCR 23 did not change"; fail=1; fi
 
           exit "$fail"
+
+      # ── Phase 4: Remote Attestation (A5) ─────────────────────────────────────
+      # Reuses the already-booted VM/SSH session above (SSH_PORT=2241,
+      # root/smolfire password auth). Ported from tpm-vm-test.yml.
+
+      - name: A5 — Ensure guest-attest.nu is available in guest
+        run: |
+          # The hosted-built image does not bake guest-attest.nu in, so the
+          # scp fallback below is the live path (the bake-path check first
+          # keeps this working if a future image bakes it back in).
+          if sshpass -p smolfire ssh -o StrictHostKeyChecking=no \
+               -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" \
+               root@127.0.0.1 'test -f /usr/local/bin/guest-attest.nu'; then
+            echo "guest-attest.nu already present in guest"
+            exit 0
+          fi
+          sshpass -p smolfire scp -P "$SSH_PORT" -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            bin/guest-attest.nu root@127.0.0.1:/usr/local/bin/guest-attest.nu
+          sshpass -p smolfire ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" \
+            root@127.0.0.1 'chmod 0755 /usr/local/bin/guest-attest.nu'
+
+      - name: A5 — Generate fresh nonce
+        id: a5-nonce
+        run: |
+          NONCE=$(openssl rand -hex 32)
+          echo "nonce=$NONCE" >> "$GITHUB_OUTPUT"
+          echo "Generated nonce: $NONCE"
+
+      - name: A5 — Run guest attestation
+        run: |
+          NONCE="${{ steps.a5-nonce.outputs.nonce }}"
+          TASK_ID="tpm-ci-$(date +%s)"
+          echo "Running guest attestation with task_id=$TASK_ID nonce=$NONCE"
+          sshpass -p smolfire ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" \
+            root@127.0.0.1 \
+            "nu /usr/local/bin/guest-attest.nu --nonce $NONCE --task-id $TASK_ID --output-dir /tmp"
+
+      - name: A5 — Copy artifacts from guest to host
+        run: |
+          mkdir -p /tmp/a5-artifacts
+          for f in quote.msg quote.sig ak.pub attestation.toml expected_pcr.txt; do
+            sshpass -p smolfire scp -P "$SSH_PORT" -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "root@127.0.0.1:/tmp/$f" "/tmp/a5-artifacts/$f" || {
+              echo "WARNING: could not copy /tmp/$f from guest"
+            }
+          done
+          ls -la /tmp/a5-artifacts/
+
+      - name: A5 — Run verifier and assert success
+        run: |
+          set -e
+          NONCE="${{ steps.a5-nonce.outputs.nonce }}"
+          EXPECTED_PCR=$(cat /tmp/a5-artifacts/expected_pcr.txt)
+          echo "Expected PCR digest: $EXPECTED_PCR"
+          nu bin/attest-verify.nu \
+            --quote /tmp/a5-artifacts/attestation.toml \
+            --expected-pcr-digest "$EXPECTED_PCR" \
+            --nonce "$NONCE" \
+            --quote-msg /tmp/a5-artifacts/quote.msg \
+            --quote-sig /tmp/a5-artifacts/quote.sig \
+            --ak-pub /tmp/a5-artifacts/ak.pub \
+            | tee /tmp/a5-verifier-output.toml
+          grep -q 'verdict = "PASS"' /tmp/a5-verifier-output.toml || {
+            echo "ERROR: attestation verifier did not report PASS"
+            exit 1
+          }
+          echo "A5 PASS: remote attestation verified successfully"
+
+      - name: A5 — Report attestation results in job summary
+        if: always()
+        run: |
+          echo "## Phase 4: Remote Attestation (A5)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```toml' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/a5-verifier-output.toml >> "$GITHUB_STEP_SUMMARY" || echo "(no verifier output)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Teardown
         if: always()

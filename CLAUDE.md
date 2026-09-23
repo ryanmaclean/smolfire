@@ -3,8 +3,8 @@
 > **Rename note**: the project renamed smolBSD → **smolfire** ("smolBSD"
 > belongs to the unaffiliated NetBSDfr/smolBSD NetBSD micro-VM project).
 > The rename is complete (issue #41): repo name, `@smolfire.local` spool
-> addressing, `bin/smolfire.nu` CLI (old `bin/smolbsd.nu` is a deprecated
-> shim), kernconfs (`SMOLFIRE` = microVM, `SMOLFIRE-VM` = full VM,
+> addressing, `bin/smolfire.nu` CLI (old `bin/smolbsd.nu` shim removed
+> in #41), kernconfs (`SMOLFIRE` = microVM, `SMOLFIRE-VM` = full VM,
 > `SMOLFIRE-PI5`/`-RK3588` = boards), `smolfire-*.conf` release confs,
 > `CLOUDWARE=smolfire` (→ `SMOLFIRECONF`, `smolfire.ufs.qcow2`),
 > `SMOLFIRE_*` env vars, and guest identity (hostname/password

@@ -233,6 +233,8 @@ jobs:
             set timeout 30
             set t0 [clock milliseconds]
             spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK"'/fc.json
+            set fc_pid [exp_pid]
+            exec sh -c "echo $fc_pid > '"$WORK"'/firecracker.pid"
             expect {
               "SMOLFIRE_NET_OK '"$TOK"'" { puts "\nNET_GATE=pass (guest-initiated TCP, token verified)" }
               "SMOLFIRE_NET_FAIL"        { puts "\nNET_GATE=fail (fetch failed in guest)"; exit 3 }
@@ -326,6 +328,8 @@ jobs:
               -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/token.txt" \
               -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
               -display none -serial mon:stdio
+            set qemu_pid [exp_pid]
+            exec sh -c "echo $qemu_pid > '"$WORK"'/qemu-microvm.pid"
             expect {
               "SMOLFIRE_NET_OK" { puts "\nMICROVM_NET=pass (SLIRP guest-initiated TCP)" }
               "SMOLFIRE_NET_FAIL" { puts "\nMICROVM_NET=fail"; exit 1 }
@@ -420,21 +424,14 @@ jobs:
             /mnt/smolfire-ci/kernels.sha256
             /mnt/smolfire-ci/firecracker-gate.log
             /mnt/smolfire-ci/firecracker-gate.rc
+            /mnt/smolfire-ci/firecracker.pid
             /mnt/smolfire-ci/qemu-microvm.log
+            /mnt/smolfire-ci/qemu-microvm.pid
             /mnt/smolfire-ci/release-run*.log
             /mnt/smolfire-ci/tslog-run*.log
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log
-
-      - name: Teardown VM
-        if: always()
-        run: |
-          pkill -f 'firecracker --no-api' 2>/dev/null || true
-          pkill -f 'qemu-system-x86_64 -M microvm' 2>/dev/null || true
-          [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
-          [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
-          sudo ip link del tap0 2>/dev/null || true
 
       - name: Enforce microVM gates
         if: ${{ always() }}
@@ -444,3 +441,12 @@ jobs:
           test "${{ steps.firecracker_boot_time.outcome }}" = "success"
           test "${{ steps.firecracker_shell.outcome }}" = "success"
           test "${{ steps.qemu_microvm.outcome }}" = "success"
+
+      - name: Teardown VM
+        if: always()
+        run: |
+          [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
+          [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
+          [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
+          [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
+          sudo ip link del tap0 2>/dev/null || true

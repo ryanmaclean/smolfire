@@ -72,6 +72,10 @@ jobs:
           cp -v release/tools/smolfire-qemu.conf \
             "$FREEBSD_SRC/release/tools/smolfire-qemu.conf"
 
+          # Phase 4: install guest-attest.nu into the image via vm_extra_pre_umount
+          cp -v bin/guest-attest.nu \
+            "$FREEBSD_SRC/release/tools/guest-attest.nu"
+
           # Verify copies: device tpm must be present in kernel config
           grep "device tpm" "$FREEBSD_SRC/sys/amd64/conf/SMOLFIRE-VM" || {
             echo "ERROR: 'device tpm' not found in SMOLBSD kernel config"

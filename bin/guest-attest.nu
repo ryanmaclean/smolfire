@@ -148,6 +148,8 @@ export def main [
     let ak_pub      = [$output_dir "ak.pub"] | path join
     let quote_msg   = [$output_dir "quote.msg"] | path join
     let quote_sig   = [$output_dir "quote.sig"] | path join
+    let attest_toml = [$output_dir "attestation.toml"] | path join
+    let expected_pcr_file = [$output_dir "expected_pcr.txt"] | path join
 
     # Step 1: Create primary key in Owner hierarchy
     run-tpm2 "guest_attest_createprimary" [
@@ -180,7 +182,7 @@ export def main [
         error make {msg: "failed to parse PCR 0 or PCR 7 from tpm2_pcrread output"}
     }
 
-    let pcr_digest = compute-pcr-digest $pcrs.pcr0 $pcrs.pcr7
+    let pcr_digest = compute-pcr-digest $pcrs.pcr0 $pcrs.pcr7 | str lowercase | str trim
 
     log-step "guest_attest_pcr_read" {
         pcr0: $pcrs.pcr0
@@ -203,6 +205,28 @@ export def main [
         quote_sig: $quote_sig
         ak_pub: $ak_pub
         pcr_digest: $pcr_digest
+    }
+
+    # Step 4b: Write verifier input files expected by CI
+    # (attestation.toml + expected_pcr.txt). Uses openssl base64 -A for
+    # single-line base64 portable across FreeBSD base and Linux.
+    let quote_b64 = ^openssl base64 -A -in $quote_msg | str trim
+    let sig_b64 = ^openssl base64 -A -in $quote_sig | str trim
+    let ak_b64 = ^openssl base64 -A -in $ak_pub | str trim
+    let attest_record = {
+        task_id: $task_id
+        nonce: $nonce
+        pcr_digest: $pcr_digest
+        quote_data: $quote_b64
+        signature: $sig_b64
+        ak_public: $ak_b64
+    }
+    $attest_record | to toml | save --force $attest_toml
+    $"($pcr_digest)\n" | save --force $expected_pcr_file
+
+    log-step "guest_attest_artifacts_written" {
+        attestation_toml: $attest_toml
+        expected_pcr_file: $expected_pcr_file
     }
 
     # Step 5: Emit structured TOML result

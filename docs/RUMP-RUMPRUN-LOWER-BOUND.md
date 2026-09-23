@@ -22,7 +22,7 @@ Why FFS first:
 
 The machine-readable comparison lives at:
 
-- `/home/runner/work/smolfire/smolfire/docs/lower-bound-rump-rumprun.json`
+- `docs/lower-bound-rump-rumprun.json`
 
 Render it as JSON or Markdown:
 

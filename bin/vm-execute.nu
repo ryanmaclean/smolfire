@@ -84,7 +84,7 @@ export def run-vm-task [
     }
 
     # Poll SSH port until it responds (VM boot)
-    let t0 = (date now | into int) / 1_000_000_000
+    let t0 = (date now | into int) // 1_000_000_000
     mut ssh_ready = false
     mut elapsed = 0
     while $elapsed < $timeout {
@@ -94,9 +94,9 @@ export def run-vm-task [
             $ssh_ready = true
             break
         }
-        $elapsed = ((date now | into int) / 1_000_000_000) - $t0
+        $elapsed = ((date now | into int) // 1_000_000_000) - $t0
     }
-    let boot_sec = ((date now | into int) / 1_000_000_000) - $t0
+    let boot_sec = ((date now | into int) // 1_000_000_000) - $t0
 
     if not $ssh_ready {
         try { job kill $qemu_job_id } catch { }

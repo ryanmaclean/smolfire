@@ -16,18 +16,30 @@
 
 use ./mbox-parse.nu [parse-mbox, extract-toml, msg-id]
 
+# "Network" is a coordinator-level capability, not a Claude tool: it is the only
+# tools_required entry that grants the jail executor a network stack (see
+# docs/JAIL-EXECUTOR.md). The vm executor ignores it (QEMU user-net always has
+# SLIRP egress).
 const AGENT_CAPABILITIES = {
-    "general-purpose":          ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch"]
+    "general-purpose":          ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch", "Network"]
     "feature-dev:code-architect": ["Read", "Glob", "Grep", "WebFetch", "TodoWrite"]
     "architect":                ["Read", "Glob", "Grep", "WebFetch", "TodoWrite"]
     "researcher":               ["Read", "Glob", "Grep", "WebFetch", "WebSearch"]
     "security":                 ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-    "ops":                      ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-    "builder":                  ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    "ops":                      ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Network"]
+    "builder":                  ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Network"]
     "reviewer":                 ["Read", "Glob", "Grep", "WebFetch"]
 }
 
 const STATE_VERSION = "1"
+
+# Task executors. `vm` (default) keeps today's dispatch path unchanged;
+# `jail` (experimental, FreeBSD hosts only) runs the request's commands in an
+# ephemeral jail via bin/jail-execute.nu. Selected per request by a TOML
+# `executor = "vm"|"jail"` field, else SMOLFIRE_EXECUTOR, else "vm".
+const EXECUTORS = ["vm", "jail"]
+const DEFAULT_EXECUTOR = "vm"
+const JAIL_EXECUTOR_SCRIPT = path self jail-execute.nu
 
 # Default state for a fresh coordinator with no prior history.
 def default-state [] {
@@ -43,6 +55,7 @@ def default-state [] {
         dispatched_at:      ""
         attempt_counts:     {}   # record keyed by task_id → int attempt count
         halted_tasks:       []
+        task_executors:     {}   # task_id → {executor, network, request_id}; reused on retry
     }
 }
 
@@ -295,6 +308,47 @@ def try-irc-dm [task_id: string, reason: string, root: string] {
     log-event "irc_fallback" {task_id: $task_id, status: $result}
 }
 
+# Resolve the executor for a request. Precedence: request TOML `executor` field,
+# then SMOLFIRE_EXECUTOR, then "vm". Returns {executor, source, error}; a
+# non-empty error means refuse dispatch (never silently fall back — an explicit
+# request for isolation must not be downgraded).
+def resolve-executor [payload: record, host_os: string] {
+    let from_payload = $payload | get -o executor | default ""
+    let from_env     = $env.SMOLFIRE_EXECUTOR? | default ""
+    let pick = if $from_payload != "" {
+        {executor: $from_payload, source: "request"}
+    } else if $from_env != "" {
+        {executor: $from_env, source: "env"}
+    } else {
+        {executor: $DEFAULT_EXECUTOR, source: "default"}
+    }
+    if not ($pick.executor in $EXECUTORS) {
+        return ($pick | insert error $"unknown executor '($pick.executor)' \(from ($pick.source)\); expected one of ($EXECUTORS | str join ', ')")
+    }
+    if $pick.executor == "jail" and $host_os != "freebsd" {
+        return ($pick | insert error $"jail executor requires a FreeBSD host; this host is ($host_os)")
+    }
+    $pick | insert error ""
+}
+
+# Launch bin/jail-execute.nu detached for a dispatched task (executor = jail).
+# Values reach the child as positional argv, never interpolated into the sh
+# script, so task ids / Message-IDs cannot inject shell.
+def spawn-jail-executor [task_id: string, dispatch_id: string, request_id: string, spool_path: string, root: string] {
+    let spawn_dir = [$root, "var", "run", "spawned"] | path join
+    if not ($spawn_dir | path exists) { mkdir $spawn_dir }
+    let log_file = [$spawn_dir, $"($task_id).jail.log"] | path join
+    with-env {SMOLFIRE_JAIL_LOG: $log_file} {
+        ^sh -c '"$0" "$@" >"$SMOLFIRE_JAIL_LOG" 2>&1 &' $nu.current-exe $JAIL_EXECUTOR_SCRIPT dispatch --task-id $task_id --dispatch-id $dispatch_id --request-id $request_id --spool $spool_path
+    }
+    log-event "subagent_spawned" {
+        task_id:    $task_id
+        agent_type: "jail-agent"
+        executor:   "jail"
+        log_file:   $log_file
+    }
+}
+
 # Check whether the originating request for a reply required attestation.
 # Spawn a subagent (claude CLI) in the background to execute a dispatched task.
 # Non-blocking: writes a prompt file and launches `claude -p` via `sh -c ... &`.
@@ -543,8 +597,9 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                     "accepted" => {
                         log-verdict $category $decision "harvesting" --task-id $task_id --attempt $attempt_n --message-id $id
                         let cleared_counts = if $task_id in $current_state.attempt_counts { $current_state.attempt_counts | reject $task_id } else { $current_state.attempt_counts }
+                        let cleared_execs  = if $task_id in $current_state.task_executors { $current_state.task_executors | reject $task_id } else { $current_state.task_executors }
                         $new_seen = $new_seen | append $id
-                        $current_state = ($current_state | update seen_ids $new_seen | update attempt_counts $cleared_counts)
+                        $current_state = ($current_state | update seen_ids $new_seen | update attempt_counts $cleared_counts | update task_executors $cleared_execs)
                         continue
                     }
                     "unrecognized-verdict" => {
@@ -609,6 +664,22 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                     continue
                 }
 
+                # Executor selection (docs/JAIL-EXECUTOR.md). Refusal is a
+                # coordinator-level rejection like §17, not a retry.
+                let exec_pick = resolve-executor $payload $nu.os-info.name
+                if $exec_pick.error != "" {
+                    log-event "dispatch_executor_refused" {
+                        task_id:    $task_id
+                        executor:   $exec_pick.executor
+                        source:     $exec_pick.source
+                        reason:     $exec_pick.error
+                        message_id: $id
+                    }
+                    $new_seen = $new_seen | append $id
+                    continue
+                }
+                let network = "Network" in $tools_required
+
                 let in_reply_to = $msg.headers | get "In-Reply-To"? | default ""
                 if $in_reply_to == "" {
                     log-event "would_dispatch" {
@@ -622,6 +693,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         | update pending_request_id $id
                         | update pending_task_id    $task_id
                         | update pending_to_addr    $to_addr
+                        | update task_executors     ($current_state.task_executors | upsert $task_id {executor: $exec_pick.executor, network: $network, request_id: $id})
                         | update fsm_state          "dispatching")
                     $has_dispatch     = true
                     $dispatch_reason  = "new-request"
@@ -731,6 +803,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
     let msg_id       = $"<coord.($state.tick_count).r($next_attempt).($ts)@smolfire.local>"
     let to_addr      = if $state.pending_to_addr != "" { $state.pending_to_addr } else { $"($task_id)@smolfire.local" }
     let from_addr    = "coordinator@smolfire.local"
+    let exec_info    = $state.task_executors | get -o $task_id | default {executor: $DEFAULT_EXECUTOR, network: false, request_id: $state.pending_request_id}
 
     let mbox_msg = $"From ($from_addr) ($ts)
 From: ($from_addr)
@@ -742,6 +815,7 @@ In-Reply-To: ($state.pending_request_id)
 
 task_id = \"($task_id)\"
 action = \"dispatch\"
+executor = \"($exec_info.executor)\"
 "
 
     # Append the message to the spool file.
@@ -752,12 +826,19 @@ action = \"dispatch\"
         task_id:    $task_id
         to:         $to_addr
         attempt:    $next_attempt
+        executor:   $exec_info.executor
     }
 
-    # Auto-spawn a subagent to execute the dispatched task (Phase II).
-    # agent_type is derived from the local-part of the recipient address.
-    let agent_type = ($to_addr | split row "@" | first | default "general-purpose")
-    spawn-subagent $agent_type $task_id $spool $root
+    if $exec_info.executor == "jail" {
+        # Jail executor: run the ORIGINAL request's commands in an ephemeral
+        # jail; the reply's In-Reply-To is this dispatch's Message-ID.
+        spawn-jail-executor $task_id $msg_id $exec_info.request_id $spool $root
+    } else {
+        # vm (default): unchanged. Auto-spawn a subagent (Phase II); agent_type
+        # is derived from the local-part of the recipient address.
+        let agent_type = ($to_addr | split row "@" | first | default "general-purpose")
+        spawn-subagent $agent_type $task_id $spool $root
+    }
 
     log-transition "dispatching" "waiting" "dispatch-sent" --task-id $task_id --attempt $next_attempt --message-id $msg_id
 

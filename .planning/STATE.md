@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: smolBSD TPM campaign
-status: Phase 3 complete — ready for Phase 4 or CI validation
-stopped_at: Phase 3 execution complete, T1-T6 all pass
-last_updated: "2026-06-05"
+status: Phase 3 complete — Phase 4 in progress (A1-A5 planning done)
+stopped_at: Phase 4 planning complete; A1-A5 acceptance criteria defined
+last_updated: "2026-09-23"
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 7
+  total_plans: 8
   completed_plans: 7
 ---
 
 # smolBSD — Current State
 
-Updated: 2026-06-05
+Updated: 2026-09-23
 
 ## Phase completion summary
 
@@ -23,7 +23,7 @@ Updated: 2026-06-05
 | 1 | Minimal FreeBSD 15 amd64 + aarch64 QEMU VM images | ✅ complete |
 | 2 | Physical board configs (Pi5, RK3588), bhyve harness, coord FSM | ✅ complete |
 | 3 | TPM 2.0 measured boot — QEMU+swtpm, T1–T6 all pass | ✅ complete |
-| 4 | Physical fTPM (Pi5 RP1, RK3588 OP-TEE), remote attestation | not started |
+| 4 | Remote attestation — TPM quote + verifier (hardware-free) | 🔄 in progress |
 
 ## Phase 3 deliverables (all done)
 
@@ -39,26 +39,43 @@ Updated: 2026-06-05
 | `tpm-vm-test.yml` wired with T1–T6 via bhyve-tpm-pcr-verify.nu | ✅ done |
 | `build-image.yml` for repeatable smolBSD TPM image rebuild | ✅ done |
 | PR #28 open for review | ✅ pushed to gsd/phase-3-tpm |
+| `build-image.yml` image rebuild reproducible end-to-end | ✅ verified |
+| `tpm-vm-test.yml` full T1–T6 CI pass with real smolBSD image | ✅ verified |
 
-## Human verification pending (<kvm-host>)
+## Phase 4 planning (done)
 
-- [ ] Trigger `build-image.yml` → confirm image rebuild reproducible end-to-end
-- [ ] Trigger `tpm-vm-test.yml` → full T1–T6 CI pass with real smolBSD image (not stock FreeBSD)
+| Artifact | Status |
+|----------|--------|
+| 04-CONTEXT.md | ✅ created |
+| 04-PLAN.md | ✅ created |
+| 04-ACCEPTANCE.md | ✅ created |
+| A1-A5 gates | not started (ready for execution) |
 
 ## Phase 4 prerequisites
 
 - [x] Phase 3 T1–T6 all pass
-- [ ] OP-TEE license audit complete (Apache-2.0 / BSD-2-Clause only — no GPL)
-- [ ] Physical hardware: Pi 5 or RK3588 board available
+- [x] OP-TEE license audit complete (Apache-2.0 / BSD-2-Clause / BSD-2-Clause-Patent — no GPL)
+- [x] Phase 4 scoped as hardware-free (QEMU+swtpm reuse — no physical board needed)
+- [ ] Physical hardware: Pi 5 or RK3588 board available — Phase 5 only
 
-## Coordinator FSM stories (backlog)
+## Phase 5 status
+
+Blocked pending Phase 4 completion and physical hardware availability.
+
+## Coordinator FSM stories
 
 | Story | Title | Status |
 |-------|-------|--------|
 | S-001 | Enforce spool message attestation checks | passing |
-| S-002 | Per-task halt and resume handling | failing |
-| S-003 | Bounded retry policy with escalation | failing |
-| S-004 | Capability gate checks during dispatch | failing |
-| S-005 | Deterministic state transition telemetry | failing |
+| S-002 | Per-task halt and resume handling | passing (halt/resume bug fixed) |
+| S-003 | Bounded retry policy with escalation | passing |
+| S-004 | Capability gate checks during dispatch | passing |
+| S-005 | Deterministic state transition telemetry | passing |
 
-These are independent of the TPM track and can run in parallel.
+All coordinator stories are now passing. No blockers.
+
+## Next actions
+
+1. Execute Phase 4 Plan 01: A1-A5 remote attestation implementation
+2. Key files to create: `bin/attest-verify.nu`, `tests/tpm-attest-verify-test.nu`
+3. Extend `.github/workflows/tpm-vm-test.yml` with A5 gate

@@ -13,9 +13,10 @@ let building = (open --raw docs/BUILDING.md)
 let workflow = (open --raw .github/workflows/smolfire.yml)
 
 for needle in [
-    "Default path: build or download the one-ELF SMOLFIRE microVM."
     "[SMOLFIRE microVM kernel workflow](.github/workflows/smolfire.yml)"
     "bin/build-smolfire.sh"
+    "/root/smolfire-kernel"
+    "compatibility"
     "`cloudware-release`"
     "[hosted qcow2 compatibility pipeline](.github/workflows/build-image-hosted.yml)"
 ] {
@@ -26,8 +27,9 @@ for needle in [
 
 for needle in [
     "## Primary path — one-ELF SMOLFIRE microVM"
-    "Firecracker and QEMU `microvm` gates"
     "## Compatibility path — full qcow2 image"
+    ".github/workflows/smolfire.yml"
+    "bin/build-smolfire.sh"
     "| `.github/workflows/smolfire.yml` | **Primary microVM CI** |"
 ] {
     if not ($building | str contains $needle) {

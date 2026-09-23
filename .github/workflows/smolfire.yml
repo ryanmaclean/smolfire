@@ -26,6 +26,8 @@ on:
     paths:
       - '.github/workflows/smolfire.yml'
       - 'bin/build-smolfire.sh'
+      - 'README.md'
+      - 'docs/BUILDING.md'
       - 'docs/BOOT-TIME-ROADMAP.md'
       - 'sys/amd64/conf/SMOLFIRE*'
       - 'tests/microvm-primary-test.nu'
@@ -34,6 +36,8 @@ on:
     paths:
       - '.github/workflows/smolfire.yml'
       - 'bin/build-smolfire.sh'
+      - 'README.md'
+      - 'docs/BUILDING.md'
       - 'docs/BOOT-TIME-ROADMAP.md'
       - 'sys/amd64/conf/SMOLFIRE*'
       - 'tests/microvm-primary-test.nu'
@@ -338,11 +342,11 @@ jobs:
       - name: Enforce microVM gates
         if: ${{ always() }}
         run: |
-          test "${{ steps.microvm_size.outcome }}" = success
-          test "${{ steps.firecracker_network.outcome }}" = success
-          test "${{ steps.firecracker_boot_time.outcome }}" = success
-          test "${{ steps.firecracker_shell.outcome }}" = success
-          test "${{ steps.qemu_microvm.outcome }}" = success
+          test "${{ steps.microvm_size.outcome }}" = "success"
+          test "${{ steps.firecracker_network.outcome }}" = "success"
+          test "${{ steps.firecracker_boot_time.outcome }}" = "success"
+          test "${{ steps.firecracker_shell.outcome }}" = "success"
+          test "${{ steps.qemu_microvm.outcome }}" = "success"
 
       - name: TSLOG capture — 3 TSLOG boots + 3 release wall-clock boots (tslog only)
         # Measurement, not a gate: runs after the gates whatever they said

@@ -255,6 +255,18 @@ export def main [
         "-u" $ak_pub
     ]
 
+    # Step 2b: Flush the EK transient context to free an object slot before
+    # quote (swtpm exhausts slots with EK + AK both loaded → 0x902 "out of
+    # memory for object contexts"). Best-effort: logs, never fails the run.
+    # Safe: createak was the last EK consumer; the EK persistent handle and
+    # ak.ctx/ak.pub files are retained, and quote loads only the AK context.
+    try {
+        let fr = run-external "tpm2_flushcontext" $primary_ctx | complete
+        log-step "guest_attest_flush_ek" {primary_ctx: $primary_ctx, exit_code: $fr.exit_code, stderr: ($fr.stderr | str trim)}
+    } catch {|err|
+        log-step "guest_attest_flush_ek" {primary_ctx: $primary_ctx, exit_code: -1, stderr: $err.msg}
+    }
+
     # Step 3: Read PCR values to compute external digest
     let pcr_raw = run-tpm2 "guest_attest_pcrread" [
         "tpm2_pcrread"

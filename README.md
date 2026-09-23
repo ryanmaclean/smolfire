@@ -127,12 +127,17 @@ Environment overrides (all optional):
 | `HALT_INTERVAL` | `10`                          | Seconds to sleep while halted    |
 | `STATE_FILE`    | `var/run/coord-state.toml`    | Persisted FSM state              |
 | `SPOOL`         | `var/mail/spool`              | mbox spool path                  |
+| `SMOLFIRE_CLAUDE_MODEL` | `claude-sonnet-5`     | Claude model for subagent dispatch |
+| `SMOLFIRE_EXECUTOR` | `vm`                      | `vm` or `jail` executor selection |
 
 FSM states are `idle -> dispatching -> waiting -> harvesting -> halted`. On
 `dispatching`, the coordinator auto-spawns the `claude` CLI for the target
 agent if it is on `PATH` (Phase II wiring); otherwise it queues the request
 and waits for an external agent to reply into the spool. Global emergency
-stop: `touch var/mail/HALT`; per-task halt: `var/mail/HALT.<task_id>`.
+stop: `touch var/mail/HALT` — `coord-run.sh` then skips `coord-tick.nu` and
+sleeps for `HALT_INTERVAL` seconds until the file is removed. Per-task halt:
+`var/mail/HALT.<task_id>`. To resume a halted task, send a spool message with
+`X-Resume-Action: retry | abort | edit`.
 
 ## Tests
 

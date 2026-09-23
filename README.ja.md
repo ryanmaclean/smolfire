@@ -126,11 +126,16 @@ nu bin/coord-tick.nu
 | `HALT_INTERVAL` | `10` | 停止中のスリープ時間（秒） |
 | `STATE_FILE` | `var/run/coord-state.toml` | 永続化されるFSM状態 |
 | `SPOOL` | `var/mail/spool` | mboxスプールのパス |
+| `SMOLFIRE_CLAUDE_MODEL` | `claude-sonnet-5` | サブエージェント起動に使うClaudeモデル |
+| `SMOLFIRE_EXECUTOR` | `vm` | `vm`または`jail`の実行方式選択 |
 
 FSMの状態は`idle -> dispatching -> waiting -> harvesting -> halted`です。
 `dispatching`では、`claude` CLIが`PATH`上にあれば対象エージェントを自動起動します（Phase IIの接続）。
 そうでなければ、リクエストをキューに入れ、外部エージェントがスプールへ返信するのを待ちます。
-グローバル緊急停止は`touch var/mail/HALT`、タスク単位の停止は`var/mail/HALT.<task_id>`です。
+グローバル緊急停止は`touch var/mail/HALT`で、ファイルが削除されるまで`coord-run.sh`は
+`coord-tick.nu`を呼ばずに`HALT_INTERVAL`秒ずつスリープします。タスク単位の停止は
+`var/mail/HALT.<task_id>`です。停止したタスクを再開するには、`X-Resume-Action: retry | abort | edit`
+を含むメッセージをスプールへ送ります。
 
 ## テスト
 

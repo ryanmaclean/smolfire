@@ -188,6 +188,7 @@ jobs:
           # so terminal echo can never match FIRE_42 — only real sh output can.
           # Gate order: rc emits the net marker BEFORE SMOLFIRE_READY; the
           # token is per-run random, so a pass cannot be faked by echo.
+          EXPECT_RC=0
           expect -c '
             set timeout 30
             set t0 [clock milliseconds]
@@ -218,7 +219,21 @@ jobs:
               "panic"   { expect -timeout 5 timeout; puts "\nVERDICT=fail (kernel panic — full text above)"; exit 2 }
               timeout   { puts "\nVERDICT=fail (no READY within 30s)"; exit 1 }
               eof       { puts "\nVERDICT=fail (firecracker exited)"; exit 2 }
-            }'
+            }' 2>&1 | tee "$WORK/smolfire-gate.log" || EXPECT_RC=$?
+          FC_PID=$(pgrep -f "$WORK/firecracker --no-api --config-file $WORK/fc.json" | head -1 || true)
+          if [ -n "$FC_PID" ]; then
+            RSS_KIB=$(ps -o rss= -p "$FC_PID" | tr -d ' ')
+            echo "SMOLFIRE_METRIC ready.host.rss_kib=$RSS_KIB" | tee -a "$WORK/smolfire-gate.log"
+            kill "$FC_PID" 2>/dev/null || true
+          fi
+          {
+            echo "### SMOLFIRE microVM size report"
+            echo '```'
+            grep -H -a -E '^SMOLFIRE_METRIC |^SMOLFIRE_SECTION ' \
+              "$WORK/smolfire-build-vm.log" "$WORK/smolfire-gate.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$EXPECT_RC" -eq 0 ] || exit "$EXPECT_RC"
 
       - name: Boot gate — QEMU microvm (informational)
         # Runs even when the Firecracker gate fails — that is exactly when
@@ -334,6 +349,7 @@ jobs:
             /mnt/smolfire-ci/tslog-run*.log
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
+            /mnt/smolfire-ci/smolfire-gate.log
             /mnt/smolfire-ci/serial.log
 
       - name: Teardown VM

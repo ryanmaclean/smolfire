@@ -87,13 +87,22 @@ def parse-pcrs [raw: string] {
     {pcr0: $pcr0, pcr7: $pcr7}
 }
 
-# Compute SHA256 digest of concatenated PCR 0 + PCR 7 binary values.
-# Uses perl (in FreeBSD base) to decode hex and openssl to hash.
+# Compute SHA256 digest of concatenated PCR 0 + PCR 7 values.
+# Uses only openssl (in FreeBSD base and the guest image): decode the
+# concatenated hex ASCII via `openssl enc -d -a`, then hash the decoded
+# bytes with `openssl dgst -sha256`. Hex-dump utilities are NOT in
+# FreeBSD base (nor in the guest image), so they are deliberately not
+# used here.
 def compute-pcr-digest [pcr0_hex: string, pcr7_hex: string] {
     let combined = $"($pcr0_hex)($pcr7_hex)"
     try {
-        # Use xxd to decode hex to binary, then openssl to hash
-        echo $combined | ^xxd -r -p | ^openssl dgst -sha256 | ^awk '{print $NF}' | str trim
+        # Portable primary: openssl-only decode + hash pipeline.
+        # NOTE: the trailing newline is load-bearing — `openssl enc -d -a`
+        # skips whitespace while decoding, and some builds silently emit
+        # zero bytes when the final base64 block is not newline-terminated.
+        # ($combined already ends without a newline, so append one —
+        # equivalent to POSIX `echo $combined | openssl enc -d -a`.)
+        $"($combined)\n" | ^openssl enc -d -a | ^openssl dgst -sha256 | ^awk '{print $NF}' | str trim
     } catch {
         # Fallback: hash the hex string itself (ASCII)
         try {

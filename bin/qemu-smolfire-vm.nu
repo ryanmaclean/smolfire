@@ -241,6 +241,25 @@ def cpu-model [arch: string, accel: string]: nothing -> string {
     }
 }
 
+# ── Firmware boot-menu wait ───────────────────────────────────────────────────
+
+# QEMU args that remove EDK2's BDS boot-menu timeout on aarch64 + HVF.
+#
+# edk2-aarch64-code.fd waits ~5.1 s at the boot-menu timeout before loading
+# BOOTAA64.EFI on every boot. `-boot menu=on,splash-time=0` sets fw_cfg
+# etc/boot-menu-wait = 0, so BDS boots immediately. Measured in
+# docs/BOOT-TIME-ROADMAP.md §1 (PR #55): firmware phase 5,587 → 542 ms median,
+# time-to-login 17.6 → 8.5 s. Scoped to aarch64 + HVF (the measured path);
+# amd64 and TCG command lines are unchanged. `keep_wait` restores the
+# firmware default (A/B measurement).
+def fw-boot-menu-args [arch: string, accel: string, keep_wait: bool]: nothing -> list<string> {
+    if $arch == "aarch64" and $accel == "hvf" and not $keep_wait {
+        ["-boot" "menu=on,splash-time=0"]
+    } else {
+        []
+    }
+}
+
 # ── Command builders ──────────────────────────────────────────────────────────
 
 # Build the QEMU argument list for an aarch64 guest.
@@ -255,6 +274,7 @@ def build-cmd-aarch64 [
     hostfwd:    int
     tpm:        bool
     sock_path:  string
+    keep_wait:  bool
 ] {
     let cpu = cpu-model "aarch64" $accel
 
@@ -270,6 +290,7 @@ def build-cmd-aarch64 [
         "-nographic"
         "-monitor" "none"
     ]
+    $args = ($args | append (fw-boot-menu-args "aarch64" $accel $keep_wait))
     # -nographic redirects serial to stdio implicitly; adding -serial stdio
     # would cause "cannot use stdio by multiple character devices" — omit it.
     # For non-stdio serial (file:, unix:), append explicitly.
@@ -389,6 +410,7 @@ def preflight [arch: string, accel: string, bios: string, tpm: bool] {
 # --dry-run    Print the QEMU command line without executing
 # --name       Label used in log output (default: smolfire-qemu)
 # --accel      Override accelerator: hvf | kvm | tcg (default: auto-detect)
+# --fw-menu-wait  aarch64+HVF: keep EDK2's ~5 s boot-menu wait (omit -boot menu=on,splash-time=0)
 def main [
     --image:        string                                       # path to smolfire qcow2 or raw image
     --arch:         string = "aarch64"                           # aarch64 | amd64
@@ -401,6 +423,7 @@ def main [
     --dry-run                                                    # print command; do not run
     --name:         string = "smolfire-qemu"                      # label for log output
     --accel:        string = ""                                  # "" = auto-detect
+    --fw-menu-wait                                               # aarch64+HVF: keep EDK2 boot-menu wait (A/B)
 ] {
     # ── Validate ────────────────────────────────────────────────────────────
     if $image == null or ($image | str length) == 0 {
@@ -441,6 +464,7 @@ def main [
         dry_run:     $dry_run
         bios:        $bios
         img_fmt:     $img_fmt
+        fw_menu_wait: $fw_menu_wait
     }
 
     preflight $arch $accel $bios $tpm
@@ -464,7 +488,7 @@ def main [
 
     # ── Build QEMU command line ──────────────────────────────────────────────
     let qemu_cmd = if $arch == "aarch64" {
-        build-cmd-aarch64 $image $img_fmt $mem $cpus $accel $bios $serial $hostfwd_ssh $tpm $sock_path
+        build-cmd-aarch64 $image $img_fmt $mem $cpus $accel $bios $serial $hostfwd_ssh $tpm $sock_path $fw_menu_wait
     } else {
         build-cmd-amd64   $image $img_fmt $mem $cpus $accel $bios $serial $hostfwd_ssh $tpm $sock_path
     }

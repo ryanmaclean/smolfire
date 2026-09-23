@@ -129,8 +129,12 @@ Findings: (1) **EDK2 waits ~5.1 s at the BDS boot-menu timeout** before
 loading `BOOTAA64.EFI` on every boot (5.04–5.28 s gap after the last firmware line) — not PXE (a `-nic none` control keeps
 it: firmware 5,351 ms median, 5,251–5,368). QEMU's `-boot menu=on,splash-time=0`
 (fw_cfg `etc/boot-menu-wait`=0) removes it; the Phase-1 "11 s" figure
-very likely carried this 5 s too. Wire it into `bin/qemu-smolfire-vm.nu` and
-`tests/time-to-ready-aarch64.exp`. (2) rc dominates what remains: a
+very likely carried this 5 s too. **Wired in (2026-09-23, `exp/a64-boot-menu`):**
+`bin/qemu-smolfire-vm.nu` (aarch64 + HVF only; `--fw-menu-wait` opts out),
+`bin/run-vm-tests.nu`, and both HVF gates `tests/time-to-ready-{aarch64,arm64}.exp`
+(`SMOLFIRE_FW_MENU_WAIT=1` opts out; gates now also `snapshot=on`). Re-measured
+A/B, interleaved, 3 boots each at load avg 186–290: firmware 6,756 → 1,152 ms
+median. (2) rc dominates what remains: a
 1.9–6.8 s gap between `Starting devd.` and `Starting dhclient.` — **now
 attributed, §1.2** — then sshd config
 check, sshd, cron (~0.3–0.7 s each). (3) An unclean previous shutdown adds a foreground fsck of

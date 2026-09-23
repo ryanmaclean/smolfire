@@ -8,10 +8,11 @@ PY_OK=""
 PY_SKIP_REASON="python3 >= 3.10 required"
 if command -v python3 >/dev/null 2>&1; then
     PYTHON3=$(command -v python3)
+    PY_VERSION=$("$PYTHON3" --version 2>&1)
     if "$PYTHON3" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
         PY_OK=1
     else
-        PY_SKIP_REASON="python3 >= 3.10 required (found $PYTHON3)"
+        PY_SKIP_REASON="python3 >= 3.10 required (found $PY_VERSION at $PYTHON3)"
     fi
 else
     PY_SKIP_REASON="python3 >= 3.10 required (python3 not found)"

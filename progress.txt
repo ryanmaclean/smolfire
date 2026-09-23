@@ -2,6 +2,11 @@
 - Coordinator per-task HALT recovery must clear both `halted_tasks` and `var/mail/HALT.<task_id>`.
 - Resume headers are `X-Resume-Tag` and `X-Resume-Action`; tag format is `resume-<task_id>`.
 - Per-task resume handling should run even when global `var/mail/HALT` is absent.
+- FSM transitions and harvested verdicts must use the fixed telemetry schema emitted by `log-transition` and `log-verdict` in `bin/coord-tick.nu`.
+- Attestation policy is inherited from the full `In-Reply-To` chain; reply-local `attestation_required` is not authoritative by itself.
+- Dispatch capability checks and executor selection happen before a request enters `dispatching`; explicit unsupported executors are refused rather than silently downgraded.
+- Image-release builds use `cloudware-release` with the real `SMOLFIRECONF`/`CLOUDWARE` configuration; do not resurrect the old `vm-image ... CLOUDWARE_CONF` path.
+- Runtime data under `var/` is local state/spool and must not be committed.
 
 ## 2026-05-11T06:48:15Z - S-002
 Thread: (prior tooling; id not recorded)
@@ -100,4 +105,33 @@ Thread: (prior tooling; id not recorded)
   - Patterns discovered: resume actions are safer when treated as idempotent control messages keyed by `Message-ID`.
   - Gotchas encountered: Nushell runtime remains unavailable in this sandbox (`nu: command not found`), so tests are updated but not executed here.
   - Useful context: `retry-as-<role>` currently clears halt state and returns to idle; any role-specific rerouting semantics remain a separate enhancement.
+---
+
+## 2026-09-23T00:00:00Z - REPO-AUDIT
+Thread: repository review at commit `6f6a11e7032a1265475b0ae4d1d5732cfbf8cd26`
+- Reconciled this tracker with the current coordinator and CI implementation.
+- `prd.json` now records S-001 through S-005 as passing:
+  - S-001 request-linked attestation enforcement, including multi-hop `In-Reply-To` traversal.
+  - S-002 per-task HALT/resume handling, including `retry-as-<role>` and idempotent resume consumption.
+  - S-003 bounded retry policy with escalation and HALT generation.
+  - S-004 dispatch capability gates against `AGENT_CAPABILITIES`.
+  - S-005 deterministic state-transition and verdict telemetry.
+- `bin/coord-tick.nu` has since grown executor selection (`vm`/experimental FreeBSD `jail`), detached subagent/jail launch, reply timeout synthesis, IRC fallback recording, and compatibility defaults for older state files.
+- CI is no longer blocked by the historical local sandbox limitation: `.github/workflows/ci.yml` installs the pinned Nushell version from `.github/nu-version` and runs coordinator, parser, executor, spool, image, and dry-run TPM suites on Ubuntu and macOS, with shellcheck and release-config smoke coverage.
+- The repository’s image pipeline has moved beyond the original coordinator-only stories: hosted FreeBSD image builds, size/boot gates, TPM hosted testing, and the `cloudware-release`/`SMOLFIRECONF` release path are now documented and wired in CI.
+- Validation status for this audit:
+  - Repository evidence confirms the required test and CI commands are configured.
+  - Tests were not executed through this GitHub file-update session; use CI or a Nushell 0.115.1 environment for runtime verification.
+- Files reviewed:
+  - `bin/coord-tick.nu`
+  - `tests/coord-tick-test.nu`
+  - `tests/run-all.sh`
+  - `.github/workflows/ci.yml`
+  - `prd.json`
+  - `README.md`
+  - `CLAUDE.md`
+- **Learnings for future iterations:**
+  - Patterns discovered: `progress.txt` should distinguish historical Ralph-story work from later repository-wide build/CI evolution.
+  - Gotchas encountered: the old “Nushell unavailable” notes remain historically accurate for May 2026 sessions but are no longer the repository’s current CI status.
+  - Useful context: before changing build or release behavior, read `docs/BUILDING.md` and `docs/UR-BSD-VERIFY.md`; before changing FSM behavior, start with `bin/coord-tick.nu` and its integration suite.
 ---

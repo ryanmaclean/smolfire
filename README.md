@@ -26,9 +26,10 @@ plan, `docs/PHASE-1-RESULTS.md` for the original baseline report.
 
 ## Quickstart
 
-**Prerequisite everywhere:** [Nushell](https://www.nushell.sh) **0.112.2+**
+**Prerequisite everywhere:** [Nushell](https://www.nushell.sh) **0.115.1**, the
+version CI pins in [`.github/nu-version`](.github/nu-version)
 (`pkg install nushell` / `brew install nushell` / a GitHub release binary —
-0.111 and older fail on `get -o`).
+0.112.2 fails on `str lowercase` in `bin/coord-tick.nu`; 0.111 and older fail on `get -o`).
 
 Three ways in, depending on what you have:
 

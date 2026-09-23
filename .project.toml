@@ -5,7 +5,7 @@ role = "Smallest boot/runtime substrate and storage research harness"
 
 canonical_for = ["microvm-runtime", "bsd-runtime-research", "filesystem-runtime-benchmarks"]
 integrates_with = ["bop", "genoa", "moth", "agent-jail", "skills"]
-do_not_implement = ["agent-orchestration-db", "image-deployment-receipts", "provider-routing-policy"]
+do_not_implement = ["agent-orchestration-db", "image-deployment-receipts", "provider-routing-policy", "bsd-jail-agent-isolation"]
 
 registry = "ryanmaclean/skills:docs/PROJECTS.md"
 glossary = "ryanmaclean/skills:docs/GLOSSARY.md"

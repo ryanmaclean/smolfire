@@ -15,6 +15,10 @@ Smallest boot/runtime substrate and storage research harness.
 - agent orchestration DB
 - provider routing logic
 - image deployment receipts
+- jail isolation / jail lifecycle (canonical owner: `ryanmaclean/agent-jail`,
+  per registry ownership rule "jail isolation -> agent-jail"; see
+  `docs/adr/0001-move-jail-executor-to-agent-jail.md`. smolfire keeps only a
+  thin adapter that calls out to agent-jail's executor)
 
 ## Sibling repos to consult first
 

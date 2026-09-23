@@ -1,5 +1,15 @@
 # smolFire lower-bound runtime and lineage architecture — 2026-09-23
 
+> Canonical Datadog notebook payload: `docs/datadog/smolfire-lower-bound-runtime-notebook.json`
+>
+> Publish/update with: `python3 bin/publish-datadog-notebook.py`
+>
+> Tracking issue: [smolfire#76](https://github.com/ryanmaclean/smolfire/issues/76)
+>
+> Datadog notebook URL: _pending publish_
+>
+> Datadog notebook ID: _pending publish_
+
 ## Goal
 
 Find the **smallest and fastest permissively licensed execution substrate** that can run agent work while making state transition, history, provenance, and lineage native enough that the same logic is not reimplemented in a queue, database, trace store, VCS, and filesystem.
@@ -278,18 +288,19 @@ Avoid independently signing/storing equivalent representations at each layer.
 
 smolFire:
 
-- #60 Make one-ELF SMOLFIRE microVM the primary path
-- #61 Shrink userland below /rescue
-- #62 FreeBSD 16-CURRENT compatibility lane
-- #63 HAMMER1/HAMMER2/NetBSD LFS/FFS state matrix
-- #64 NetBSD 11 MICROVM sibling
-- #65 BOP/filesystem -> OpenLineage projection
-- #72 rump/rumprun lower-bound prototype
-- #73 FPGA/SmartNIC/NVMe transaction-sequencer research
+- [smolfire#60](https://github.com/ryanmaclean/smolfire/issues/60) Make one-ELF SMOLFIRE microVM the primary path
+- [smolfire#61](https://github.com/ryanmaclean/smolfire/issues/61) Shrink userland below /rescue
+- [smolfire#62](https://github.com/ryanmaclean/smolfire/issues/62) FreeBSD 16-CURRENT compatibility lane
+- [smolfire#63](https://github.com/ryanmaclean/smolfire/issues/63) HAMMER1/HAMMER2/NetBSD LFS/FFS state matrix
+- [smolfire#64](https://github.com/ryanmaclean/smolfire/issues/64) NetBSD 11 MICROVM sibling
+- [smolfire#65](https://github.com/ryanmaclean/smolfire/issues/65) BOP/filesystem -> OpenLineage projection
+- [smolfire#72](https://github.com/ryanmaclean/smolfire/issues/72) rump/rumprun lower-bound prototype
+- [smolfire#73](https://github.com/ryanmaclean/smolfire/issues/73) FPGA/SmartNIC/NVMe transaction-sequencer research
+- [smolfire#76](https://github.com/ryanmaclean/smolfire/issues/76) Publish and keep the Datadog Notebook in sync with this research
 
 BOP:
 
-- #5 Evaluate Jev/System One as BOP's fast decision plane
+- [bop#5](https://github.com/ryanmaclean/bop/issues/5) Evaluate Jev/System One as BOP's fast decision plane
 
 ## Near-term execution order
 

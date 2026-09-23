@@ -4,7 +4,7 @@
 >
 > Canonical Datadog notebook payload: `docs/datadog/smolfire-lower-bound-runtime-notebook.json`
 >
-> Render/publish with: `nu bin/render-datadog-notebook.nu` / `nu bin/publish-datadog-notebook.nu`
+> Render with `nu bin/render-datadog-notebook.nu`, then sync with `pup notebooks update 15638258 --file docs/datadog/smolfire-lower-bound-runtime-notebook.json`
 >
 > Tracking issue: [smolfire#76](https://github.com/ryanmaclean/smolfire/issues/76)
 >

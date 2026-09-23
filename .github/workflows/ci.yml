@@ -57,6 +57,11 @@ jobs:
         working-directory: .
         run: nu tests/spawn-subagent-test.nu
 
+      # jail-execute-test.nu: experimental jail executor + coord-tick executor
+      # selection. FreeBSD tools are PATH stubs, so this runs on Linux too.
+      - name: jail executor tests
+        run: nu tests/jail-execute-test.nu
+
       # Execute the pre-push guard against fixtures so hook refactors have
       # real coverage (nothing else runs this script; a parse error here
       # would otherwise only surface at push time on a developer machine).

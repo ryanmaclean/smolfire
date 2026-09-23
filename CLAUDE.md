@@ -46,6 +46,7 @@ Optional environment variables:
 | `STATE_FILE` | `var/run/coord-state.toml` | FSM state file |
 | `SPOOL` | `var/mail/spool` | mbox spool path |
 | `SMOLFIRE_CLAUDE_MODEL` | `claude-sonnet-5` | Claude model for subagent dispatch |
+| `SMOLFIRE_EXECUTOR` | `vm` | `vm` or `jail` (experimental, FreeBSD only — see `docs/JAIL-EXECUTOR.md`) |
 
 Run a single tick manually:
 

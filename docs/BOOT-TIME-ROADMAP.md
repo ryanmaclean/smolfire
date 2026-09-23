@@ -168,6 +168,11 @@ surface, and spool ergonomics against a SMOLFIRE-per-task dispatch.
 Re-evaluate at the FreeBSD 15.1/16 rebase (rootless Podman progress is the
 trigger to revisit).
 
+**Status:** the experiment's tool has landed as an opt-in executor —
+`bin/jail-execute.nu`, selected with `SMOLFIRE_EXECUTOR=jail` (default stays
+`vm`). Scope, security boundaries and the real-host verification checklist:
+`docs/JAIL-EXECUTOR.md`.
+
 ## Sources
 
 - <https://www.usenix.org/publications/loginonline/freebsd-firecracker>

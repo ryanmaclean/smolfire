@@ -8,7 +8,7 @@
 #
 # Prerequisites (FreeBSD port):
 #   security/tpm2-tools — provides tpm2_createek, tpm2_createak,
-#   tpm2_quote, tpm2_pcrread.
+#   tpm2_quote, tpm2_pcrread, tpm2_flushcontext.
 #
 # Usage:
 #   nu guest-attest.nu --nonce abcdef1234567890
@@ -40,7 +40,7 @@ def gen-uuid [] {
 
 # Check that all required binaries exist in PATH.
 def check-prereqs [] {
-    let required = ["tpm2_createek" "tpm2_createak" "tpm2_quote" "tpm2_pcrread"]
+    let required = ["tpm2_createek" "tpm2_createak" "tpm2_quote" "tpm2_pcrread" "tpm2_flushcontext"]
     for bin in $required {
         if (which $bin | length) == 0 {
             return {ok: false, missing: $bin}
@@ -66,6 +66,31 @@ def run-tpm2 [label: string, args: list<string>] {
         error make {msg: $"($label) exited ($result.exit_code): ($cmd_str)\nstderr: ($stderr_text)"}
     }
     $result.stdout | str trim
+}
+
+# Flush stale TPM state best-effort: transient objects (-t) and sessions (-s).
+# T5 seal/unseal PCR-policy sessions are never flushed, so by the time the
+# guest step runs swtpm is out of session slots and EK creation fails with
+# 0x903 "out of memory for session contexts". tpm2_flushcontext exits 0 with
+# nothing to flush, and any failure here must NOT fail the run — log the
+# outcome in one guest_attest_flush step and always succeed.
+def flush-tpm2 [] {
+    let t = try {
+        run-external "tpm2_flushcontext" "-t" | complete
+    } catch {|err|
+        {exit_code: -1, stdout: "", stderr: $err.msg}
+    }
+    let s = try {
+        run-external "tpm2_flushcontext" "-s" | complete
+    } catch {|err|
+        {exit_code: -1, stdout: "", stderr: $err.msg}
+    }
+    log-step "guest_attest_flush" {
+        transient_exit_code: $t.exit_code,
+        transient_stderr: ($t.stderr | str trim),
+        session_exit_code: $s.exit_code,
+        session_stderr: ($s.stderr | str trim)
+    }
 }
 
 # Parse PCR hex values from tpm2_pcrread text output.
@@ -145,6 +170,10 @@ export def main [
         error make {msg: $"missing prerequisite: ($prereqs.missing)\nInstall security/tpm2-tools and ensure it is in PATH"}
     }
     log-step "guest_attest_prereq_ok" {}
+
+    # Reclaim stale transient objects/sessions left by earlier steps (T5
+    # seal/unseal) before touching the EK. Best-effort: never fails the run.
+    flush-tpm2
 
     # Ensure output directory exists
     if not ($output_dir | path exists) {

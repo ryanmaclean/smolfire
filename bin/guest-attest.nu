@@ -89,11 +89,11 @@ def flush-tpm2 [] {
     } catch {|err|
         {exit_code: -1, stdout: "", stderr: $err.msg}
     }
-    # ACTIVE-session census: tpm2_getcap handles-active-session lists
+    # ACTIVE-session census: tpm2_getcap handles-loaded-session lists
     # 0x02xxxxxx handles (-t/-s never touch this range). Empty list → no-op;
     # any error → logged below, never fails the run.
     let cap = try {
-        run-external "tpm2_getcap" "handles-active-session" | complete
+        run-external "tpm2_getcap" "handles-loaded-session" | complete
     } catch {|err|
         {exit_code: -1, stdout: "", stderr: $err.msg}
     }

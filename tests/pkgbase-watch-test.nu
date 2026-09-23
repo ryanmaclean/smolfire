@@ -64,7 +64,7 @@ for want in [
 # Status-report hits: the 2026Q1 pkgbasify + pkgdist entries and the 2026Q2
 # SBOM/pkgbase aside; none is about kernel packages.
 let hits = $r.status_report_hits
-if ($hits | length) != 4 { fail $"want 4 status-report hits, got ($hits | length)" }
+if ($hits | length) != 3 { fail $"want 3 status-report hits, got ($hits | length)" }
 let titles = ($hits | get title)
 for t in ["More robust pkgbase conversion" "Kernel Benchmark, MAINTAINERS, and pkgdist" "FreeBSD, CRA, EuroBSDCon, and Security Team"] {
     if not ($t in $titles) { fail $"missing hit: ($t)" }

@@ -43,7 +43,10 @@ on:
       - release/tools/smolfire-qemu.conf
       - bin/bhyve-tpm-pcr-verify.nu
       - bin/run-vm-tests.nu
+      - bin/guest-attest.nu
+      - bin/attest-verify.nu
       - tests/tpm-seal-test.nu
+      - tests/tpm-attest-verify-test.nu
       - .github/workflows/tpm-vm-test.yml
 
 env:
@@ -169,6 +172,85 @@ jobs:
           echo '```toml' >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/smolfire-t1t6-ci.toml >> "$GITHUB_STEP_SUMMARY" || echo "(no results file)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Phase 4: Remote Attestation (A5) ────────────────────────────────────
+      # Generate TPM quote inside guest, verify on host. Reuses the running
+      # QEMU+swtpm guest from T1-T6 — no reboot required.
+
+      - name: A5 — Generate fresh nonce (anti-replay)
+        run: |
+          NONCE=$(openssl rand -hex 32)
+          echo "nonce=$NONCE" >> "$GITHUB_ENV"
+          echo "A5 nonce: $NONCE"
+
+      - name: A5 — Install guest-attest.nu in guest
+        run: |
+          scp \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -P "$SSH_PORT" \
+            bin/guest-attest.nu root@127.0.0.1:/tmp/guest-attest.nu
+
+      - name: A5 — Run guest attestation (generate TPM quote)
+        run: |
+          ssh \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -p "$SSH_PORT" root@127.0.0.1 \
+            "nu /tmp/guest-attest.nu --nonce $NONCE --task-id tpm-ci-$(date +%s) --output-dir /tmp" \
+            > /tmp/guest-attest-output.txt 2>&1
+          cat /tmp/guest-attest-output.txt
+
+      - name: A5 — Copy quote artifacts from guest to host
+        run: |
+          scp -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            root@127.0.0.1:/tmp/quote.msg /tmp/quote.msg
+          scp -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            root@127.0.0.1:/tmp/quote.sig /tmp/quote.sig
+          scp -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            root@127.0.0.1:/tmp/ak.pub /tmp/ak.pub
+          echo "Artifacts copied to /tmp"
+
+      - name: A5 — Build verifier input TOML (base64-encode artifacts)
+        run: |
+          QUOTE_B64=$(base64 -w0 /tmp/quote.msg)
+          SIG_B64=$(base64 -w0 /tmp/quote.sig)
+          AK_B64=$(base64 -w0 /tmp/ak.pub)
+          # Extract PCR digest and nonce from guest output
+          NONCE=$(grep 'nonce = ' /tmp/guest-attest-output.txt | tail -1 | sed 's/.*= "\(.*\)".*/\1/')
+          PCR_DIGEST=$(grep 'pcr_digest = ' /tmp/guest-attest-output.txt | tail -1 | sed 's/.*= "\(.*\)".*/\1/')
+          TASK_ID=$(grep 'task_id = ' /tmp/guest-attest-output.txt | tail -1 | sed 's/.*= "\(.*\)".*/\1/')
+
+          cat > /tmp/quote-verifier.toml << EOF
+          task_id = "$TASK_ID"
+          nonce = "$NONCE"
+          pcr_digest = "$PCR_DIGEST"
+          quote_data = "$QUOTE_B64"
+          signature = "$SIG_B64"
+          ak_public = "$AK_B64"
+          EOF
+          echo "Verifier input ready at /tmp/quote-verifier.toml"
+
+      - name: A5 — Run host-side verifier
+        run: |
+          nu bin/attest-verify.nu \
+            --quote /tmp/quote-verifier.toml \
+            --expected-pcr-digest "$PCR_DIGEST" \
+            --nonce "$NONCE" \
+            > /tmp/attestation-verdict.toml 2>&1
+          echo "Verifier exit code: $?"
+          cat /tmp/attestation-verdict.toml
+
+      - name: A5 — Report attestation result in job summary
+        if: always()
+        run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Phase 4: Remote Attestation (A5)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/attestation-verdict.toml ]; then
+            echo '```toml' >> "$GITHUB_STEP_SUMMARY"
+            cat /tmp/attestation-verdict.toml >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Attestation verdict file not found." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Cleanup — shutdown guest and stop swtpm
         if: always()

@@ -193,6 +193,7 @@ jobs:
               kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
               rm -f "$WORK/firecracker.pid"
             fi
+            return 0
           }
           trap cleanup_fc EXIT
           EXPECT_RC=0

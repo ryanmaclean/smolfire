@@ -141,13 +141,18 @@ Variables d'environnement de surcharge (toutes optionnelles) :
 | `HALT_INTERVAL` | `10` | Sommeil en secondes à l'arrêt |
 | `STATE_FILE` | `var/run/coord-state.toml` | État FSM persisté |
 | `SPOOL` | `var/mail/spool` | Chemin du spool mbox |
+| `SMOLFIRE_CLAUDE_MODEL` | `claude-sonnet-5` | Modèle Claude utilisé pour la distribution aux sous-agents |
+| `SMOLFIRE_EXECUTOR` | `vm` | Sélection de l'exécuteur `vm` ou `jail` |
 
 Les états FSM sont `idle -> dispatching -> waiting -> harvesting -> halted`.
 Pendant `dispatching`, le coordinateur lance automatiquement la CLI `claude`
 pour l'agent cible si elle est présente dans le `PATH` (câblage Phase II) ;
 sinon il met la requête en file d'attente et attend qu'un agent externe réponde
-dans le spool. Arrêt d'urgence global : `touch var/mail/HALT` ; arrêt par tâche :
-`var/mail/HALT.<task_id>`.
+dans le spool. Arrêt d'urgence global : `touch var/mail/HALT` — `coord-run.sh`
+cesse alors d'appeler `coord-tick.nu` et dort pendant `HALT_INTERVAL` secondes
+jusqu'à suppression du fichier. Arrêt par tâche : `var/mail/HALT.<task_id>`.
+Pour reprendre une tâche arrêtée, envoyez un message dans le spool avec
+`X-Resume-Action: retry | abort | edit`.
 
 ## Tests
 

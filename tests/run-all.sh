@@ -17,10 +17,11 @@ for f in tests/*-test.nu tests/*-test.py tests/coord-fsm-tests.nu; do
     case "$f" in
         *.py)
             if [ -z "$PY_OK" ]; then
-                output="$(basename "$f" .py): SKIP — python3 >= 3.10 required"
-            else
-                output=$(python3 "$f" 2>&1)
+                echo "skip"
+                SKIP=$((SKIP + 1))
+                continue
             fi
+            output=$(python3 "$f" 2>&1)
             ;;
         *)    output=$(nu "$f" 2>&1) ;;
     esac || { echo "FAILED"; FAIL=$((FAIL + 1)); continue; }

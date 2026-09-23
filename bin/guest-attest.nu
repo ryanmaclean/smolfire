@@ -68,12 +68,16 @@ def run-tpm2 [label: string, args: list<string>] {
     $result.stdout | str trim
 }
 
-# Flush stale TPM state best-effort: transient objects (-t) and sessions (-s).
-# T5 seal/unseal PCR-policy sessions are never flushed, so by the time the
-# guest step runs swtpm is out of session slots and EK creation fails with
-# 0x903 "out of memory for session contexts". tpm2_flushcontext exits 0 with
-# nothing to flush, and any failure here must NOT fail the run — log the
-# outcome in one guest_attest_flush step and always succeed.
+# Flush stale TPM state best-effort: transient objects (-t), saved sessions
+# (-s), plus ACTIVE sessions (0x02xxxxxx handle range).
+# T5 seal/unseal PCR-policy sessions leak ACTIVE sessions that neither -t
+# nor -s reclaims, so by the time the guest step runs swtpm's tiny session
+# table is full and EK creation dies on its 3rd StartAuthSession with
+# TPM-side 0x903 "out of memory for session contexts" (trace-proven over
+# the wire: ESAPI healthy, TPM-side exhaustion). Census active handles via
+# tpm2_getcap and flush each one. tpm2_flushcontext exits 0 with nothing to
+# flush, and any failure here must NOT fail the run — log the outcome in
+# one guest_attest_flush step and always succeed.
 def flush-tpm2 [] {
     let t = try {
         run-external "tpm2_flushcontext" "-t" | complete
@@ -85,11 +89,46 @@ def flush-tpm2 [] {
     } catch {|err|
         {exit_code: -1, stdout: "", stderr: $err.msg}
     }
+    # ACTIVE-session census: tpm2_getcap handles-active-session lists
+    # 0x02xxxxxx handles (-t/-s never touch this range). Empty list → no-op;
+    # any error → logged below, never fails the run.
+    let cap = try {
+        run-external "tpm2_getcap" "handles-active-session" | complete
+    } catch {|err|
+        {exit_code: -1, stdout: "", stderr: $err.msg}
+    }
+    let cap_stdout = try { $cap.stdout } catch { "" }
+    let active_handles = try {
+        $cap_stdout | split row -r '\s+' | where { str starts-with "0x02" } | uniq
+    } catch { [] }
+    mut active_flushed = 0
+    mut active_failed = 0
+    for h in $active_handles {
+        let ok = flush-one-active $h
+        if $ok { $active_flushed += 1 } else { $active_failed += 1 }
+    }
     log-step "guest_attest_flush" {
         transient_exit_code: $t.exit_code,
         transient_stderr: ($t.stderr | str trim),
         session_exit_code: $s.exit_code,
-        session_stderr: ($s.stderr | str trim)
+        session_stderr: ($s.stderr | str trim),
+        active_cap_exit_code: $cap.exit_code,
+        active_cap_stderr: ($cap.stderr | str trim),
+        active_handles: ($active_handles | length),
+        active_flushed: $active_flushed,
+        active_flush_failed: $active_failed
+    }
+}
+
+# Flush one ACTIVE-session handle best-effort. Returns true on success.
+# Helper keeps try/catch closures out of flush-tpm2's mutable counters
+# (nushell forbids capturing mutable variables inside closures).
+def flush-one-active [h: string] {
+    try {
+        let r = run-external "tpm2_flushcontext" $h | complete
+        $r.exit_code == 0
+    } catch {
+        false
     }
 }
 

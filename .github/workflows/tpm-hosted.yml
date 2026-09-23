@@ -279,13 +279,10 @@ jobs:
           NONCE="${{ steps.a5-nonce.outputs.nonce }}"
           TASK_ID="tpm-ci-$(date +%s)"
           echo "Running guest attestation with task_id=$TASK_ID nonce=$NONCE"
-          # TEMPORARY-DIAGNOSTIC (revert before merge): TSS2_LOG ESYS trace for
-          # createek 0x903 — guest tpm2-tss 4.1.3 emits ESYS detail to
-          # stderr, which ssh forwards into this step's captured log.
           sshpass -p smolfire ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null -p "$SSH_PORT" \
             root@127.0.0.1 \
-            "TSS2_LOG=all+TRACE nu /usr/local/bin/guest-attest.nu --nonce $NONCE --task-id $TASK_ID --output-dir /tmp"
+            "nu /usr/local/bin/guest-attest.nu --nonce $NONCE --task-id $TASK_ID --output-dir /tmp"
 
       - name: A5 — Copy artifacts from guest to host
         run: |

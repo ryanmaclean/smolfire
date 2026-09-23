@@ -433,14 +433,22 @@ jobs:
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log
 
-      - name: Enforce microVM gates
+      - name: Record microVM gate results
         if: ${{ always() }}
         run: |
-          test "${{ steps.microvm_size.outcome }}" = "success"
-          test "${{ steps.firecracker_network.outcome }}" = "success"
-          test "${{ steps.firecracker_boot_time.outcome }}" = "success"
-          test "${{ steps.firecracker_shell.outcome }}" = "success"
-          test "${{ steps.qemu_microvm.outcome }}" = "success"
+          FAIL=0
+          {
+            echo 'microvm_size=${{ steps.microvm_size.outcome }}'
+            echo 'firecracker_network=${{ steps.firecracker_network.outcome }}'
+            echo 'firecracker_boot_time=${{ steps.firecracker_boot_time.outcome }}'
+            echo 'firecracker_shell=${{ steps.firecracker_shell.outcome }}'
+            echo 'qemu_microvm=${{ steps.qemu_microvm.outcome }}'
+          } > "$WORK/gate-results.env"
+          while IFS='=' read -r gate outcome; do
+            echo "$gate=$outcome"
+            [ "$outcome" = "success" ] || FAIL=1
+          done < "$WORK/gate-results.env"
+          echo "gate_fail=$FAIL" >> "$WORK/gate-results.env"
 
       - name: Teardown VM
         if: always()
@@ -450,3 +458,9 @@ jobs:
           [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
           [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
           sudo ip link del tap0 2>/dev/null || true
+
+      - name: Enforce microVM gates
+        if: ${{ always() }}
+        run: |
+          . "$WORK/gate-results.env"
+          test "$gate_fail" = 0

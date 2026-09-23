@@ -321,15 +321,6 @@ jobs:
               eof              { puts "\nMICROVM: qemu exited"; exit 1 }
             }' | tee qemu-microvm.log
 
-      - name: Enforce microVM gates
-        if: ${{ always() }}
-        run: |
-          test "${{ steps.microvm_size.outcome }}" = "success"
-          test "${{ steps.firecracker_network.outcome }}" = "success"
-          test "${{ steps.firecracker_boot_time.outcome }}" = "success"
-          test "${{ steps.firecracker_shell.outcome }}" = "success"
-          test "${{ steps.qemu_microvm.outcome }}" = "success"
-
       - name: TSLOG capture — 3 TSLOG boots + 3 release wall-clock boots (tslog only)
         # Measurement, not a gate: runs after the gates whatever they said
         # (a failing gate is exactly when phase data is most useful).
@@ -426,3 +417,12 @@ jobs:
           [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
           [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
           sudo ip link del tap0 2>/dev/null || true
+
+      - name: Enforce microVM gates
+        if: ${{ always() }}
+        run: |
+          test "${{ steps.microvm_size.outcome }}" = "success"
+          test "${{ steps.firecracker_network.outcome }}" = "success"
+          test "${{ steps.firecracker_boot_time.outcome }}" = "success"
+          test "${{ steps.firecracker_shell.outcome }}" = "success"
+          test "${{ steps.qemu_microvm.outcome }}" = "success"

@@ -51,6 +51,17 @@ export const KILLED_EXIT_CODE       = 137      # 128 + SIGKILL (timeout -k fired
 export const NETWORK_CAPABILITY     = "Network"
 export const DEFAULT_JAIL_ROOT      = "/var/smolfire/jails"
 
+# Minimum patched FreeBSD levels (docs/JAIL-EXECUTOR.md §3). Below these, a
+# `security.mac.do.rules` entry without an explicit target gid can leave the
+# switched credential's primary gid at 0 when the caller's supplementary-group
+# list is empty: FreeBSD-SA-26:59.mac_do, CVE-2026-58092. SA-26:25.thr
+# (thr_kill2(2) breaks jail signal isolation) and SA-26:18.setcred (kernel
+# stack overflow under setcred(2), the syscall beneath mdo/mac_do) land in the
+# same or earlier patch levels, so the same floor covers all three.
+export const MIN_PATCH_15_0 = 13
+export const MIN_PATCH_15_1 = 3
+export const MIN_PATCH_LEVEL_MSG = "15.0-RELEASE-p13 or 15.1-RELEASE-p3 (FreeBSD-SA-26:59.mac_do / CVE-2026-58092, FreeBSD-SA-26:25.thr, FreeBSD-SA-26:18.setcred)"
+
 # ── Pure helpers (unit-tested on any OS) ──────────────────────────────────────
 
 # Refuse on anything but FreeBSD. Returns {ok: bool, error: string}.
@@ -59,6 +70,66 @@ export def host-check [os: string] {
         {ok: true, error: ""}
     } else {
         {ok: false, error: $"jail executor requires a FreeBSD host \(jail\(8\), rctl\(8\), mac_do\(4\)\); this host is ($os). Use SMOLFIRE_EXECUTOR=vm here."}
+    }
+}
+
+# Parse `freebsd-version -k` output, e.g. "15.0-RELEASE-p13" or
+# "15.1-RELEASE-p3" or "15.0-RELEASE" (patch 0). Anything else (CURRENT,
+# BETA, RC, STABLE, unparseable) is reported as ok: false, since patch level
+# can't be confirmed from it.
+export def parse-freebsd-version-k [v: string] {
+    let s = ($v | str trim)
+    let m = ($s | parse --regex '^(?<major>[0-9]+)\.(?<minor>[0-9]+)-RELEASE(-p(?<patch>[0-9]+))?$')
+    if ($m | is-empty) {
+        {ok: false, major: 0, minor: 0, patch: 0, raw: $s, error: $"unrecognized freebsd-version -k output: '($s)'"}
+    } else {
+        let row = $m | first
+        let patch_s = ($row | get -o patch | default "")
+        {ok: true, major: ($row.major | into int), minor: ($row.minor | into int), patch: (if $patch_s == "" { 0 } else { $patch_s | into int }), raw: $s, error: ""}
+    }
+}
+
+# Is a parsed freebsd-version-k record at or above the patched floor for its
+# branch? 15.2+/16+ (a branch newer than either advisory ever shipped
+# against) is treated as patched. Anything below 15.0, or unparseable, is not.
+export def patch-level-ok? [p: record] {
+    if not $p.ok {
+        false
+    } else if $p.major < 15 {
+        false
+    } else if $p.major == 15 and $p.minor == 0 {
+        $p.patch >= $MIN_PATCH_15_0
+    } else if $p.major == 15 and $p.minor == 1 {
+        $p.patch >= $MIN_PATCH_15_1
+    } else {
+        true
+    }
+}
+
+# Decide whether the executor may proceed on this host. Returns
+# {ok: bool, error: string, warn: string}. `error` is set (and `ok` false)
+# when the host is below the patched floor and `allow_unpatched` is false.
+# `warn` carries a non-fatal notice when `allow_unpatched` overrode a refusal.
+export def preflight-patch-level [freebsd_version_k: string, allow_unpatched: bool] {
+    let p = parse-freebsd-version-k $freebsd_version_k
+    if (patch-level-ok? $p) {
+        {ok: true, error: "", warn: ""}
+    } else if $allow_unpatched {
+        {ok: true, error: "", warn: $"jail executor: host reports freebsd-version -k = '($freebsd_version_k)', below the minimum patched level \(($MIN_PATCH_LEVEL_MSG)\); continuing because --allow-unpatched was passed"}
+    } else {
+        {ok: false, error: $"jail executor requires a patched FreeBSD host: freebsd-version -k reports '($freebsd_version_k)', below the minimum \(($MIN_PATCH_LEVEL_MSG)\). Patch the host, or pass --allow-unpatched to override \(not recommended\).", warn: ""}
+    }
+}
+
+# Which entries of a `security.mac.do.rules` value (comma-separated) lack an
+# explicit `gid=` clause. Empty input (rules unset, or sysctl unreadable) is
+# not a warning — there is nothing to check.
+export def mac-do-rules-missing-gid [rules: string] {
+    let s = ($rules | str trim)
+    if $s == "" {
+        []
+    } else {
+        $s | split row "," | each {|r| $r | str trim } | where {|r| $r != "" and not ($r | str contains "gid=") }
     }
 }
 
@@ -287,9 +358,13 @@ export def exec-argv [backend: string, name: string, cmd: string, remaining: int
 
 # Privilege prefix for root-only steps. uid 0 → none; else `mdo -i` if present.
 # `-i` switches only the user IDs to root and keeps the caller's groups, so the
-# minimal mac_do(4) rule `uid=N>uid=0` authorizes it. Plain `mdo` implies
-# `-u root`, which also switches to root's login groups (wheel, operator) and
-# is refused with EPERM under that rule (verified on FreeBSD 15.0-RELEASE-p5).
+# minimal mac_do(4) rule `uid=N>uid=0:gid=0` authorizes it. The rule must name
+# an explicit target gid: on a host below the patch level in
+# docs/JAIL-EXECUTOR.md §3, a gid-less rule can leave the switched credential's
+# primary gid at 0 even when that wasn't named (FreeBSD-SA-26:59.mac_do,
+# CVE-2026-58092). Plain `mdo` implies `-u root`, which also switches to
+# root's login groups (wheel, operator) and is refused with EPERM under that
+# rule (verified on FreeBSD 15.0-RELEASE-p5).
 # Returns {prefix: list<string>, error: string}.
 export def priv-prefix [uid: int, has_mdo: bool] {
     if $uid == 0 {
@@ -297,7 +372,7 @@ export def priv-prefix [uid: int, has_mdo: bool] {
     } else if $has_mdo {
         {prefix: ["mdo" "-i"], error: ""}
     } else {
-        {prefix: [], error: $"jail executor needs root: run as root, or load mac_do\(4\) and allow this uid \(($uid)\) to reach root, e.g. security.mac.do.rules=\"uid=($uid)>uid=0\", with mdo\(1\) at /usr/bin/mdo"}
+        {prefix: [], error: $"jail executor needs root: run as root, or load mac_do\(4\) and allow this uid \(($uid)\) to reach root, e.g. security.mac.do.rules=\"uid=($uid)>uid=0:gid=0\", with mdo\(1\) at /usr/bin/mdo"}
     }
 }
 
@@ -305,6 +380,13 @@ export def priv-prefix [uid: int, has_mdo: bool] {
 export def result-record [verdict: string, boot_sec: int, outputs: list, error: string = ""] {
     let r = {verdict: $verdict, boot_sec: $boot_sec, outputs: $outputs}
     if $error == "" { $r } else { $r | insert error $error }
+}
+
+# Add a `warnings` key (non-fatal, e.g. --allow-unpatched or a gid-less mac_do
+# rule) only when there is at least one, so the common case keeps the exact
+# vm-execute.nu-parity shape that result-record produces.
+export def attach-warnings [result: record, warnings: list<string>] {
+    if ($warnings | is-empty) { $result } else { $result | insert warnings $warnings }
 }
 
 # mbox reply envelope for a jail run. Mirrors coord-dispatch.nu dispatch-vm's
@@ -396,6 +478,21 @@ def mac-do-loaded [] {
     $r.exit_code == 0 and ($r.stdout | str trim) == "1"
 }
 
+# `freebsd-version -k` (kernel patch level), or "" if the binary is missing
+# or fails — preflight-patch-level then refuses (unparseable) unless
+# --allow-unpatched.
+def read-freebsd-version-k [] {
+    let r = try { ^freebsd-version -k | complete } catch { {exit_code: 1, stdout: ""} }
+    if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
+}
+
+# `sysctl -n security.mac.do.rules`, or "" if unreadable (mac_do not loaded,
+# no rules set, or the binary is missing) — treated as "nothing to warn about".
+def read-mac-do-rules [] {
+    let r = try { ^sysctl -n security.mac.do.rules | complete } catch { {exit_code: 1, stdout: ""} }
+    if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
+}
+
 # Tear everything down. Returns a list of error strings (empty = clean).
 def teardown [ctx: record] {
     mut errs = []
@@ -460,10 +557,32 @@ export def run-jail-task [
     --require-limits                   # fail instead of warn when rctl is unavailable
     --salt:          string = ""       # name salt (tests); random when empty
     --os:            string = ""       # host OS override (tests); default $nu.os-info.name
+    --allow-unpatched                  # skip the freebsd-version -k patch-floor refusal (not recommended)
 ] {
     let host_os = if $os == "" { $nu.os-info.name } else { $os }
     let hc = host-check $host_os
     if not $hc.ok { return (result-record "fail" 0 [] $hc.error) }
+
+    # Patch-floor preflight (docs/JAIL-EXECUTOR.md §3): refuse below the
+    # minimum patched level unless --allow-unpatched. host-check above already
+    # confirmed $host_os matches FreeBSD, real or overridden for tests.
+    let pf = preflight-patch-level (read-freebsd-version-k) $allow_unpatched
+    if not $pf.ok { return (result-record "fail" 0 [] $pf.error) }
+    mut warnings = []
+    if $pf.warn != "" {
+        diag "jail_patch_level_warning" {task_id: $task_id, warning: $pf.warn}
+        $warnings = $warnings | append $pf.warn
+    }
+
+    # Defense-in-depth warning (not a refusal): flag any configured mac_do
+    # rule that omits an explicit gid= clause, the exact shape
+    # FreeBSD-SA-26:59.mac_do (CVE-2026-58092) warns about.
+    let missing_gid = mac-do-rules-missing-gid (read-mac-do-rules)
+    if ($missing_gid | length) > 0 {
+        let gid_warning = $"security.mac.do.rules has ($missing_gid | length) rule\(s\) with no explicit gid= clause \(FreeBSD-SA-26:59.mac_do / CVE-2026-58092\): ($missing_gid | str join ', ')"
+        diag "jail_mac_do_rule_missing_gid" {task_id: $task_id, rules: $missing_gid}
+        $warnings = $warnings | append $gid_warning
+    }
 
     if ($commands | length) == 0 { return (result-record "fail" 0 [] "no commands to run") }
     let be = resolve-backend $base $zfs_snapshot $image
@@ -589,7 +708,7 @@ export def run-jail-task [
     if $setup_error != "" {
         let errs = teardown $ctx
         let msg = [$setup_error ...$errs] | str join "; "
-        return (result-record "fail" $boot_sec [] $msg)
+        return (attach-warnings (result-record "fail" $boot_sec [] $msg) $warnings)
     }
 
     # ── run ──────────────────────────────────────────────────────────────────
@@ -621,14 +740,22 @@ export def run-jail-task [
     let errs = teardown $ctx
     let all_errors = [$run_error ...$errs] | where {|e| $e != ""}
     let verdict = if $all_ok and ($errs | is-empty) { "pass" } else { "fail" }
-    result-record $verdict $boot_sec $outputs ($all_errors | str join "; ")
+    attach-warnings (result-record $verdict $boot_sec $outputs ($all_errors | str join "; ")) $warnings
 }
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-# Exit status for a result: 0 pass, 2 refused (non-FreeBSD host), 1 otherwise.
-def result-exit [result: record] {
-    if $result.verdict == "pass" { 0 } else if (($result | get -o error | default "") | str starts-with "jail executor requires a FreeBSD host") { 2 } else { 1 }
+# Exit status for a result: 0 pass, 2 refused (non-FreeBSD host, or a FreeBSD
+# host below the patch floor without --allow-unpatched), 1 otherwise.
+export def result-exit [result: record] {
+    let err = ($result | get -o error | default "")
+    if $result.verdict == "pass" {
+        0
+    } else if ($err | str starts-with "jail executor requires a FreeBSD host") or ($err | str starts-with "jail executor requires a patched FreeBSD host") {
+        2
+    } else {
+        1
+    }
 }
 
 # Run commands in an ephemeral jail and print the result record as JSON.
@@ -647,9 +774,10 @@ def "main run" [
     --tmpfs-size: string = "1g"
     --jail-root: string = "/var/smolfire/jails"
     --require-limits
+    --allow-unpatched    # skip the freebsd-version -k patch-floor refusal (not recommended)
 ] {
     let cmds = $commands | each {|c| $c | into string }
-    let result = run-jail-task $task_id $cmds --base $base --zfs-snapshot $zfs_snapshot --image $image --network=$network --timeout $timeout --memory $memory --vmemory $vmemory --maxproc $maxproc --pcpu $pcpu --tmpfs-size $tmpfs_size --jail-root $jail_root --require-limits=$require_limits
+    let result = run-jail-task $task_id $cmds --base $base --zfs-snapshot $zfs_snapshot --image $image --network=$network --timeout $timeout --memory $memory --vmemory $vmemory --maxproc $maxproc --pcpu $pcpu --tmpfs-size $tmpfs_size --jail-root $jail_root --require-limits=$require_limits --allow-unpatched=$allow_unpatched
     print ($result | to json)
     exit (result-exit $result)
 }
@@ -680,11 +808,13 @@ def "main dispatch" [
     let tools = $payload | get -o tools_required | default []
     let timeout = $payload | get -o timeout_sec | default ($env.SMOLFIRE_JAIL_TIMEOUT? | default $DEFAULT_TIMEOUT_SEC | into int)
     let jail_root = $env.SMOLFIRE_JAIL_ROOT? | default $DEFAULT_JAIL_ROOT
+    # Same escape hatch as `run --allow-unpatched`, for the coordinator-spawned path.
+    let allow_unpatched = ($env.SMOLFIRE_JAIL_ALLOW_UNPATCHED? | default "" ) in ["1" "true" "yes"]
 
     let result = if ($req | is-empty) {
         result-record "fail" 0 [] $"request ($request_id) not found in spool"
     } else {
-        run-jail-task $task_id $commands --base $base --zfs-snapshot $zsnap --image $image --network=(network-wanted $tools) --timeout $timeout --jail-root $jail_root
+        run-jail-task $task_id $commands --base $base --zfs-snapshot $zsnap --image $image --network=(network-wanted $tools) --timeout $timeout --jail-root $jail_root --allow-unpatched=$allow_unpatched
     }
     # Strict mbox: the reply's "From " line must follow a blank line.
     let existing = if ($spool | path exists) { open --raw $spool } else { "" }

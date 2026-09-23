@@ -12,22 +12,27 @@ the default: `vm` stays the executor unless you opt in.
 |---|---|
 | `bin/jail-execute.nu` | Executor. Sibling of `bin/vm-execute.nu` with the same contract |
 | `bin/coord-tick.nu` | Picks the executor per request (`resolve-executor`) and spawns `jail-execute.nu dispatch` for `jail` |
-| `tests/jail-execute-test.nu` | 29 host-independent tests that stub the FreeBSD tools on `PATH`. `tests/run-all.sh` picks it up automatically |
+| `tests/jail-execute-test.nu` | 34 host-independent tests that stub the FreeBSD tools on `PATH`. `tests/run-all.sh` picks it up automatically |
 
 ## 1. Contract
 
 ```nu
 use bin/jail-execute.nu [run-jail-task]
 run-jail-task "task-0042" ["uname -a" "cc --version"] --base /usr/local/smolfire/base-15.0
-# => {verdict: "pass"|"fail", boot_sec: int, outputs: [{cmd, stdout, stderr, exit_code}], error?: string}
+# => {verdict: "pass"|"fail", boot_sec: int, outputs: [{cmd, stdout, stderr, exit_code}], error?: string, warnings?: list<string>}
 ```
 
-The record has the same keys as `run-vm-task`. A test checks this against
-`vm-execute.nu` itself. `boot_sec` is the jail setup time: clone or mkdir,
+The record has the same keys as `run-vm-task`, plus an optional `warnings`
+key (present only when non-empty) for non-fatal preflight notices — today,
+`--allow-unpatched` overriding the §3 patch-floor refusal, or a
+`security.mac.do.rules` entry with no `gid=` clause. A test checks the
+required keys against `vm-execute.nu` itself. `boot_sec` is the jail setup time: clone or mkdir,
 `jail -c`, and the rctl limits.
 
 CLI output is structured JSON on stdout. The exit code is 0 for pass, 1 for
-fail, and 2 when the executor refuses to run on a non-FreeBSD host:
+fail, and 2 when the executor refuses to run: on a non-FreeBSD host, or on a
+FreeBSD host below the minimum patch level in §3 (unless `--allow-unpatched`
+is passed):
 
 ```sh
 nu bin/jail-execute.nu run task-0042 "uname -a" --base /usr/local/smolfire/base-15.0
@@ -38,7 +43,8 @@ nu bin/jail-execute.nu run task-0042 "uname -a" --image ghcr.io/freebsd/freebsd-
 Flags: `--network`, `--timeout` (seconds), `--memory 512m`,
 `--vmemory <size>` (defaults to `--memory`), `--maxproc 256`,
 `--pcpu 100`, `--tmpfs-size 1g`, `--jail-root /var/smolfire/jails`,
-`--require-limits`.
+`--require-limits`, `--allow-unpatched` (skip the §3 patch-floor refusal;
+not recommended — see FreeBSD-SA-26:59.mac_do / CVE-2026-58092).
 
 ### Backends (exactly one rootfs source)
 
@@ -161,6 +167,17 @@ What coord-tick does:
 
 ## 3. Host prerequisites (FreeBSD 15.x)
 
+**Minimum host patch level: `15.0-RELEASE-p13` or `15.1-RELEASE-p3`.**
+Required for FreeBSD-SA-26:59.mac_do (CVE-2026-58092: a `mac_do(4)` rule with
+no explicit target gid can leave the switched credential's primary gid at 0
+when the caller's supplementary-group list is empty), FreeBSD-SA-26:25.thr
+(`thr_kill2(2)` missing perm check breaks jail signal isolation) and
+FreeBSD-SA-26:18.setcred (kernel stack overflow via `setcred(2)`, the syscall
+underneath `mdo(1)`/`mac_do(4)`). `bin/jail-execute.nu` checks
+`freebsd-version -k` at the start of every run and refuses (exit 2) below this
+floor unless `--allow-unpatched` is passed; it also warns if any
+`security.mac.do.rules` entry omits a `gid=` clause.
+
 jail(8), jexec(8), rctl(8), mac_do(4), mdo(1), timeout(1), nullfs(5) and
 tmpfs(5) are all FreeBSD base (BSD-2-Clause). **Licence caveat:** zfs(8) is
 OpenZFS, which is **CDDL-1.0**, a weak copyleft licence that isn't on this
@@ -174,7 +191,7 @@ Podman's `vfs` storage driver avoids ZFS.
 |---|---|
 | Nushell | `pkg install nushell` (MIT) |
 | rctl | `kern.racct.enable=1` in `/boot/loader.conf`, then **reboot**. It's a tunable and can't be set at runtime |
-| Root hop for a non-root coordinator | `mac_do_load="YES"` in loader.conf (or `kldload mac_do`), plus `security.mac.do.rules="uid=<coord-uid>>uid=0"` in `/etc/sysctl.conf`. The executor runs `mdo -i`, which changes only the user IDs and keeps the caller's groups, so this rule is enough. Plain `mdo` (implied `-u root`, which also takes root's groups) is refused with `setcred(): Operation not permitted` under it. `mdo` must be at `/usr/bin/mdo`. Alternatively, run the coordinator as root on a dedicated VM |
+| Root hop for a non-root coordinator | `mac_do_load="YES"` in loader.conf (or `kldload mac_do`), plus `security.mac.do.rules="uid=<coord-uid>>uid=0:gid=0"` in `/etc/sysctl.conf`. The rule pins an explicit target `gid=0` (root:wheel is genuinely intended here, since this row already grants the coordinator full root — see §4); a rule with no `gid=` clause is the exact shape FreeBSD-SA-26:59.mac_do (CVE-2026-58092) warns about, on hosts below the minimum patch level in §3. The executor runs `mdo -i`, which changes only the user IDs and keeps the caller's groups, so this rule is enough. Plain `mdo` (implied `-u root`, which also takes root's groups) is refused with `setcred(): Operation not permitted` under it. `mdo` must be at `/usr/bin/mdo`. Alternatively, run the coordinator as root on a dedicated VM |
 | Base dir (`--base`) | A FreeBSD 15 userland, for example `bsdinstall jail /usr/local/smolfire/base-15.0` or an extracted `base.txz`. Keep it read-only and owned by root |
 | DNS for `"Network"` tasks (`--base`) | `touch <base>/etc/resolv.conf`, which creates an **empty** regular file (not a symlink) for the per-task nullfs file mount. Keep it empty so tasks without network see no resolver config |
 | ZFS base (`--zfs-snapshot`) | `zfs create -p zroot/smolfire/base`, populate it, then `zfs snapshot zroot/smolfire/base@clean` |
@@ -190,7 +207,7 @@ when you opt into `--zfs-snapshot` or Podman's ZFS storage driver.
 | | `vm` (SMOLFIRE under QEMU) | `jail` (this executor) |
 |---|---|---|
 | Kernel | Separate guest kernel. Escaping means breaking the hypervisor (HVF/KVM/bhyve) plus virtio | **Shared host kernel.** Escaping means a FreeBSD kernel or jail bug, a larger attack surface |
-| Host privilege needed | None beyond running QEMU | **Root.** A `mac_do` rule `uid=N>uid=0` gives the coordinator user *full* root, because rules can't be scoped to commands. In practice the coordinator user is root-equivalent, so run it on a dedicated FreeBSD VM (the roadmap's "build VM"), not a shared host |
+| Host privilege needed | None beyond running QEMU | **Root.** A `mac_do` rule `uid=N>uid=0:gid=0` gives the coordinator user *full* root, because rules can't be scoped to commands. In practice the coordinator user is root-equivalent, so run it on a dedicated FreeBSD VM (the roadmap's "build VM"), not a shared host |
 | Network | QEMU user-net always has SLIRP egress | None unless `tools_required` has `"Network"`, which then inherits the host stack. No VNET yet |
 | Filesystem | qcow2 overlay, base image never written | Read-only nullfs base plus a size-capped tmpfs, or a throwaway ZFS clone. Neither the spool nor the repo is visible inside |
 | Resources | `-m 256M -smp 2` | rctl memory, maxproc and pcpu (only when racct is enabled) |
@@ -239,8 +256,9 @@ Run these on the FreeBSD build VM, once, before trusting the executor:
 2. `rctl -a jail:<name>:...` applies to the named jail. `rctl -u jail:<name>`
    shows usage (`-h` only makes the numbers human-readable, as in
    `rctl -hu`), and `rctl -r` clears it.
-3. `mdo` with the `uid=N>uid=0` rule works, and `mac.do = "disable"` stops mdo
-   inside the jail.
+3. `mdo` with the `uid=N>uid=0:gid=0` rule works, and `mac.do = "disable"`
+   stops mdo inside the jail. The explicit `gid=` clause avoids
+   FreeBSD-SA-26:59.mac_do (CVE-2026-58092) regardless of host patch level.
 4. `timeout -k 5 N` through `mdo` kills a hung `jexec`, and `jail -r` reaps
    what's left.
 5. After a run, `mount -p | grep /var/smolfire/jails` and `jls` are both

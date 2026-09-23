@@ -20,6 +20,13 @@ name: SMOLFIRE microVM kernel
 # net pass at 569ms, de-debugged kernel, isxen() pv.c patch active.)
 on:
   workflow_dispatch:
+  # TEMPORARY revalidation trigger: the rename (smolBSD -> smolfire,
+  # issue #41) touched kernconfs/confs/scripts but no heavyweight gate
+  # has run since July — prove the renamed kernel pipeline end-to-end.
+  # Remove after one green run.
+  push:
+    branches: ['claude/ur-bsd-26-qnmjho']
+    paths: ['.github/workflows/smolfire.yml']
     inputs:
       tslog:
         description: "Also build SMOLFIRE-TSLOG and capture 3 TSLOG boots + 3 release wall-clock boots (docs/BOOT-TIME-ROADMAP.md §3)"

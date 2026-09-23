@@ -27,6 +27,12 @@
 name: Build smolfire Image (hosted runner)
 
 on:
+  # TEMPORARY revalidation trigger (see smolfire.yml note): prove the
+  # renamed full-image pipeline (SMOLFIRE-VM, smolfire-qemu*.conf,
+  # CLOUDWARE=smolfire, smolfire.ufs.qcow2). Remove after one green run.
+  push:
+    branches: ['claude/ur-bsd-26-qnmjho']
+    paths: ['.github/workflows/build-image-hosted.yml']
   workflow_dispatch:
     inputs:
       arch:

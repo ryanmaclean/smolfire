@@ -221,6 +221,72 @@ ranking across variants — reproduced over 3 interleaved-per-round boots
 each, on the same noisy host — is the load-bearing evidence, not any single
 absolute number.
 
+### 1.3 aarch64 TSLOG (HVF, kernel-internal, measured)
+
+Issue #39 item 4 continuation: §1.1 above is wall-clock only (serial line
+arrival); this section is the kernel-internal TSLOG counterpart, filling
+the "No aarch64 `SMOLFIRE-VM-TSLOG` hosted build" gap PR #55 left open. The
+hosted `SMOLFIRE-VM-TSLOG` kernel now exists
+(<https://github.com/ryanmaclean/smolfire/actions/runs/35835055263>,
+`smolfire-aarch64-kernel-SMOLFIRE-VM-TSLOG` artifact) and was measured
+against the Phase-1 disk image, not the crunched SMOLFIRE microVM — so this
+extends `bin/tslog-phases.nu` (written for the amd64 Firecracker leg in
+PR #55) to a full FreeBSD boot for the first time.
+
+**Environment:** MacBookPro18,4 (Apple M1 Max), macOS 26.6.2, QEMU 10.2.1
+`-machine virt,accel=hvf -cpu host`, EDK2 aarch64 firmware, 256 MiB, 2 vCPU,
+SLIRP NIC with `hostfwd` for SSH, `-boot menu=on,splash-time=0` (§1.1
+finding 1). Image: an APFS clone (`cp -c`, original untouched) of
+`build/FreeBSD-15-aarch64-smolbsd.qcow2`, truncated sha256 `6d2a8...da3b`
+(full digest intentionally not recorded — see `docs/boot-time/2026-09-23/aarch64/README.md`).
+Unlike §1.1, this clone was **not** booted with `snapshot=on`: the setup
+boot installed the TSLOG kernel at `/boot/kernel.tslog/` (4 modules),
+set `loader.conf` `kernel="kernel.tslog"`, and added
+`hw.bus.devctl_nomatch_enabled="0"` (PR #82's devd→dhclient fix, applied
+here so this leg's rc phase already reflects it even though #82 was still
+open at measurement time) — those writes had to persist across the 3
+measurement reboots. n=3, raw dumps and methodology notes in
+`docs/boot-time/2026-09-23/aarch64/`.
+
+| Phase | median (ms) | min–max (ms) |
+|---|---|---|
+| VMM exec → vCPU (cross-clock stitch — noisy, see caveats) | 166.3 | -53.6–223.9 |
+| vCPU → kernel entry (`hammer_time`) | 289.2 | 222.0–1,049.2 |
+| Early kernel (→ `mi_startup`) | 451.0 | 69.1–1,067.1 |
+| SYSINIT + devices (→ `start_init`) | 369.2 | 64.6–444.9 |
+| Root mount | 172.1 | 26.5–269.0 |
+| `start_init` other (excl. mount) | 4.2 | 2.3–9.7 |
+| init + `/etc/rc` → `login:` | 5,663.5 | 1,658.4–6,477.5 |
+| **Wall, TSLOG kernel (exec → `login:`)** | **7,812.0** | 2,209.0–8,625.0 |
+| Kernel-internal only (first TSLOG record → READY) | 7,351.9 | 1,820.8–7,576.3 |
+
+Generated with `nu bin/tslog-phases.nu --dir docs/boot-time/2026-09-23/aarch64 --md`
+(read-only use of the unmodified PR #55 tool); full JSON in
+`docs/boot-time/2026-09-23/aarch64/tslog-phases.json`.
+
+**Caveats** (see the dataset README for the full explanation): this image's
+rc has no built-in `SMOLFIRE_READY` gate, so `TIME_TO_READY` is stitched
+from the serial `login:` timestamp (host wall clock) and a separate SSH
+`/bin/echo` anchor (TSC clock) — good enough for the *sum* (`wall_to_ready`)
+but it makes the pre-kernel split noisy, visible as the -53.6 ms minimum on
+`VMM exec → vCPU`. Host load also varied a lot between runs (run 1: 2.2 s
+to login; runs 2–3: 7.8–8.6 s), same noise §1.1 already flagged.
+
+**Re-ranked aarch64 candidates:** rc still dominates (`init + /etc/rc →
+login:` is 5.7 s of a 7.8 s median boot, ~73%) even with PR #82's fix
+applied — confirming §1.1 finding (2) rather than replacing it; the
+devd→dhclient stall PR #82 targets is one contributor among several rc
+steps (sshd keygen check, cron, background-fsck scheduling), so (1) further
+rc slimming — a custom init in the spirit of §2.5's Firecracker plan, or at
+minimum trimming `/etc/rc.d` script count — now outranks (2) firmware/EDK2
+work (§1.1's 5 s BDS wait is already fixed by `splash-time=0`, and this
+run's `VMM exec → vCPU` + `vCPU → kernel entry` together are only
+~0.2–1.3 s of measurement noise, not a real optimization target); (3)
+`early_kernel` + `sysinit_devices` (~450 + 370 ms median) is a new,
+previously-unattributed cost worth a follow-up TSLOG `top_self_by_name`
+pass (`docs/boot-time/2026-09-23/aarch64/tslog-phases.json`) before ranking
+it against rc-slimming.
+
 ## 2. Ranked candidate reductions — re-ranked on measured data
 
 Ranked by measured removable time ÷ effort (SMOLFIRE / Firecracker, §1).

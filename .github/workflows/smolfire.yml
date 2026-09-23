@@ -20,6 +20,11 @@ name: SMOLFIRE microVM kernel
 # net pass at 569ms, de-debugged kernel, isxen() pv.c patch active.)
 on:
   workflow_dispatch:
+    inputs:
+      tslog:
+        description: "Also build SMOLFIRE-TSLOG and capture 3 TSLOG boots + 3 release wall-clock boots (docs/BOOT-TIME-ROADMAP.md §3)"
+        type: boolean
+        default: false
 
 env:
   WORK: /mnt/smolfire-ci
@@ -122,9 +127,12 @@ jobs:
           $SSH 'env ASSUME_ALWAYS_YES=yes pkg update -q && env ASSUME_ALWAYS_YES=yes pkg install -y git'
           $SSH "git clone --depth 1 -b $SRC_BRANCH https://git.freebsd.org/src.git /usr/src"
           tar -C "$GITHUB_WORKSPACE" -cf - . | $SSH 'mkdir -p /root/smolfire && tar -C /root/smolfire -xf -'
-          $SSH 'cp /root/smolfire/sys/amd64/conf/SMOLFIRE /usr/src/sys/amd64/conf/SMOLFIRE'
+          # SMOLFIRE-TSLOG does `include SMOLFIRE`, so copy the whole family.
+          $SSH 'cp /root/smolfire/sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/'
+          TSLOG_ENV=0
+          [ "${{ inputs.tslog && 'true' || 'false' }}" = true ] && TSLOG_ENV=1
           BUILD_RC=0
-          $SSH 'sh /root/smolfire/bin/build-smolfire.sh' 2>&1 | tee build.log || BUILD_RC=$?
+          $SSH "env SMOLFIRE_TSLOG=$TSLOG_ENV sh /root/smolfire/bin/build-smolfire.sh" 2>&1 | tee build.log || BUILD_RC=$?
           scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -P "$SSH_PORT" root@127.0.0.1:/var/tmp/smolfire-build.log \
               "$WORK/smolfire-build-vm.log" || true
@@ -136,6 +144,11 @@ jobs:
           ls -lh "$WORK/smolfire-kernel"
           BYTES=$(wc -c < "$WORK/smolfire-kernel")
           echo "kernel_bytes=$BYTES ($((BYTES / 1048576)) MiB — this file is the whole OS)"
+          if [ "$TSLOG_ENV" = 1 ]; then
+            scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -P "$SSH_PORT" root@127.0.0.1:/root/smolfire-kernel-tslog "$WORK/smolfire-kernel-tslog"
+            ls -lh "$WORK/smolfire-kernel-tslog"
+          fi
 
       - name: Boot gate — Firecracker (net gate + target << 1s to SMOLFIRE_READY)
         run: |
@@ -238,6 +251,75 @@ jobs:
               eof              { puts "\nMICROVM: qemu exited (informational)"; exit 1 }
             }'
 
+      - name: TSLOG capture — 3 TSLOG boots + 3 release wall-clock boots (tslog only)
+        # Measurement, not a gate: runs after the gates whatever they said
+        # (a failing gate is exactly when phase data is most useful).
+        # Firecracker only (the VMM §1 of the roadmap describes); same
+        # boot_args and TAP net path as the gate so rc does the same work.
+        if: ${{ !cancelled() && inputs.tslog }}
+        continue-on-error: true
+        run: |
+          cd "$WORK"
+          test -f smolfire-kernel-tslog || { echo "no TSLOG kernel built"; exit 1; }
+          sha256sum smolfire-kernel smolfire-kernel-tslog | tee kernels.sha256
+          # The gate's firecracker outlives its expect (pty close is not a
+          # kill) and still holds tap0 — free it before every boot.
+          pkill -f 'firecracker --no-api' || true; sleep 1
+          ip link show tap0 >/dev/null 2>&1 || {
+            sudo ip tuntap add tap0 mode tap user "$(id -un)"
+            sudo ip addr add 172.16.0.1/30 dev tap0
+            sudo ip link set tap0 up
+          }
+          if ! curl -fsS "http://172.16.0.1:8080/token.txt" >/dev/null 2>&1; then
+            mkdir -p "$WORK/www"; printf 'tslog' > "$WORK/www/token.txt"
+            ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
+            echo "$!" > "$WORK/httpd.pid"; sleep 1
+          fi
+          mkfc() {  # $1 = kernel file name
+            printf '{\n "boot-source": { "kernel_image_path": "%s/%s", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$1"
+          }
+          mkfc smolfire-kernel       > fc-release.json
+          mkfc smolfire-kernel-tslog > fc-tslog.json
+          # boot KIND N CFG WAITFOR: wall clock exec->READY via expect,
+          # full serial to KIND-runN.log (send_user lines land in it too).
+          boot() {
+            expect -c '
+              log_file -noappend '"$WORK/$1-run$2.log"'
+              set timeout 30
+              set t0 [clock milliseconds]
+              spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK/$3"'
+              expect {
+                "SMOLFIRE_READY" { send_user "\nTIME_TO_READY=[expr [clock milliseconds]-$t0]ms\n" }
+                "panic"   { expect -timeout 5 timeout; send_user "\nVERDICT=fail (panic)\n"; exit 2 }
+                timeout   { send_user "\nVERDICT=fail (no READY)\n"; exit 1 }
+                eof       { send_user "\nVERDICT=fail (firecracker exited)\n"; exit 2 }
+              }
+              if {"'"$4"'" ne ""} {
+                set timeout 300
+                expect {
+                  "'"$4"'" { send_user "\nTSLOG_CAPTURE=ok\n" }
+                  timeout  { send_user "\nTSLOG_CAPTURE=timeout\n"; exit 3 }
+                  eof      { send_user "\nTSLOG_CAPTURE=eof\n"; exit 3 }
+                }
+              }
+              exit 0'
+            rc=$?
+            pkill -f 'firecracker --no-api' || true; sleep 1
+            return $rc
+          }
+          FAILS=0
+          for i in 1 2 3; do boot release "$i" fc-release.json ""                 || FAILS=$((FAILS+1)); done
+          for i in 1 2 3; do boot tslog   "$i" fc-tslog.json   SMOLFIRE_TSLOG_DONE || FAILS=$((FAILS+1)); done
+          {
+            echo "### TSLOG capture"
+            echo '```'
+            cat kernels.sha256
+            grep -H -a -E -o 'TIME_TO_READY=[0-9]*ms|TSLOG_CAPTURE=[a-z]*|VERDICT=.*' release-run*.log tslog-run*.log || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          wc -c tslog-run*.log
+          [ "$FAILS" -eq 0 ] || { echo "$FAILS boot(s) failed"; exit 1; }
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -246,6 +328,10 @@ jobs:
           if-no-files-found: warn
           path: |
             /mnt/smolfire-ci/smolfire-kernel
+            /mnt/smolfire-ci/smolfire-kernel-tslog
+            /mnt/smolfire-ci/kernels.sha256
+            /mnt/smolfire-ci/release-run*.log
+            /mnt/smolfire-ci/tslog-run*.log
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log

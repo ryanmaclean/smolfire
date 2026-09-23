@@ -74,6 +74,38 @@ if not ($rc.stdout | str contains "exec /rescue/sh") {
     fail "/etc/rc missing exec /rescue/sh handoff"
 }
 
+# Release rc must stay TSLOG-free (the release ELF is the measured path).
+if ($rc.stdout | str contains "TSLOG") {
+    fail "release /etc/rc contains TSLOG dump lines — only SMOLFIRE_TSLOG=1 may add them"
+}
+
+# ── TSLOG variant (SMOLFIRE_TSLOG=1): READY via external /rescue/echo so
+# debug.tslog_user timestamps it, dump strictly AFTER READY, shell handoff
+# kept, and sed linked for the tslog_user filter.
+let troot = $"($tmp)/root-tslog"
+let tres = (with-env {RESCUE_SRC: $rescue_src, ROOT: $troot, SMOLFIRE_TSLOG: "1"} {
+    ^sh bin/build-smolfire.sh --rootfs-only | complete
+})
+if $tres.exit_code != 0 { fail $"SMOLFIRE_TSLOG=1 --rootfs-only exited ($tres.exit_code): ($tres.stderr)" }
+let trc = (open --raw $"($troot)/etc/rc" | lines)
+let idx = {|needle| $trc | enumerate | where {|r| $r.item | str contains $needle} | get index | first }
+for needle in ["/rescue/echo \"SMOLFIRE_READY\"" "SMOLFIRE_TSLOG_BEGIN" "sysctl -b debug.tslog" "debug.tslog_user" "SMOLFIRE_TSLOG_DONE" "exec /rescue/sh"] {
+    if ($trc | where {|l| $l | str contains $needle} | is-empty) { fail $"TSLOG rc missing: ($needle)" }
+}
+let i_ready = (do $idx "SMOLFIRE_READY")
+let i_begin = (do $idx "SMOLFIRE_TSLOG_BEGIN")
+let i_done  = (do $idx "SMOLFIRE_TSLOG_DONE")
+let i_exec  = (do $idx "exec /rescue/sh")
+if not ($i_ready < $i_begin and $i_begin < $i_done and $i_done < $i_exec) {
+    fail "TSLOG rc order must be READY < TSLOG_BEGIN < TSLOG_DONE < exec sh"
+}
+if (inode $"($troot)/rescue/sed") != (inode $"($troot)/rescue/rescue") {
+    fail "TSLOG rootfs: /rescue/sed is not a hard link to /rescue/rescue"
+}
+if ($"($root)/rescue/sed" | path exists) {
+    fail "release rootfs gained /rescue/sed — only the TSLOG variant needs it"
+}
+
 # ── Negative: without --rootfs-only the script must FAIL on a non-FreeBSD
 # host (sysctl hw.ncpu / makefs absent) — proves --rootfs-only is what
 # protects CI, not luck.

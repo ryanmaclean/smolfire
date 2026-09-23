@@ -3,6 +3,9 @@
 # rescue MFS root. Runs INSIDE the FreeBSD 15 build VM as root.
 #
 # Output: /root/smolfire-kernel (PVH-bootable ELF, the entire OS)
+#         /root/smolfire-kernel-tslog (only with SMOLFIRE_TSLOG=1: the
+#         measurement-only SMOLFIRE-TSLOG kernel + TSLOG rc variant —
+#         docs/BOOT-TIME-ROADMAP.md §3; never a release asset)
 # Log:    /var/tmp/smolfire-build.log
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -16,6 +19,14 @@ ROOT=${ROOT:-/root/smolfire-root}
 IMG=/root/smolfire-mfs.img
 OUT=/root/smolfire-kernel
 LOG=/var/tmp/smolfire-build.log
+# SMOLFIRE_TSLOG=1: additionally build SMOLFIRE-TSLOG with the TSLOG rc.
+# With --rootfs-only it selects which rc variant is assembled (tests).
+TSLOG=no
+if [ "${SMOLFIRE_TSLOG:-0}" = 1 ]; then
+    TSLOG=yes
+fi
+IMG_TSLOG=/root/smolfire-mfs-tslog.img
+OUT_TSLOG=/root/smolfire-kernel-tslog
 
 # --rootfs-only: stop after the rootfs is assembled, before the
 # FreeBSD-only makefs/buildkernel steps (lets CI test assembly on Linux).
@@ -46,6 +57,10 @@ ln "$ROOT/rescue/rescue" "$ROOT/bin/sh"
 
 # init(8) runs /etc/rc and waits; rc never exits — it becomes the console
 # shell. Gate protocol: SMOLFIRE_READY on serial, then interactive sh.
+# write_rc release|tslog — the two variants share everything up to the
+# READY marker; only the tail differs (the release rc is byte-identical
+# to the pre-TSLOG one, so the release ELF's measured path is unchanged).
+write_rc() {
 cat > "$ROOT/etc/rc" <<'EOF'
 #!/rescue/sh
 PATH=/rescue; export PATH
@@ -68,15 +83,42 @@ if ifconfig vtnet0 >/dev/null 2>&1; then
             || echo "SMOLFIRE_NET_FAIL"
     fi
 fi
+EOF
+if [ "$1" = tslog ]; then
+    # TSLOG variant (SMOLFIRE-TSLOG kernel only). READY is printed by the
+    # external /rescue/echo, not the sh builtin, so debug.tslog_user holds
+    # a fork/exit TSC for the READY instant — the kernel-clock anchor that
+    # bin/tslog-phases.nu lines up against the gate's wall clock. The dump
+    # runs AFTER READY: outside the measured window by construction.
+    # tslog_user prints PID_MAX+1 rows; sed drops the never-used pids.
+    ln -f "$ROOT/rescue/rescue" "$ROOT/rescue/sed"
+    cat >> "$ROOT/etc/rc" <<'EOF'
+/rescue/echo "SMOLFIRE_READY"
+echo "SMOLFIRE_TSLOG_META tsc_freq=$(sysctl -n machdep.tsc_freq) ncpu=$(sysctl -n hw.ncpu) ident=$(sysctl -n kern.ident)"
+echo "SMOLFIRE_TSLOG_BEGIN"
+sysctl -b debug.tslog
+echo "SMOLFIRE_TSLOG_END"
+echo "SMOLFIRE_TSLOG_USER_BEGIN"
+sysctl -n debug.tslog_user | sed -e '/^[0-9]* 0 0 0 "" ""$/d'
+echo "SMOLFIRE_TSLOG_USER_END"
+echo "SMOLFIRE_TSLOG_DONE"
+exec /rescue/sh </dev/console >/dev/console 2>&1
+EOF
+else
+    cat >> "$ROOT/etc/rc" <<'EOF'
 echo "SMOLFIRE_READY"
 exec /rescue/sh </dev/console >/dev/console 2>&1
 EOF
+fi
 chmod 755 "$ROOT/etc/rc"
+}
 
 if [ "$ROOTFS_ONLY" = yes ]; then
+    if [ "$TSLOG" = yes ]; then write_rc tslog; else write_rc release; fi
     echo "==> --rootfs-only: rootfs assembled at $ROOT (skipping makefs/buildkernel)"
     exit 0
 fi
+write_rc release
 
 # Net tools are MK_INET/MK_NETCAT-conditional upstream — fail loud if this
 # base's stock /rescue lacks them (run #7 lesson: guards never skip silently).
@@ -191,3 +233,19 @@ KERNEL="/usr/obj${SRC}/amd64.amd64/sys/SMOLFIRE/kernel"
 test -f "$KERNEL" || { echo "ERROR: no kernel at $KERNEL"; tail -50 "$LOG"; exit 1; }
 cp "$KERNEL" "$OUT"
 echo "==> smolfire kernel: $(du -h "$OUT" | cut -f1) (rootfs embedded)"
+
+if [ "$TSLOG" = yes ]; then
+    # Measurement-only second kernel: same tree, same objdir toolchain
+    # (buildkernel only, no kernel-toolchain rerun), TSLOG rc variant.
+    test -f "$SRC/sys/amd64/conf/SMOLFIRE-TSLOG" \
+        || { echo "ERROR: $SRC/sys/amd64/conf/SMOLFIRE-TSLOG missing — copy sys/amd64/conf/SMOLFIRE* into the tree"; exit 1; }
+    echo "==> TSLOG variant: rc tail + makefs + buildkernel SMOLFIRE-TSLOG"
+    write_rc tslog
+    makefs -t ffs -o version=2 -o label=smolfire -b 10% "$IMG_TSLOG" "$ROOT"
+    make -C "$SRC" -j "$NCPU" buildkernel \
+        KERNCONF=SMOLFIRE-TSLOG MFS_IMAGE="$IMG_TSLOG" >> "$LOG" 2>&1
+    KERNEL_TSLOG="/usr/obj${SRC}/amd64.amd64/sys/SMOLFIRE-TSLOG/kernel"
+    test -f "$KERNEL_TSLOG" || { echo "ERROR: no kernel at $KERNEL_TSLOG"; tail -50 "$LOG"; exit 1; }
+    cp "$KERNEL_TSLOG" "$OUT_TSLOG"
+    echo "==> smolfire TSLOG kernel: $(du -h "$OUT_TSLOG" | cut -f1) (measurement only)"
+fi

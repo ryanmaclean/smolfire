@@ -253,6 +253,9 @@ jobs:
             --quote /tmp/a5-artifacts/attestation.toml \
             --expected-pcr-digest "$EXPECTED_PCR" \
             --nonce "$NONCE" \
+            --quote-msg /tmp/a5-artifacts/quote.msg \
+            --quote-sig /tmp/a5-artifacts/quote.sig \
+            --ak-pub /tmp/a5-artifacts/ak.pub \
             | tee /tmp/a5-verifier-output.toml
           grep -q 'verdict = "PASS"' /tmp/a5-verifier-output.toml || {
             echo "ERROR: attestation verifier did not report PASS"

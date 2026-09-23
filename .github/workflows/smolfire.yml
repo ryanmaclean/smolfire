@@ -194,6 +194,9 @@ jobs:
             set t0 [clock milliseconds]
             spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK"'/fc.json
             set fcpid [exp_pid -i $spawn_id]
+            set pidfile [open "'"$WORK"'/firecracker.pid" w]
+            puts $pidfile $fcpid
+            close $pidfile
             expect {
               "SMOLFIRE_NET_OK '"$TOK"'" { puts "\nNET_GATE=pass (guest-initiated TCP, token verified)" }
               "SMOLFIRE_NET_FAIL"        { puts "\nNET_GATE=fail (fetch failed in guest)"; exit 3 }
@@ -223,7 +226,7 @@ jobs:
               timeout   { puts "\nVERDICT=fail (no READY within 30s)"; exit 1 }
               eof       { puts "\nVERDICT=fail (firecracker exited)"; exit 2 }
             }' 2>&1 | tee "$WORK/smolfire-gate.log" || EXPECT_RC=$?
-          pkill -f "$WORK/firecracker --no-api --config-file $WORK/fc.json" 2>/dev/null || true
+          [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
           {
             echo "### SMOLFIRE microVM size report"
             echo '```'

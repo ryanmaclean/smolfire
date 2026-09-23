@@ -61,7 +61,7 @@ Three ways in, depending on what you have:
 | `bin/` | Coordinator FSM (`coord-*.nu`, run via `sh bin/coord-run.sh`), image build (`build-smolfire-vm.nu`), ops (`harvest.sh`, `qemu-smolfire-vm.nu`, bhyve tooling) |
 | `sys/`, `release/tools/` | SMOLFIRE kernel configs and release image confs |
 | `tests/` | Nu unit/integration suites + `expect` boot gates (`sh tests/run-all.sh`) |
-| `docs/` | `BUILDING.md` (start here), `UR-BSD.md`/`UR-BSD-VERIFY.md` (size work), `BHYVE-GATE-AMD64.md` |
+| `docs/` | `BUILDING.md` (start here), `UR-BSD.md`/`UR-BSD-VERIFY.md` (size work), `BHYVE-GATE-AMD64.md`, `NETBSD-MICROVM-PROTOTYPE.md` |
 | `plans/`, `.planning/` | Phase planning records (historical) |
 | `var/` | Runtime spool/state — never committed (see `CLAUDE.md` §9) |
 

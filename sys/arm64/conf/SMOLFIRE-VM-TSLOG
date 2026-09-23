@@ -1,0 +1,26 @@
+# SMOLFIRE-VM-TSLOG — measurement-only variant of arm64 SMOLFIRE-VM with
+# TSLOG boot tracing (docs/BOOT-TIME-ROADMAP.md §3). aarch64 twin of
+# sys/amd64/conf/SMOLFIRE-TSLOG. NEVER ships: TSLOG adds a timestamp record
+# on every SYSINIT, device attach, DELAY and sleep, so its wall clock is not
+# the release wall clock.
+#
+# Purpose: attribute the aarch64 HVF boot phases (notably the devd ->
+# dhclient gap, 1.9-6.8 s in the serial-timestamp baseline) with kernel
+# ENTER/EXIT/EVENT records and per-pid fork/exec/exit timestamps.
+#
+# Dump post-boot, outside the measured window: `sysctl -b debug.tslog` and
+# `sysctl -n debug.tslog_user`; bin/tslog-phases.nu builds the phase table.
+# On arm64 TSLOG timestamps come from the generic timer (CNTVCT), not TSC.
+#
+# Option names per sys/conf/options (releng/15.0): TSLOG, TSLOGSIZE.
+# TSLOGSIZE matches amd64 SMOLFIRE-TSLOG (262144 records, default value,
+# >10x headroom for a SMOLFIRE boot). tslog-phases.nu fails loud when
+# "EXIT start_init" is missing (the overflow symptom).
+#
+# SPDX-License-Identifier: Apache-2.0
+
+include SMOLFIRE-VM
+ident SMOLFIRE-VM-TSLOG
+
+options 	TSLOG
+options 	TSLOGSIZE=262144

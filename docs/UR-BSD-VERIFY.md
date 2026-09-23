@@ -383,6 +383,30 @@ not the projected 20–30 — diminishing returns; the full data is the
 round3-prep-data artifact. The next order of magnitude for tiny
 FreeBSD is SMOLFIRE (already shipped), not further full-image dieting.
 
+## Runner capability map + macOS HVF verification (2026-09-23)
+
+Empirical probe (run 35828986197) of the hosted targets the aarch64/HVF
+legs could use — every verdict from a real qemu accel-init attempt, not
+flags: **macos-15-intel: HVF WORKS**; macos-latest (Apple silicon):
+HV_UNSUPPORTED (runner VM lacks nested virt); ubuntu-24.04-arm: no
+/dev/kvm. Two probe bugs found and fixed en route (macOS has no
+timeout(1) — gtimeout; and see below). Consequence: **no hosted runner
+can hardware-accelerate an aarch64 guest** — the aarch64 boot gate
+needs either a TCG soft-gate on ubuntu-24.04-arm (same-ISA translation,
+unmeasured — the ledger's >480s figure was cross-ISA) or self-hosted
+ARM hardware (owner registration required).
+
+HVF verification of SHIPPED artifacts on macos-15-intel (runs
+35829501332 + 35830117437, qemu 11.1.0 via brew): **0.3.0 qcow2 boots
+to login (pass, ~22 s step-bounded)** and **0.4.0 one-ELF kernel boots
+to the FIRE_42 interactive shell in 1264 ms** under -accel hvf — first
+proof that QEMU's PVH loader + microvm machine work on macOS, and the
+README's "-accel hvf" claim is now tested. Platform lesson (run #1 of
+the verify): without `-cpu host`, HVF guests get QEMU's default vCPU
+with NO RDRAND/AES-NI and randomdev_wait_until_seeded stalls ~27 s
+before unblocking (28.4 s boot, still pass) — always pass -cpu host
+under HVF, and know that entropy-starved platforms cost ~27 s, not a
+hang.
 ## Finding 5 — 15.1 pkgbase first-boot base auto-update: guard installed (2026-08-23)
 
 FreeBSD 15.1 pkgbase VM/cloud images auto-update base packages on first

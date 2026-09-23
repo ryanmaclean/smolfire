@@ -36,7 +36,12 @@ def run-export [docs: any, --pretty] {
     let tmp = (^mktemp | str trim)
     $docs | to json --indent 2 | save --force $tmp
     let fmt = if $pretty { ["--pretty"] } else { [] }
-    let result = (^$nu.current-exe --no-config-file $EXPORTER --from $tmp ...$fmt | complete)
+    let result = try {
+        ^$nu.current-exe --no-config-file $EXPORTER --from $tmp ...$fmt | complete
+    } catch {|err|
+        rm --force $tmp
+        fail $"failed to run exporter: ($err.msg)"
+    }
     rm --force $tmp
     $result
 }

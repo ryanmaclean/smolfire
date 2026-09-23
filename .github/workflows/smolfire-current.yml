@@ -1,0 +1,271 @@
+# SPDX-License-Identifier: Apache-2.0
+# smolfire-current.yml — scheduled/dispatchable FreeBSD 16-CURRENT compatibility lane.
+#
+# Uses the same one-ELF SMOLFIRE build as the release-oriented 15.x workflow,
+# but builds against FreeBSD main inside a main snapshot VM and requires both
+# VMM gates. This is a compatibility lane only: it does not publish artifacts.
+
+name: SMOLFIRE FreeBSD 16-CURRENT compatibility
+
+on:
+  schedule:
+    - cron: '23 9 * * 1'
+  workflow_dispatch:
+
+env:
+  WORK: /mnt/smolfire-ci
+  SSH_PORT: '2254'
+  SRC_BRANCH: main
+  BASE_URL: https://download.freebsd.org/snapshots/VM-IMAGES/main/amd64/Latest
+  BASE_IMG: FreeBSD-main-amd64-BASIC-CLOUDINIT-ufs.qcow2
+  FC_VER: v1.12.0
+
+jobs:
+  smolfire-current:
+    name: Build + dual-VMM boot gate (FreeBSD main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — KVM, packages, firecracker
+        run: |
+          set -e
+          test -c /dev/kvm || { echo 'FIRECRACKER_UNSUPPORTED: no /dev/kvm on runner'; exit 1; }
+          sudo chmod 666 /dev/kvm
+          sudo mkdir -p "$WORK" && sudo chown "$(id -u)" "$WORK"
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils expect xz-utils genisoimage openssh-client
+          cd "$WORK"
+          curl -fsSL -o fc.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-x86_64.tgz"
+          tar xzf fc.tgz
+          FC=$(find . -name "firecracker-${FC_VER}-x86_64" -type f | head -1)
+          test -n "$FC" || { echo 'ERROR: firecracker binary not in tgz'; find . -maxdepth 3; exit 1; }
+          install -m 0755 "$FC" "$WORK/firecracker"
+          "$WORK/firecracker" --version
+
+      - name: Fetch FreeBSD main base image
+        run: |
+          set -e
+          cd "$WORK"
+          curl -fsSL -o base.qcow2.xz "$BASE_URL/$BASE_IMG.xz"
+          unxz base.qcow2.xz
+          qemu-img resize base.qcow2 40G
+
+      - name: Create cloud-init NoCloud seed (root SSH key)
+        run: |
+          set -e
+          cd "$WORK"
+          ssh-keygen -t ed25519 -N '' -f ci_key -q
+          printf 'instance-id: smolfire-current\nlocal-hostname: smolfire-current\n' > meta-data
+          {
+            echo '#cloud-config'
+            echo 'users:'
+            echo '  - name: root'
+            echo '    ssh_authorized_keys:'
+            echo "      - $(cat ci_key.pub)"
+            echo 'runcmd:'
+            echo "  - echo 'PermitRootLogin prohibit-password' >> /etc/ssh/sshd_config"
+            echo '  - service sshd restart || true'
+          } > user-data
+          genisoimage -output seed.iso -volid cidata -joliet -rock user-data meta-data
+
+      - name: Boot FreeBSD build VM (KVM)
+        run: |
+          set -e
+          cd "$WORK"
+          qemu-system-x86_64 \
+            -M q35 -accel kvm -cpu host \
+            -smp "$(nproc)" -m 8G \
+            -drive file=base.qcow2,format=qcow2,if=virtio \
+            -cdrom seed.iso \
+            -nic "user,model=virtio-net-pci,hostfwd=tcp::${SSH_PORT}-:22" \
+            -display none -daemonize \
+            -serial "file:${WORK}/serial.log" \
+            -pidfile "${WORK}/vm.pid"
+          echo 'Waiting for SSH ...'
+          for i in $(seq 1 120); do
+            if ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                   -o ConnectTimeout=3 -o BatchMode=yes -p "$SSH_PORT" \
+                   root@127.0.0.1 'echo VM_UP && uname -rm'; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'ERROR: SSH never came up. Serial tail:'
+          tail -50 serial.log
+          exit 1
+
+      - name: Build SMOLFIRE + TSLOG kernels inside VM
+        id: build
+        run: |
+          set -e
+          cd "$WORK"
+          SSH="ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+               -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@127.0.0.1"
+          $SSH 'env ASSUME_ALWAYS_YES=yes pkg update -q && env ASSUME_ALWAYS_YES=yes pkg install -y git'
+          $SSH "git clone --depth 1 -b $SRC_BRANCH https://git.freebsd.org/src.git /usr/src"
+          tar -C "$GITHUB_WORKSPACE" -cf - . | $SSH 'mkdir -p /root/smolfire && tar -C /root/smolfire -xf -'
+          $SSH 'cp /root/smolfire/sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/'
+          BUILD_RC=0
+          $SSH 'env SMOLFIRE_TSLOG=1 sh /root/smolfire/bin/build-smolfire.sh' \
+            2>&1 | tee build.log || BUILD_RC=$?
+          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -P "$SSH_PORT" root@127.0.0.1:/var/tmp/smolfire-build.log \
+              "$WORK/smolfire-build-vm.log" || true
+          if [ "$BUILD_RC" -ne 0 ]; then
+            echo "ERROR: build rc=$BUILD_RC"
+            tail -100 "$WORK/smolfire-build-vm.log" || true
+            exit 1
+          fi
+          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -P "$SSH_PORT" root@127.0.0.1:/root/smolfire-kernel "$WORK/smolfire-kernel"
+          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -P "$SSH_PORT" root@127.0.0.1:/root/smolfire-kernel-tslog "$WORK/smolfire-kernel-tslog"
+          ls -lh "$WORK/smolfire-kernel" "$WORK/smolfire-kernel-tslog"
+          REL_BYTES=$(wc -c < "$WORK/smolfire-kernel")
+          TSLOG_BYTES=$(wc -c < "$WORK/smolfire-kernel-tslog")
+          {
+            echo '### Size report'
+            echo
+            echo '| Artifact | Bytes | MiB |'
+            echo '|---|---:|---:|'
+            printf '| smolfire-kernel | %s | %s |\n' "$REL_BYTES" "$((REL_BYTES / 1048576))"
+            printf '| smolfire-kernel-tslog | %s | %s |\n' "$TSLOG_BYTES" "$((TSLOG_BYTES / 1048576))"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Boot gate — Firecracker (required)
+        id: firecracker
+        run: |
+          set -e
+          cd "$WORK"
+          sudo ip tuntap add tap0 mode tap user "$(id -un)"
+          sudo ip addr add 172.16.0.1/30 dev tap0
+          sudo ip link set tap0 up
+          TOK="fc-${RANDOM}${RANDOM}"
+          mkdir -p "$WORK/www"
+          printf '%s' "$TOK" > "$WORK/www/token.txt"
+          ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
+          echo "$!" > "$WORK/httpd.pid"
+          sleep 1
+          curl -fsS 'http://172.16.0.1:8080/token.txt' >/dev/null || { echo 'ERROR: token server not answering'; exit 1; }
+          printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" > fc.json
+          expect -c '
+            set timeout 30
+            set t0 [clock milliseconds]
+            spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK"'/fc.json
+            expect {
+              "SMOLFIRE_NET_OK '"$TOK"'" { puts "\nFIRECRACKER_NET=pass (guest-initiated TCP, token verified)" }
+              "SMOLFIRE_NET_FAIL"        { puts "\nFIRECRACKER_NET=fail (fetch failed in guest)"; exit 3 }
+              "panic"                    { expect -timeout 5 timeout; puts "\nFIRECRACKER=fail (kernel panic — full text above)"; exit 2 }
+              timeout                    { puts "\nFIRECRACKER_NET=fail (no net marker within 30s)"; exit 3 }
+              eof                        { puts "\nFIRECRACKER=fail (firecracker exited)"; exit 2 }
+            }
+            expect {
+              "SMOLFIRE_READY" {
+                set dt [expr [clock milliseconds]-$t0]
+                puts "\nFIRECRACKER_READY=${dt}ms"
+                send {echo FIRE_$((6*7))}
+                send "\r"
+                expect {
+                  "FIRE_42" {
+                    if {[catch {exec ping -c 2 -W 2 172.16.0.2} pout]} {
+                      puts "\nFIRECRACKER_HOST_PING=fail ($pout)"; exit 4
+                    } else {
+                      puts "\nFIRECRACKER_HOST_PING=pass (host->guest ICMP over tap)"
+                    }
+                    puts "\nFIRECRACKER=pass (interactive shell confirmed)"; exit 0
+                  }
+                  timeout { puts "\nFIRECRACKER=fail (shell unresponsive)"; exit 1 }
+                }
+              }
+              "panic"  { expect -timeout 5 timeout; puts "\nFIRECRACKER=fail (kernel panic — full text above)"; exit 2 }
+              timeout  { puts "\nFIRECRACKER=fail (no READY within 30s)"; exit 1 }
+              eof      { puts "\nFIRECRACKER=fail (firecracker exited)"; exit 2 }
+            }'
+
+      - name: Boot gate — QEMU microvm (required)
+        id: qemu
+        run: |
+          set -e
+          cd "$WORK"
+          TOK="qemu-${RANDOM}${RANDOM}"
+          mkdir -p "$WORK/www"
+          printf '%s' "$TOK" > "$WORK/www/token.txt"
+          if ! curl -fsS 'http://10.0.2.2:8080/token.txt' >/dev/null 2>&1; then
+            pkill -f 'python3 -m http.server 8080 --bind 0.0.0.0' || true
+            ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
+            echo "$!" > "$WORK/httpd.pid"
+            sleep 1
+          fi
+          timeout 60 expect -c '
+            set timeout 30
+            set t0 [clock milliseconds]
+            spawn qemu-system-x86_64 -M microvm -accel kvm -cpu host -m 512M \
+              -kernel '"$WORK"'/smolfire-kernel \
+              -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/token.txt" \
+              -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+              -display none -serial mon:stdio
+            expect {
+              "SMOLFIRE_NET_OK '"$TOK"'" { puts "\nQEMU_MICROVM_NET=pass (guest-initiated TCP, token verified)" }
+              "SMOLFIRE_NET_FAIL"        { puts "\nQEMU_MICROVM_NET=fail (fetch failed in guest)"; exit 3 }
+              "panic"                    { expect -timeout 5 timeout; puts "\nQEMU_MICROVM=fail (kernel panic — full text above)"; exit 2 }
+              timeout                    { puts "\nQEMU_MICROVM_NET=fail (no net marker within 30s)"; exit 3 }
+              eof                        { puts "\nQEMU_MICROVM=fail (qemu exited)"; exit 2 }
+            }
+            expect {
+              "SMOLFIRE_READY" {
+                puts "\nQEMU_MICROVM_READY=[expr [clock milliseconds]-$t0]ms"
+                puts "\nQEMU_MICROVM=pass"
+                exit 0
+              }
+              "panic"  { expect -timeout 5 timeout; puts "\nQEMU_MICROVM=fail (kernel panic — full text above)"; exit 2 }
+              timeout  { puts "\nQEMU_MICROVM=fail (no READY within 30s)"; exit 1 }
+              eof      { puts "\nQEMU_MICROVM=fail (qemu exited)"; exit 2 }
+            }'
+
+      - name: Compatibility summary
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          FIRECRACKER_OUTCOME: ${{ steps.firecracker.outcome }}
+          QEMU_OUTCOME: ${{ steps.qemu.outcome }}
+        run: |
+          {
+            echo
+            echo '### Compatibility summary'
+            echo
+            echo '| Check | Outcome |'
+            echo '|---|---|'
+            printf '| Build + TSLOG | %s |\n' "$BUILD_OUTCOME"
+            printf '| Firecracker gate | %s |\n' "$FIRECRACKER_OUTCOME"
+            printf '| QEMU microvm gate | %s |\n' "$QEMU_OUTCOME"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-kernel-current
+          if-no-files-found: warn
+          path: |
+            /mnt/smolfire-ci/smolfire-kernel
+            /mnt/smolfire-ci/smolfire-kernel-tslog
+            /mnt/smolfire-ci/build.log
+            /mnt/smolfire-ci/smolfire-build-vm.log
+            /mnt/smolfire-ci/serial.log
+
+      - name: Teardown VM
+        if: always()
+        run: |
+          pkill -f 'firecracker --no-api' 2>/dev/null || true
+          pkill -f 'qemu-system-x86_64 -M microvm' 2>/dev/null || true
+          [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
+          [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
+          sudo ip link del tap0 2>/dev/null || true

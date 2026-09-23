@@ -135,17 +135,26 @@ NCPU=$(sysctl -n hw.ncpu)
 # xen_delay unconditionally — xen_delay faults on non-Xen PVH
 # (Firecracker, QEMU microvm) because HYPERVISOR_shared_info is never
 # mapped (run #6). Preserves real Xen PVH boots, unlike the old sed
-# swap. Upstream submission draft; drop once it lands in releng.
-# Idempotent: skipped when already applied.
+# swap. If upstream/main grows a different non-Xen-safe fix first, this
+# block must classify that state and skip the local patch explicitly.
 PV=/usr/src/sys/x86/xen/pv.c
 if grep -q 'pvh_early_delay' "$PV"; then
     echo "==> pv.c already patched (pvh_early_delay dispatch present)"
+elif grep -Eq 'early_clock_source_init[[:space:]]*=[[:space:]]*xen_clock_init' "$PV" &&
+     grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV"; then
+    echo "==> patching pv.c: isxen() runtime dispatch for early clock/delay"
 else
     # Fail LOUD if the file shape is unrecognized (run #7's lesson) —
-    # also catches a tree still carrying the old i8254 sed swap.
-    grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV" \
-        || { echo "ERROR: pv.c shape unrecognized — refusing to build unpatched"; exit 1; }
-    echo "==> patching pv.c: isxen() runtime dispatch for early clock/delay"
+    # also catches trees that moved only one init hook away from Xen.
+    if grep -Eq 'early_clock_source_init[[:space:]]*=[[:space:]]*xen_clock_init' "$PV" ||
+       grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV"; then
+        echo "ERROR: pv.c only partially moved away from Xen early hooks — refusing ambiguous tree"
+        exit 1
+    fi
+    echo "==> pv.c already carries non-Xen early hooks; skipping local patch"
+fi
+if grep -Eq 'early_clock_source_init[[:space:]]*=[[:space:]]*xen_clock_init' "$PV" &&
+   grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV"; then
     patch -p1 -d /usr/src <<'PVEOF'
 --- a/sys/x86/xen/pv.c
 +++ b/sys/x86/xen/pv.c

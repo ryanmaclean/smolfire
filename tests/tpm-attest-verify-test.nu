@@ -425,17 +425,19 @@ ak_public = "($pub_b64)"
     assert equal $att.signature_valid "true"
 
     # The seam: exact tpm2_checkquote invocation the guest commands require
-    # (-u ak.pub -m quote.msg -s quote.sig -f tss -g sha256 -q hex-nonce).
-    # -f tss because tpm2_quote -s (guest, no -f flag) writes the default
-    # tss/TPMT_SIGNATURE format; -f plain would expect raw r||s and fail
-    # parsing on real quotes.
+    # (-u ak.pub -m quote.msg -s quote.sig -g sha256 -q hex-nonce).
+    # No -f/-F flag: tpm2-tools 5.6 auto-detects the signature format
+    # (-f is a PCR input file, -F is deprecated/ignored), and PCR digest
+    # coverage comes from verify-pcr-digest.
     let argv = open --raw $"($fake).argv" | str trim
     assert ($argv | str contains "-u ")
     assert ($argv | str contains "-m ")
     assert ($argv | str contains "-s ")
-    assert ($argv | str contains "-f tss")
     assert ($argv | str contains "-g sha256")
     assert ($argv | str contains $"-q ($nonce)")
+    let tokens = $argv | split row " "
+    assert ("-f" not-in $tokens)
+    assert ("-F" not-in $tokens)
 
     ^rm -rf $tmp
 }

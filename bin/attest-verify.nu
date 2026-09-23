@@ -139,14 +139,13 @@ def verify-signature [
 # Mirrors the exact guest commands in bin/guest-attest.nu:
 #   guest: tpm2_createak -C <primary> -g sha256 -G ecc -c ak.ctx -u ak.pub
 #          tpm2_quote -c ak.ctx -l sha256:0,7 -q $nonce -m quote.msg -s quote.sig
-#   here:  tpm2_checkquote -u ak.pub -m quote.msg -s quote.sig -f tss -g sha256 -q <hex-nonce>
-# Format-flag semantics (tpm2-tools): tpm2_quote -s writes the signature in
-# the DEFAULT tss (TPMT_SIGNATURE) format — the guest quote step passes no -f
-# flag, so quote.sig is tss. tpm2_checkquote -f must therefore be `tss` to
-# parse it; `-f plain` expects a raw r||s blob, fails parsing, and would
-# wrongly fall through to the RSA-only openssl path (which correctly
-# rejects ECC quotes). Explicit `-f tss` (not dropping the flag) so the
-# expected format is pinned at the call site.
+#   here:  tpm2_checkquote -u ak.pub -m quote.msg -s quote.sig -g sha256 -q <hex-nonce>
+# Format-flag semantics (tpm2-tools 5.6 man page, man/tpm2_checkquote.1.md):
+# -f/--pcr takes a PCR INPUT FILE; -F/--format is DEPRECATED and IGNORED; the
+# signature format (tss vs plain) is auto-detected. Passing `-f tss` therefore
+# passes the literal string "tss" as a PCR file path (`Could not open file:
+# "tss"`), so no -f/-F flag is passed here. PCR digest coverage is not lost:
+# verify-pcr-digest checks the digest separately.
 # Exit 0 = valid. Missing binary or any tool error -> false (caller falls
 # back to the openssl RSA-fixture path). Never throws. On tool failure the
 # trimmed stderr is logged so the next CI failure is diagnosable without a
@@ -156,7 +155,7 @@ def verify-with-tpm2-tools [quote_file: string, sig_file: string, ak_file: strin
         return false
     }
     try {
-        let result = (^tpm2_checkquote -u $ak_file -m $quote_file -s $sig_file -f tss -g sha256 -q $nonce | complete)
+        let result = (^tpm2_checkquote -u $ak_file -m $quote_file -s $sig_file -g sha256 -q $nonce | complete)
         if $result.exit_code != 0 {
             let trimmed = ($result.stderr | str trim)
             log $"verifier: tpm2_checkquote failed \(exit=($result.exit_code)\): ($trimmed)"

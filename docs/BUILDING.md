@@ -12,8 +12,9 @@ One command builds the complete smolfire qcow2 image from a clean FreeBSD source
   ```sh
   git clone -b releng/15.0 https://git.freebsd.org/src.git /usr/src
   ```
-- Nushell **0.112.2 or later**: `pkg install nushell` (0.111 fails — the
-  scripts use `get -o`, added in 0.112; CI pins 0.112.2)
+- Nushell **0.115.1**: `pkg install nushell` (CI pins this version in
+  `.github/nu-version`; 0.112.2 fails on `str lowercase` in `bin/coord-tick.nu`,
+  and 0.111 fails on `get -o`)
 
 ## Step 0 — Preflight check (no writes, no builds)
 

@@ -62,7 +62,9 @@ jobs:
 
       - name: Install Nushell
         run: |
-          NU_VERSION="0.112.2"
+          # Single source of truth for the Nushell version used by every workflow
+          # and expected locally: .github/nu-version (bump it there, nowhere else).
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
           ARCH=$(uname -m | sed 's/arm64/aarch64/')
           case "$(uname -s)" in
             Linux)  TRIPLE="${ARCH}-unknown-linux-musl" ;;

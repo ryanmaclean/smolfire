@@ -28,6 +28,9 @@ const TELEMETRY_FIELDS_V1 = [
 ]
 const TELEMETRY_KINDS   = [state_transition verdict]
 const FSM_STATES        = [idle harvesting dispatching waiting halted]
+# Allowed ONLY as state_from, ONLY on the corrupt-state recovery transition
+# (event state_transition, reason unknown-state). Never valid as state_to.
+const RECOVERY_STATE_FROM = "unknown"
 const VERDICT_VALUES    = [pass fail blocked malformed unknown]
 const TRANSITION_REASONS = [
     spool-absent no-new-messages new-messages
@@ -436,17 +439,18 @@ def scenario-fail-retry [] {
     scenario-result "fail-retry" [$r1 $r2]
 }
 
-# Scenario: fail reply with attempts already at 3 → HALT retry-exhausted (escalate).
-# Single tick only: on origin/main a second tick treats the coordinator's own
-# HALT message (it carries X-Resume-Tag) as an operator resume and un-halts the
-# task — a separate S-002 bug; this scenario covers only the escalate emission.
+# Scenario: fail reply with attempts already at 3 → HALT retry-exhausted (escalate),
+# then a second tick: the coordinator's own [HALT] message (which carries
+# X-Resume-Tag) must NOT act as a resume, so no resume-action transition fires
+# and the task stays halted.
 def scenario-escalate-exhausted [] {
     let root = make-temp-root
     seed-state {attempt_counts: {"s5-esc": 3}} | to toml | save ([$root, $STATE_REL] | path join)
     mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-esc.r3@smolfire.local>" "task_id = \"s5-esc\"\nverdict = \"fail\"" | save (spool-path $root)
     let r1 = run-coord $root $SPOOL_REL $STATE_REL 10
+    let r2 = run-coord $root $SPOOL_REL $STATE_REL 10
     cleanup $root
-    scenario-result "escalate-exhausted" [$r1]
+    scenario-result "escalate-exhausted" [$r1 $r2]
 }
 
 # Scenario: blocked reply with no blocked_by → immediate HALT no-unblocker.
@@ -485,6 +489,18 @@ def scenario-unknown-verdict [] {
     scenario-result "unknown-verdict" [$r1]
 }
 
+# Scenario: persisted fsm_state is garbage → recovery transition unknown → idle,
+# then a normal idle tick (chain must continue from the recovered state).
+def scenario-corrupt-state [] {
+    let root = make-temp-root
+    seed-state {fsm_state: "garbled-s005"} | to toml | save ([$root, $STATE_REL] | path join)
+    "" | save (spool-path $root)
+    let r1 = run-coord $root $SPOOL_REL $STATE_REL 5
+    let r2 = run-coord $root $SPOOL_REL $STATE_REL 5
+    cleanup $root
+    scenario-result "corrupt-state" [$r1 $r2]
+}
+
 def run-telemetry-scenarios [] {
     [
         (scenario-full-cycle)
@@ -495,6 +511,7 @@ def run-telemetry-scenarios [] {
         (scenario-malformed)
         (scenario-attestation-malformed)
         (scenario-unknown-verdict)
+        (scenario-corrupt-state)
     ]
 }
 
@@ -535,6 +552,7 @@ const EXPECTED_SEQUENCES = {
         transitions: [
             "idle>harvesting:new-messages"
             "harvesting>idle:task-halted"
+            "idle>idle:no-new-messages"
         ]
         verdicts: ["fail:retry-exhausted>idle"]
     }
@@ -558,6 +576,10 @@ const EXPECTED_SEQUENCES = {
     "unknown-verdict": {
         transitions: ["idle>harvesting:new-messages", "harvesting>idle:harvest-complete"]
         verdicts: ["unknown:unrecognized-verdict>harvesting"]
+    }
+    "corrupt-state": {
+        transitions: ["unknown>idle:unknown-state", "idle>idle:no-new-messages"]
+        verdicts: []
     }
 }
 
@@ -618,10 +640,15 @@ def test-telemetry-enums [scenarios: list] {
     let verdicts    = $events | where event == "verdict"
     mut problems = []
 
-    let bad_from = $events | where {|e| not ($e.state_from in $FSM_STATES) } | get state_from | uniq
+    # state_from may additionally be "unknown", but only on the corrupt-state
+    # recovery transition; state_to must always be a real FSM state.
+    let is_recovery = {|e| $e.event == "state_transition" and $e.reason == "unknown-state" and $e.state_from == $RECOVERY_STATE_FROM }
+    let bad_from = $events | where {|e| not (($e.state_from in $FSM_STATES) or (do $is_recovery $e)) } | get state_from | uniq
     let bad_to   = $events | where {|e| not ($e.state_to in $FSM_STATES) }   | get state_to   | uniq
     if ($bad_from | length) > 0 { $problems = $problems | append $"state_from outside enum: ($bad_from | to nuon)" }
     if ($bad_to | length) > 0   { $problems = $problems | append $"state_to outside enum: ($bad_to | to nuon)" }
+    let n_recovery = $events | where {|e| do $is_recovery $e } | length
+    if $n_recovery == 0 { $problems = $problems | append "no corrupt-state recovery transition observed (state_from=unknown path untested)" }
 
     let bad_tv = $transitions | where {|e| not ($e.verdict in ([""] | append $VERDICT_VALUES)) } | get verdict | uniq
     if ($bad_tv | length) > 0 { $problems = $problems | append $"transition verdict outside enum: ($bad_tv | to nuon)" }
@@ -653,7 +680,7 @@ def test-telemetry-enums [scenarios: list] {
 # ── Test 8: expected transition/verdict sequences per scenario ────────────────
 
 def test-telemetry-sequences [scenarios: list] {
-    let name = "telemetry: full/halt/retry/escalate/malformed runs emit the expected ordered transitions and verdicts"
+    let name = "telemetry: full/halt/retry/escalate/malformed/corrupt-state runs emit the expected ordered transitions and verdicts"
     mut problems = []
 
     for s in $scenarios {
@@ -687,8 +714,20 @@ def test-telemetry-sequences [scenarios: list] {
         $problems = $problems | append $"escalate-exhausted verdict attempt/task_id wrong: ($esc_v | to nuon)"
     }
 
+    # Corrupt-state recovery: state_from = unknown, state_to a valid state, and
+    # the unknown_state diagnostic preserves the raw persisted value.
+    let corrupt = $scenarios | where name == "corrupt-state" | first
+    let rec = $corrupt.events | where {|e| $e.event == "state_transition" and $e.reason == "unknown-state" } | get -o 0
+    if ($rec == null) or ($rec.state_from != "unknown") or not ($rec.state_to in $FSM_STATES) {
+        $problems = $problems | append $"corrupt-state recovery event wrong: ($rec | to nuon)"
+    }
+    let diag = $corrupt.docs | where {|d| ($d | get event? | default "") == "unknown_state" } | get -o 0
+    if ($diag == null) or (($diag | get fsm_state? | default "") != "garbled-s005") {
+        $problems = $problems | append $"unknown_state diagnostic missing raw fsm_state: ($diag | to nuon)"
+    }
+
     if ($problems | length) == 0 {
-        {name: $name, status: "pass", detail: $"($scenarios | length) scenarios match expected sequences; chains continuous; retry attempts [1,2]"}
+        {name: $name, status: "pass", detail: $"($scenarios | length) scenarios match expected sequences; chains continuous; retry attempts [1,2]; corrupt-state recovers unknown>idle"}
     } else {
         {name: $name, status: "fail", detail: ($problems | str join "; ")}
     }

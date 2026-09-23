@@ -98,8 +98,13 @@ def log-event [event: string, payload: record] {
 #   ts              string  RFC 3339 UTC, second resolution
 #   event           string  "state_transition" | "verdict"
 #   state_from      string  idle | harvesting | dispatching | waiting | halted
-#                           ("unknown" only for the corrupt-state recovery step)
+#                           | unknown — "unknown" is emitted ONLY by the
+#                           corrupt-state recovery step (event state_transition,
+#                           reason "unknown-state") when the persisted fsm_state
+#                           is not a known state; the raw value is in the
+#                           preceding `unknown_state` diagnostic event
 #   state_to        string  idle | harvesting | dispatching | waiting | halted
+#                           (never "unknown")
 #   task_id         string  "" = null (no task context)
 #   verdict         string  "" = null | pass | fail | blocked | malformed | unknown
 #   attempt         int     -1 = null; else dispatch attempts recorded for task_id

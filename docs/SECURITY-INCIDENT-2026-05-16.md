@@ -105,7 +105,7 @@ GitHub stores PR head refs (`refs/pull/*/head`) that still point to pre-rewrite 
 
 The live `var/mail/spool` on disk (gitignored) contains a Vultr API key at line 3114:
 ```
-VULTR_API_KEY found in /root/.dd_keys (BTA56PEJBU6CIDUTVAAYTS64HB4SGFZ7FQ6Q)
+VULTR_API_KEY found in /root/.dd_keys (BTA5…FQ6Q (redacted))
 ```
 This key was captured during a harvest command and recorded in a claims block. **This key must be rotated in the Vultr dashboard regardless of instance termination.** The key controls the entire Vultr account.
 
@@ -129,7 +129,8 @@ This key was captured during a harvest command and recorded in a claims block. *
 |---|---|---|
 | Rotate Vultr SSH key `<vultr-ssh-key-uuid>` (<ssh-key-name>) | Ryan MacLean | Rotation confirmed out-of-band per task brief |
 | Terminate both Vultr instances (UUIDs redacted above) | Ryan MacLean | Termination confirmed out-of-band per task brief |
-| **Rotate Vultr API key `BTA56PEJBU6CIDUTVAAYTS64HB4SGFZ7FQ6Q`** | Ryan MacLean | **OUTSTANDING** — key found in live spool, not mentioned in original brief |
+| **Rotate Vultr API key `BTA5…FQ6Q (redacted)`** | Ryan MacLean | **OUTSTANDING** — key found in live spool, not mentioned in original brief |
 | Contact GitHub Support to flush object cache / PR refs | Ryan MacLean | Outstanding |
 | Force-push rewritten history to Gitea (`<gitea-host>:3001`) | Ryan MacLean | Outstanding |
 | Clear or redact live `var/mail/spool` on disk | Ryan MacLean | Outstanding — spool is gitignored but still contains raw secrets |
+| 2026-09-22: key redacted from working tree; rotation status must be confirmed by Ryan; git history still contains the key until a history purge is approved. | Ryan MacLean | Outstanding — rotation unconfirmed; history purge not approved |

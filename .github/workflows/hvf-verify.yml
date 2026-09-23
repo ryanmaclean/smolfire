@@ -48,7 +48,7 @@ jobs:
           expect -c '
             set timeout 90
             set t0 [clock seconds]
-            spawn qemu-system-x86_64 -M q35 -accel hvf -m 512M -smp 2 \
+            spawn qemu-system-x86_64 -M q35 -accel hvf -cpu host -m 512M -smp 2 \
               -drive file=smolbsd-amd64-0.3.0.qcow2,format=qcow2,if=virtio,snapshot=on \
               -nic user,model=virtio-net-pci -display none -serial mon:stdio
             expect {
@@ -65,7 +65,7 @@ jobs:
           expect -c '
             set timeout 60
             set t0 [clock milliseconds]
-            spawn qemu-system-x86_64 -M microvm -accel hvf -m 512M \
+            spawn qemu-system-x86_64 -M microvm -accel hvf -cpu host -m 512M \
               -kernel smolfire-kernel-0.4.0 \
               -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0" \
               -display none -serial mon:stdio

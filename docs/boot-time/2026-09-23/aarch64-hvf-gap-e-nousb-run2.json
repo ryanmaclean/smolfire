@@ -1,0 +1,35 @@
+{
+  "variant": "e-nousb",
+  "run": 1,
+  "env": {
+    "host": "MacBookPro18,4",
+    "cpu": "Apple M1 Max",
+    "macos": "26.6.2",
+    "qemu": "QEMU emulator version 10.2.1",
+    "accel": "hvf",
+    "mem": "256M",
+    "cpus": 2,
+    "nic": "user,model=virtio-net-pci",
+    "qemu_extra": "-boot menu=on,splash-time=0 -machine usb=off",
+    "poll_ms": 10,
+    "loadavg_before": "{ 128.02 66.91 34.58 }",
+    "loadavg_after": "{ 120.41 68.16 35.59 }",
+    "date": "2026-09-23T02:58:46-0700"
+  },
+  "markers_ms": {
+    "first_byte": 470,
+    "loader": 1498,
+    "kernel": 2519,
+    "root_mount": 2668,
+    "rc": 3619,
+    "login": 13835
+  },
+  "phases_ms": {
+    "firmware": 1498,
+    "loader": 1021,
+    "kernel": 149,
+    "mount_to_rc": 951,
+    "rc_to_login": 10216,
+    "total": 13835
+  }
+}

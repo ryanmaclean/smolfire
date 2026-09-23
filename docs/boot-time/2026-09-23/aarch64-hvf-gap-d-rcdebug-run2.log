@@ -1,0 +1,735 @@
++000202ms UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
++000440ms ArmTrngLib could not be correctly initialized.
++000440ms Error: Image at 0004FDB6000 start failed: 00000001
++000440ms Error: Image at 0004FD6D000 start failed: Not Found
++000538ms Error: Image at 0004FCBA000 start failed: Unsupported
++000538ms Error: Image at 0004FC3F000 start failed: Not Found
++000538ms Error: Image at 0004FB65000 start failed: Aborted
++000566ms Tpm2SubmitCommand - Tcg2 - Not Found
++000627ms Tpm2GetCapabilityPcrs fail!
++000627ms Tpm2SubmitCommand - Tcg2 - Not Found
++000627ms Image type X64 can't be loaded on AARCH64 UEFI system.
++000819ms BdsDxe: loading Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
++000819ms BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
++000834ms Consoles: EFI console  
++000848ms     Reading loader env vars from /efi/freebsd/loader.env
++000848ms Setting currdev to disk0p1:
++000848ms FreeBSD/arm64 EFI loader, Revision 3.0
++000864ms    Command line arguments: loader.efi
++000864ms    Image base: 0x4c69e000
++000864ms    EFI version: 2.70
++000864ms    EFI Firmware: EDK II (rev 1.00)
++000864ms    Console: efi (0x1000)
++000864ms    Load Path: \EFI\BOOT\BOOTAA64.EFI
++000864ms    Load Device: PciRoot(0x0)/Pci(0x2,0x0)/HD(1,GPT,410F6650-49C6-11F1-067B-FF9D86F8DCED,0x22,0x10418)
++000864ms    BootCurrent: 0001
++000864ms    BootOrder: 0000 0001[*] 0002
++000864ms    BootInfo Path: PciRoot(0x0)/Pci(0x2,0x0)
++000864ms Ignoring Boot0001: Only one DP found
++000864ms Trying ESP: PciRoot(0x0)/Pci(0x2,0x0)/HD(1,GPT,410F6650-49C6-11F1-067B-FF9D86F8DCED,0x22,0x10418)
++000864ms Setting currdev to disk0p1:
++000864ms |Trying: PciRoot(0x0)/Pci(0x2,0x0)/HD(2,GPT,410F665A-49C6-11F1-1D08-61407E6AF4DA,0x1043A,0x100000)
++000864ms Setting currdev to disk0p2:
++000864ms /Trying: PciRoot(0x0)/Pci(0x2,0x0)/HD(3,GPT,410F665A-49C6-11F1-17A5-D14FFF7C5968,0x11043A,0x6EF800)
++000864ms Setting currdev to disk0p3:
++000889ms -\|/-\|/-\|/-\|/-\|/-\Loading /boot/defaults/loader.conf
++000901ms Loading /boot/defaults/loader.conf
++000916ms Loading /boot/device.hints
++000916ms Loading /boot/loader.conf
++000916ms console uart0 is unavailable
++000916ms no valid consoles!
++000916ms Available consoles:
++000916ms     efi
++000916ms     eficom
++000916ms |Loading /boot/loader.conf.local
++000916ms /?c-Loading kernel...
++001039ms \|/boot/kernel/kernel text=0x318 text=0x765f28 /-\|text=0x1979d0 data=0xfa660 /data=0x0+0x2bf000 0x8+0xf3b70+0x8+0xd6e2d-
++001055ms Loading configured modules...
++001055ms /boot/entropy size=0x1000
++001055ms \/etc/hostid size=0x25
++001071ms Booting [/boot/kernel/kernel]...               
++001082ms Loading splash ok
++001082ms No valid device tree blob found!
++001082ms WARNING! Trying to fire up the kernel, but no device tree blob found!
++001114ms ---<<BOOT>>---
++001114ms Copyright (c) 1992-2025 The FreeBSD Project.
++001114ms Copyright (c) 1979, 1980, 1983, 1986, 1988, 1989, 1991, 1992, 1993, 1994
++001130ms The Regents of the University of California. All rights reserved.
++001130ms FreeBSD is a registered trademark of The FreeBSD Foundation.
++001130ms FreeBSD 15.0-RELEASE-p5 releng/15.0-0730d5233286 SMOLBSD arm64
++001130ms FreeBSD clang version 19.1.7 (https://github.com/llvm/llvm-project.git llvmorg-19.1.7-0-gcd708029e0b2)
++001130ms VT: init without driver.
++001130ms real memory  = 268435456 (256 MB)
++001130ms avail memory = 236445696 (225 MB)
++001143ms Starting CPU 1 (1)
++001143ms FreeBSD/SMP: Multiprocessor System Detected: 2 CPUs
++001143ms random: unblocking device.
++001143ms random: entropy device external interface
++001143ms kbd0 at kbdmux0
++001143ms acpi0: <BOCHS BXPC>
++001143ms acpi0: Power Button (fixed)
++001143ms acpi0: Sleep Button (fixed)
++001157ms acpi0: Could not update all GPEs: AE_NOT_CONFIGURED
++001157ms psci0: <ARM Power State Co-ordination Interface Driver> on acpi0
++001157ms smccc0: <ARM SMCCC v1.0> on psci0
++001157ms gic0: <ARM Generic Interrupt Controller> iomem 0x8000000-0x8000fff,0x8010000-0x8010fff on acpi0
++001157ms gic0: pn 0x0, arch 0x2, rev 0x0, implementer 0x43b irqs 288
++001157ms gic0: frame: 0 8020000 1 64 80
++001157ms gicv2m0: <ARM Generic Interrupt Controller MSI/MSIX> mem 0x8020000-0x8020fff on gic0
++001157ms generic_timer0: <ARM Generic Timer> irq 34,35,36,37 on acpi0
++001157ms Timecounter "ARM MPCore Timecounter" frequency 24000000 Hz quality 1000
++001157ms Event timer "ARM MPCore Eventtimer" frequency 24000000 Hz quality 1000
++001169ms efirtc0: <EFI Realtime Clock>
++001169ms efirtc0: registered as a time-of-day clock, resolution 1.000000s
++001169ms smbios0: <System Management BIOS>
++001169ms smbios0: Entry point: v3 (64-bit), Version: 3.0
++001169ms pmu0: <Performance Monitoring Unit> on acpi0
++001169ms cpu0: <ACPI CPU> on acpi0
++001169ms uart0: <PrimeCell UART (PL011)> iomem 0x9000000-0x9000fff irq 0 on acpi0
++001169ms uart0: console (9600,n,8,1)
++001185ms pcib0: <Generic PCI host controller> on acpi0
++001185ms pci0: <ACPI PCI bus> on pcib0
++001185ms virtio_pci0: <VirtIO PCI (legacy) Network adapter> port 0x80-0x9f mem 0x8000000000-0x8000003fff at device 1.0 on pci0
++001185ms vtnet0: <VirtIO Networking Adapter> on virtio_pci0
++001185ms vtnet0: Ethernet address: 52:54:00:12:34:56
++001185ms vtnet0: netmap queues/slots: TX 1/256, RX 1/128
++001199ms 000.000060 [ 452] vtnet_netmap_attach       vtnet attached txq=1, txd=256 rxq=1, rxd=128
++001199ms virtio_pci1: <VirtIO PCI (legacy) Block adapter> mem 0x10040000-0x10040fff,0x8000004000-0x8000007fff at device 2.0 on pci0
++001199ms vtblk0: <VirtIO Block Adapter> on virtio_pci1
++001214ms vtblk0: 4095MB (8387712 512 byte sectors)
++001214ms acpi_ged0: <Generic Event Device> irq 33 on acpi0
++001214ms acpi_ged0: Raw IRQ 41
++001214ms acpi_button0: <Power Button> on acpi0
++001214ms armv8crypto0: <AES-CBC,AES-XTS,AES-GCM>
++001214ms Timecounters tick every 10.000 msec
++001214ms CPU  0: Apple Unknown CPU r0p0 (midr: 610f0000) affinity:  0
++001214ms                    Cache Type = <64 byte CWG,64 byte ERG,64 byte D-cacheline,PIPT I-cache,64 byte I-cacheline>
++001214ms  Instruction Set Attributes 0 = <TLBI-OSR,CondM-8.5,FHM,DP,SHA3,RDM,Atomic,CRC32,SHA2+SHA512,SHA1,AES+PMULL>
++001214ms  Instruction Set Attributes 1 = <PredInv v8.5,SB,FRINTTS,GPI,RCPC-8.4,FCMA,JSCVT,API EPAC,DCCVADP>
++001214ms  Instruction Set Attributes 2 = <>
++001214ms          Processor Features 0 = <CSV3,CSV2,PSTATE.DIT,RAS,AdvSIMD+HP,FP+HP,EL1,EL0>
++001214ms          Processor Features 1 = <MTE_frac>
++001214ms          Processor Features 2 = <>
++001214ms       Memory Model Features 0 = <ExS,TGran4,TGran16,8bit ASID,1TB PA>
++001214ms       Memory Model Features 1 = <XNX,SpecSEI,PAN+ATS1E1,LO,HPD+TTPBHA,8bit VMID>
++001214ms       Memory Model Features 2 = <E0PD,TTL,IDS,AT,32bit CCIDX,48bit VA,IESB,UAO,CnP>
++001214ms       Memory Model Features 3 = <>
++001214ms       Memory Model Features 4 = <>
++001228ms              Debug Features 0 = <DoubleLock,2 CTX BKPTs,4 Watchpoints,6 Breakpoints,Debugv8>
++001228ms              Debug Features 1 = <>
++001228ms          Auxiliary Features 0 = <>
++001228ms          Auxiliary Features 1 = <>
++001228ms AArch32 Instruction Set Attributes 5 = <>
++001228ms AArch32 Media and VFP Features 0 = <>
++001228ms AArch32 Media and VFP Features 1 = <>
++001228ms CPU  1: Apple Unknown CPU r0p0 (midr: 610f0000) affinity:  1
++001228ms gic0: using for IPIs
++001228ms Release APs...done
++001228ms Trying to mount root from ufs:/dev/gpt/rootfs [rw,noatime]...
++001827ms /etc/rc: DEBUG: checkyesno: dumpon_svcj is set to NO.
++001842ms /etc/rc: DEBUG: run_rc_command: doit:  dumpon_start 
++001858ms /etc/rc: DEBUG: checkyesno: sysctl_svcj is set to NO.
++001858ms /etc/rc: DEBUG: run_rc_command: doit:  sysctl_start 
++001858ms /etc/rc: DEBUG: checkyesno: dnctl_enable is set to NO.
++001873ms /etc/rc: DEBUG: checkyesno: ddb_enable is set to NO.
++001873ms /etc/rc: DEBUG: checkyesno: hostid_enable is set to YES.
++001887ms /etc/rc: DEBUG: checkyesno: hostid_svcj is set to NO.
++001887ms /etc/rc: DEBUG: run_rc_command: doit:  hostid_start 
++001899ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++001899ms Setting hostuuid: 226909d5-2e00-4f8b-8ac2-219cb44b6f42.
++001914ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++001914ms Setting hostid: 0x058ccd11.
++001929ms /etc/rc: DEBUG: checkyesno: ccd_svcj is set to NO.
++001945ms /etc/rc: DEBUG: run_rc_command: doit:  ccd_start 
++001945ms /etc/rc: DEBUG: run_rc_command: start_precmd: [ -n "$(geli_make_list)" -o -n "${geli_groups}" ] 
++001960ms /etc/rc: DEBUG: checkyesno: swap_svcj is set to NO.
++001960ms /etc/rc: DEBUG: run_rc_command: doit:  /sbin/swapon -aq 
++001973ms /etc/rc: DEBUG: checkyesno: fsck_svcj is set to NO.
++001987ms /etc/rc: DEBUG: run_rc_command: doit:  fsck_start 
++002002ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++002002ms Starting file system checks:
++002002ms /etc/rc: DEBUG: checkyesno: background_fsck is set to YES.
++002041ms /dev/gpt/rootfs: FILE SYSTEM CLEAN; SKIPPING CHECKS
++002041ms /dev/gpt/rootfs: clean, 511762 free (26 frags, 63967 blocks, 0.0% fragmentation)
++002054ms /dev/gpt/efiboot0: FILESYSTEM CLEAN; SKIPPING CHECKS
++002069ms /etc/rc: DEBUG: checkyesno: root_svcj is set to NO.
++002069ms /etc/rc: DEBUG: run_rc_command: doit:  root_start 
++002126ms /etc/rc: DEBUG: checkyesno: hostid_enable is set to YES.
++002142ms /etc/rc: DEBUG: checkyesno: hostid_save_svcj is set to NO.
++002157ms /etc/rc: DEBUG: run_rc_command: doit:  hostid_save 
++002235ms /etc/rc: DEBUG: run_rc_command: start_precmd: [ -n "${_mdconfig_list}" ] 
++002235ms /etc/rc: DEBUG: checkyesno: mountcritlocal_svcj is set to NO.
++002251ms /etc/rc: DEBUG: run_rc_command: doit:  mountcritlocal_start 
++002267ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++002415ms Mounting local filesystems:/etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++002415ms .
++002447ms /etc/rc: DEBUG: checkyesno: var_run_enable is set to YES.
++002462ms /etc/rc: DEBUG: checkyesno: var_run_svcj is set to NO.
++002462ms /etc/rc: DEBUG: run_rc_command: doit:  _var_run_start 
++002520ms /etc/rc: DEBUG: checkyesno: zfs_enable is set to NO.
++002545ms /etc/rc: DEBUG: checkyesno: zfs_enable is set to NO.
++002599ms /etc/rc: DEBUG: checkyesno: kldxref_enable is set to YES.
++002611ms /etc/rc: DEBUG: checkyesno: kldxref_svcj is set to NO.
++002627ms /etc/rc: DEBUG: run_rc_command: doit:  kldxref_start 
++002642ms /etc/rc: DEBUG: checkyesno: kldxref_clobber is set to NO.
++002642ms /etc/rc: DEBUG: checkyesno: kldxref_clobber is set to NO.
++002642ms /etc/rc: DEBUG: checkyesno: kldxref_clobber is set to NO.
++002672ms /etc/rc: DEBUG: checkyesno: kldxref_clobber is set to NO.
++002738ms /etc/rc: DEBUG: checkyesno: kldxref_clobber is set to NO.
++002786ms /etc/rc: DEBUG: checkyesno: sysvipc_enable is set to NO.
++002810ms /etc/rc: DEBUG: checkyesno: zfskeys_enable is set to NO.
++002810ms /etc/rc: DEBUG: checkyesno: kld_svcj is set to NO.
++002810ms /etc/rc: DEBUG: run_rc_command: doit:  kld_start 
++002810ms /etc/rc: DEBUG: checkyesno: zfs_enable is set to NO.
++002810ms /etc/rc: DEBUG: checkyesno: zfs_enable is set to NO.
++002826ms /etc/rc: DEBUG: checkyesno: devmatch_enable is set to YES.
++002826ms /etc/rc: DEBUG: checkyesno: devmatch_svcj is set to NO.
++002840ms /etc/rc: DEBUG: run_rc_command: doit:  devmatch_start 
++002840ms /etc/rc: DEBUG: checkyesno: boot_safe is set to NO.
++002936ms /etc/rc: DEBUG: checkyesno: linux_enable is set to NO.
++002951ms /etc/rc: DEBUG: checkyesno: localpkg_svcj is set to NO.
++002951ms /etc/rc: DEBUG: run_rc_command: doit:  pkg_start 
++002967ms /etc/rc: DEBUG: checkyesno: cleanvar_enable is set to YES.
++002967ms /etc/rc: DEBUG: run_rc_command: start_precmd: cleanvar_prestart 
++002996ms /etc/rc: DEBUG: checkyesno: cleanvar_svcj is set to NO.
++002996ms /etc/rc: DEBUG: run_rc_command: doit:  cleanvar_start 
++003071ms /etc/rc: DEBUG: checkyesno: precious_machine is set to NO.
++003088ms /etc/rc: DEBUG: checkyesno: cfumass_enable is set to NO.
++003117ms /etc/rc: DEBUG: checkyesno: mixer_enable is set to YES.
++003117ms /etc/rc: DEBUG: checkyesno: mixer_svcj is set to NO.
++003130ms /etc/rc: DEBUG: run_rc_command: doit:  mixer_start 
++003148ms /etc/rc: DEBUG: checkyesno: rctl_enable is set to YES.
++003148ms /etc/rc: DEBUG: checkyesno: rctl_svcj is set to NO.
++003159ms /etc/rc: DEBUG: run_rc_command: doit:  rctl_start 
++003200ms /etc/rc: DEBUG: checkyesno: ldconfig_svcj is set to NO.
++003215ms /etc/rc: DEBUG: run_rc_command: doit:  ldconfig_start 
++003215ms /etc/rc: DEBUG: checkyesno: ldconfig_insecure is set to NO.
++003246ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++003246ms ELF ldconfig path: /lib /usr/lib /usr/lib/compat
++003278ms /etc/rc: DEBUG: checkyesno: adjkerntz_svcj is set to NO.
++003289ms /etc/rc: DEBUG: run_rc_command: doit:  adjkerntz -i 
++003319ms /etc/rc: DEBUG: checkyesno: hostname_svcj is set to NO.
++003319ms /etc/rc: DEBUG: run_rc_command: doit:  hostname_start 
++003335ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++003335ms Setting hostname: smolbsd-arm64/etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++003335ms .
++003350ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_enable(old) -> $ipv6_activate_all_interfaces(new) is defined
++003350ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_prefer(old) -> $ip6addrctl_policy(new) is defined
++003392ms /etc/rc: DEBUG: checkyesno: ip6addrctl_enable is set to YES.
++003392ms /etc/rc: DEBUG: checkyesno: ip6addrctl_svcj is set to NO.
++003392ms /etc/rc: DEBUG: run_rc_command: doit:  ip6addrctl_start 
++003408ms /etc/rc: DEBUG: checkyesno: ipv6_activate_all_interfaces is set to NO.
++003451ms /etc/rc: DEBUG: checkyesno: ip6addrctl_verbose is set to NO.
++003473ms /etc/rc: DEBUG: checkyesno: ippool_enable is set to NO.
++003473ms /etc/rc: DEBUG: checkyesno: netoptions_svcj is set to NO.
++003473ms /etc/rc: DEBUG: run_rc_command: doit:  netoptions_start 
++003504ms /etc/rc: DEBUG: checkyesno: tcp_extensions is set to YES.
++003504ms /etc/rc: DEBUG: checkyesno: tcp_keepalive is set to YES.
++003504ms /etc/rc: DEBUG: checkyesno: tcp_drop_synfin is set to NO.
++003521ms /etc/rc: DEBUG: checkyesno: ipv6_ipv4mapping is set to NO.
++003521ms /etc/rc: DEBUG: checkyesno: ipv6_privacy is set to NO.
++003562ms /etc/rc: DEBUG: checkyesno: random_svcj is set to NO.
++003562ms /etc/rc: DEBUG: run_rc_command: doit:  random_start 
++003562ms Setting up harvesting: RANDOMDEV,[CALLOUT],[UMA],[FS_ATIME],SWI,INTERRUPT,NET_NG,[NET_ETHER],NET_TUN,MOUSE,KEYBOARD,ATTACH,CACHED
++003666ms Feeding entropy: /etc/rc: DEBUG: entropy read from /entropy
++003698ms /etc/rc: DEBUG: saving entropy to /entropy
++003761ms /etc/rc: DEBUG: saving entropy to /boot/entropy
++003772ms .
++003802ms /etc/rc: DEBUG: checkyesno: iovctl_svcj is set to NO.
++003802ms /etc/rc: DEBUG: run_rc_command: doit:  iovctl_start 
++003802ms /etc/rc: DEBUG: checkyesno: ipsec_enable is set to NO.
++003851ms /etc/rc: DEBUG: checkyesno: autofs_enable is set to NO.
++003908ms /etc/rc: DEBUG: checkyesno: geli2_svcj is set to NO.
++003925ms /etc/rc: DEBUG: run_rc_command: doit:  geli2_start 
++003925ms /etc/rc: DEBUG: checkyesno: ugidfw_enable is set to NO.
++003937ms /etc/rc: DEBUG: checkyesno: ipfilter_enable is set to NO.
++003952ms /etc/rc: DEBUG: checkyesno: ipnat_enable is set to NO.
++003952ms /etc/rc: DEBUG: checkyesno: ipmon_enable is set to NO.
++003997ms /etc/rc: DEBUG: checkyesno: ipfs_enable is set to NO.
++003997ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_enable(old) -> $ipv6_activate_all_interfaces(new) is defined
++004012ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_prefer(old) -> $(new) is defined
++004028ms /etc/rc: DEBUG: checkyesno: netif_enable is set to YES.
++004041ms /etc/rc: DEBUG: checkyesno: netif_svcj is set to NO.
++004041ms /etc/rc: DEBUG: run_rc_command: doit:  netif_start 
++004055ms /etc/rc: DEBUG: Created wlan(4)s: 
++004055ms /etc/rc: DEBUG: Cloned: 
++004094ms /etc/rc: DEBUG: checkyesno: ipv6_activate_all_interfaces is set to NO.
++004119ms lo0: link state changed to UP
++004166ms /etc/rc: DEBUG: checkyesno: ipv6_activate_all_interfaces is set to NO.
++004203ms vtnet0: link state changed to UP
++004203ms /etc/rc: DEBUG: checkyesno: synchronous_dhclient is set to NO.
++004250ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++004250ms Starting Network: lo0 vtnet0.
++004250ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++004250ms lo0: flags=1008049<UP,LOOPBACK,RUNNING,MULTICAST,LOWER_UP> metric 0 mtu 16384
++004250ms options=680003<RXCSUM,TXCSUM,LINKSTATE,RXCSUM_IPV6,TXCSUM_IPV6>
++004250ms inet 127.0.0.1 netmask 0xff000000
++004250ms inet6 ::1 prefixlen 128
++004250ms inet6 fe80::1%lo0 prefixlen 64 scopeid 0x2
++004250ms groups: lo
++004263ms nd6 options=21<PERFORMNUD,AUTO_LINKLOCAL>
++004263ms vtnet0: flags=1008843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST,LOWER_UP> metric 0 mtu 1500
++004263ms options=880028<VLAN_MTU,JUMBO_MTU,LINKSTATE,HWSTATS>
++004263ms ether 52:54:00:12:34:56
++004277ms media: Ethernet autoselect (10Gbase-T <full-duplex>)
++004277ms status: active
++004277ms nd6 options=29<PERFORMNUD,IFDISABLED,AUTO_LINKLOCAL>
++004292ms /etc/rc: DEBUG: The following interfaces were not configured: 
++004334ms /etc/rc.d/ipfilter: DEBUG: checkyesno: ipfilter_svcj is set to NO.
++004403ms /etc/rc.d/ipfilter: DEBUG: checkyesno: ipfilter_enable is set to NO.
++004418ms /etc/rc: DEBUG: checkyesno: static_ndp_svcj is set to NO.
++004434ms /etc/rc: DEBUG: run_rc_command: doit:  static_ndp_start 
++004449ms /etc/rc: DEBUG: checkyesno: static_arp_svcj is set to NO.
++004464ms /etc/rc: DEBUG: run_rc_command: doit:  static_arp_start 
++004464ms /etc/rc: DEBUG: checkyesno: resolv_enable is set to YES.
++004480ms /etc/rc: DEBUG: checkyesno: resolv_svcj is set to NO.
++004480ms /etc/rc: DEBUG: run_rc_command: doit:  resolv_start 
++004495ms /etc/rc: DEBUG: checkyesno: ppp_enable is set to NO.
++004564ms /etc/rc: DEBUG: checkyesno: pflog_enable is set to NO.
++004587ms /etc/rc: DEBUG: checkyesno: stf_svcj is set to NO.
++004603ms /etc/rc: DEBUG: run_rc_command: doit:  stf_up 
++004619ms /etc/rc: DEBUG: checkyesno: pfsync_enable is set to NO.
++004639ms /etc/rc: DEBUG: checkyesno: devd_enable is set to YES.
++004639ms /etc/rc: DEBUG: run_rc_command: start_precmd: find_pidfile 
++004639ms /etc/rc: DEBUG: checkyesno: devd_svcj is set to NO.
++004652ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++004652ms Starting devd.
++004667ms /etc/rc: DEBUG: checkyesno: devd_svcj is set to NO.
++004667ms /etc/rc: DEBUG: run_rc_command: doit:  limits -C daemon   /sbin/devd  
++004804ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++004804ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++004804ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++004818ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++004932ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++004944ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++004944ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++004959ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005046ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005058ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005072ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005072ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005177ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005177ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005177ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005234ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005315ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005315ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005315ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005330ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005393ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005393ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005393ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005404ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005453ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005453ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005453ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005453ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005534ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005559ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005575ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005575ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005676ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005693ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005753ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005753ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++005860ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++005860ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++005860ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++005885ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++006234ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++006245ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++006293ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++006293ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++006429ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++006492ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++006492ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++006492ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++006583ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++006583ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++006598ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++006685ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++006760ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++006777ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++006793ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++006821ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++006878ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++006878ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++006894ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++006910ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++007021ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++007035ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++007035ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++007052ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++007128ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++007143ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++007143ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++007159ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++007262ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++007262ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++007275ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++007294ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++007501ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++007517ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++007533ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++007550ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++007690ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++007706ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++007706ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++007722ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++007997ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++008014ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++008029ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++008029ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++008117ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++008133ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++008133ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++008146ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++008257ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++008272ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++008304ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++008329ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++008710ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++008710ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++008710ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++008727ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++008893ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++008893ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++008910ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++008910ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++008988ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++009005ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++009018ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++009018ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++009127ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++009204ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++009261ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++009261ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++009373ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++009457ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++009457ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++009470ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++009582ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++009599ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++009651ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++009651ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++009790ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++009818ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++009853ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++009896ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++010105ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++010166ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++010182ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++010182ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++010338ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++010354ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++010354ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++010354ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++010468ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++010468ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++010468ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++010485ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++010593ms /etc/pccard_ether: DEBUG: run_rc_command: start_precmd: checkauto 
++010610ms /etc/pccard_ether: DEBUG: checkyesno: pccard_ether_svcj is set to NO.
++010627ms /etc/pccard_ether: DEBUG: run_rc_command: doit:  pccard_ether_start 
++010839ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_enable is set to YES.
++010852ms /etc/rc.d/devmatch: DEBUG: checkyesno: devmatch_svcj is set to NO.
++010852ms /etc/rc.d/devmatch: DEBUG: run_rc_command: doit:  devmatch_start 
++010879ms /etc/rc.d/devmatch: DEBUG: checkyesno: boot_safe is set to NO.
++010955ms /etc/pccard_ether: DEBUG: run_rc_command: start_precmd: checkauto 
++010970ms /etc/pccard_ether: DEBUG: checkyesno: pccard_ether_svcj is set to NO.
++010970ms /etc/pccard_ether: DEBUG: run_rc_command: doit:  pccard_ether_start 
++011479ms /etc/rc.d/dhclient: DEBUG: pid file (/var/run/dhclient/dhclient.vtnet0.pid): not readable.
++011493ms /etc/rc.d/dhclient: DEBUG: run_rc_command: start_precmd: dhclient_prestart 
++011493ms /etc/rc.d/dhclient: DEBUG: checkyesno: background_dhclient is set to NO.
++011519ms /etc/rc.d/dhclient: DEBUG: checkyesno: dhclient_arpwait is set to YES.
++011536ms /etc/rc.d/dhclient: DEBUG: checkyesno: dhclient_svcj is set to NO.
++011562ms /etc/rc.d/dhclient: DEBUG: checkyesno: rc_startmsgs is set to YES.
++011562ms Starting dhclient.
++011576ms /etc/rc.d/dhclient: DEBUG: checkyesno: dhclient_svcj is set to NO.
++011590ms /etc/rc.d/dhclient: DEBUG: run_rc_command: doit:  limits -C daemon   /sbin/dhclient  vtnet0 
++011901ms DHCPREQUEST on vtnet0 to 255.255.255.255 port 67
++011978ms DHCPACK from 10.0.2.2
++012187ms bound to 10.0.2.15 -- renewal in 43199 seconds.
++012203ms /etc/rc: DEBUG: checkyesno: rtsold_enable is set to NO.
++012203ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_firewall_enable(old) -> $(new) is defined
++012203ms /etc/rc: DEBUG: checkyesno: firewall_enable is set to NO.
++012203ms /etc/rc: DEBUG: checkyesno: defaultroute_svcj is set to NO.
++012238ms /etc/rc: DEBUG: run_rc_command: doit:  defaultroute_start 
++012452ms /etc/rc: DEBUG: checkyesno: bridge_svcj is set to NO.
++012452ms /etc/rc: DEBUG: run_rc_command: doit:  bridge_start 
++012464ms /etc/rc: DEBUG: checkyesno: routing_svcj is set to NO.
++012464ms /etc/rc: DEBUG: run_rc_command: doit:  routing_start doall 
++012489ms route: message indicates error: File exists
++012489ms add host 127.0.0.1: gateway lo0 fib 0: route already in table
++012513ms /etc/rc: DEBUG: checkyesno: icmp_bmcastecho is set to NO.
++012544ms /etc/rc: DEBUG: set_rcvar_obsolete: $router_enable(old) -> $routed_enable(new) is defined
++012544ms /etc/rc: DEBUG: set_rcvar_obsolete: $router(old) -> $routed_program(new) is defined
++012561ms /etc/rc: DEBUG: set_rcvar_obsolete: $router_flags(old) -> $routed_flags(new) is defined
++012561ms /etc/rc: DEBUG: checkyesno: routed_enable is set to NO.
++012561ms /etc/rc: DEBUG: checkyesno: _icmp_drop_redirect is set to no.
++012593ms /etc/rc: DEBUG: checkyesno: icmp_log_redirect is set to NO.
++012593ms /etc/rc: DEBUG: checkyesno: gateway_enable is set to NO.
++012619ms /etc/rc: DEBUG: checkyesno: forward_sourceroute is set to NO.
++012619ms /etc/rc: DEBUG: checkyesno: accept_sourceroute is set to NO.
++012648ms /etc/rc: DEBUG: checkyesno: arpproxy_all is set to NO.
++012664ms route: message indicates error: File exists
++012664ms add host ::1: gateway lo0 fib 0: route already in table
++012664ms add net fe80::: gateway ::1
++012664ms add net ff02::: gateway ::1
++012664ms add net ::ffff:0.0.0.0: gateway ::1
++012664ms add net ::0.0.0.0: gateway ::1
++012664ms /etc/rc: DEBUG: checkyesno: ipv6_gateway_enable is set to NO.
++012664ms /etc/rc: DEBUG: checkyesno: ipv6_gateway_enable is set to NO.
++012710ms /etc/rc: DEBUG: checkyesno: zfsd_enable is set to NO.
++012723ms /etc/rc: DEBUG: set_rcvar_obsolete: $router_enable(old) -> $routed_enable(new) is defined
++012770ms /etc/rc: DEBUG: set_rcvar_obsolete: $router(old) -> $routed_program(new) is defined
++012788ms /etc/rc: DEBUG: set_rcvar_obsolete: $router_flags(old) -> $routed_flags(new) is defined
++012843ms /etc/rc: DEBUG: checkyesno: routed_enable is set to NO.
++012843ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_router_enable(old) -> $route6d_enable(new) is defined
++012843ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_router(old) -> $route6d_program(new) is defined
++012856ms /etc/rc: DEBUG: set_rcvar_obsolete: $ipv6_router_flags(old) -> $route6d_flags(new) is defined
++012856ms /etc/rc: DEBUG: checkyesno: route6d_enable is set to NO.
++012879ms /etc/rc: DEBUG: checkyesno: pf_enable is set to NO.
++012879ms /etc/rc: DEBUG: checkyesno: ipfw_netflow_enable is set to NO.
++012917ms /etc/rc: DEBUG: checkyesno: blacklistd_enable is set to NO.
++012930ms /etc/rc: DEBUG: checkyesno: blocklistd_enable is set to NO.
++012961ms /etc/rc: DEBUG: checkyesno: netwait_enable is set to NO.
++012961ms /etc/rc: DEBUG: checkyesno: local_unbound_enable is set to NO.
++012988ms /etc/rc: DEBUG: checkyesno: ctld_enable is set to NO.
++013002ms /etc/rc: DEBUG: checkyesno: tlsservd_enable is set to NO.
++013002ms /etc/rc: DEBUG: checkyesno: ggated_enable is set to NO.
++013035ms /etc/rc: DEBUG: set_rcvar_obsolete: $kerberos5_server_enable(old) -> $kdc_enable(new) is defined
++013035ms /etc/rc: DEBUG: set_rcvar_obsolete: $kerberos5_server(old) -> $kdc_program(new) is defined
++013052ms /etc/rc: DEBUG: set_rcvar_obsolete: $kerberos5_server_flags(old) -> $kdc_flags(new) is defined
++013063ms /etc/rc: DEBUG: checkyesno: kdc_enable is set to NO.
++013092ms /etc/rc: DEBUG: checkyesno: pppoed_enable is set to NO.
++013104ms /etc/rc: DEBUG: checkyesno: iscsid_enable is set to NO.
++013121ms /etc/rc: DEBUG: checkyesno: tlsclntd_enable is set to NO.
++013121ms /etc/rc: DEBUG: checkyesno: virtual_oss_enable is set to NO.
++013137ms /etc/rc: DEBUG: checkyesno: nfsuserd_enable is set to NO.
++013137ms /etc/rc: DEBUG: set_rcvar_obsolete: $kadmind5_server_enable(old) -> $kadmind_enable(new) is defined
++013152ms /etc/rc: DEBUG: set_rcvar_obsolete: $kadmind5_server(old) -> $kadmind_program(new) is defined
++013152ms /etc/rc: DEBUG: set_rcvar_obsolete: $kerberos5_server_enable(old) -> $kdc_enable(new) is defined
++013152ms /etc/rc: DEBUG: checkyesno: kadmind_enable is set to NO.
++013219ms /etc/rc: DEBUG: checkyesno: gssd_enable is set to NO.
++013236ms /etc/rc: DEBUG: checkyesno: nfscbd_enable is set to NO.
++013262ms /etc/rc: DEBUG: checkyesno: iscsictl_enable is set to NO.
++013262ms /etc/rc: DEBUG: run_rc_command: start_precmd: mountcritremote_precmd 
++013294ms /etc/rc: DEBUG: checkyesno: mountcritremote_svcj is set to NO.
++013310ms /etc/rc: DEBUG: run_rc_command: doit:  mountcritremote_start 
++013328ms /etc/rc: DEBUG: checkyesno: accounting_enable is set to NO.
++013345ms /etc/rc: DEBUG: checkyesno: virecover_enable is set to YES.
++013345ms /etc/rc: DEBUG: checkyesno: virecover_svcj is set to NO.
++013345ms /etc/rc: DEBUG: run_rc_command: doit:  virecover_start 
++013419ms /etc/rc: DEBUG: checkyesno: cleartmp_svcj is set to NO.
++013419ms /etc/rc: DEBUG: run_rc_command: doit:  cleartmp_start 
++013436ms /etc/rc: DEBUG: checkyesno: clear_tmp_enable is set to NO.
++013453ms /etc/rc: DEBUG: checkyesno: clear_tmp_X is set to YES.
++013453ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++013453ms Clearing /tmp (X related).
++013495ms /etc/rc: DEBUG: checkyesno: clear_tmp_X is set to YES.
++013637ms /etc/rc: DEBUG: checkyesno: dmesg_enable is set to YES.
++013669ms /etc/rc: DEBUG: checkyesno: dmesg_svcj is set to NO.
++013669ms /etc/rc: DEBUG: run_rc_command: doit:  do_dmesg 
++013844ms /etc/rc: DEBUG: checkyesno: update_motd is set to YES.
++013858ms /etc/rc: DEBUG: checkyesno: motd_svcj is set to NO.
++013920ms /etc/rc: DEBUG: run_rc_command: doit:  motd_start 
++013920ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++014003ms Updating motd:/etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++014003ms .
++014066ms /etc/rc: DEBUG: run_rc_command: start_precmd: [ -n "${_mdconfig2_list}" ] 
++014066ms /etc/rc: DEBUG: checkyesno: devfs_svcj is set to NO.
++014099ms /etc/rc: DEBUG: run_rc_command: doit:  devfs_start 
++014099ms /etc/rc: DEBUG: checkyesno: devfs_load_rulesets is set to YES.
++014112ms /etc/rc: DEBUG: reading rulesets from file (/etc/defaults/devfs.rules)
++014144ms /etc/rc: DEBUG: found ruleset: devfsrules_hide_all=1
++014177ms /etc/rc: DEBUG: adding rule (add hide)
++014188ms /etc/rc: DEBUG: found ruleset: devfsrules_unhide_basic=2
++014188ms /etc/rc: DEBUG: adding rule (add path null unhide)
++014230ms /etc/rc: DEBUG: adding rule (add path zero unhide)
++014243ms /etc/rc: DEBUG: adding rule (add path crypto unhide)
++014271ms /etc/rc: DEBUG: adding rule (add path random unhide)
++014284ms /etc/rc: DEBUG: adding rule (add path urandom unhide)
++014301ms /etc/rc: DEBUG: found ruleset: devfsrules_unhide_login=3
++014317ms /etc/rc: DEBUG: adding rule (add path 'ptyp*' unhide)
++014317ms /etc/rc: DEBUG: adding rule (add path 'ptyq*' unhide)
++014333ms /etc/rc: DEBUG: adding rule (add path 'ptyr*' unhide)
++014333ms /etc/rc: DEBUG: adding rule (add path 'ptys*' unhide)
++014349ms /etc/rc: DEBUG: adding rule (add path 'ptyP*' unhide)
++014394ms /etc/rc: DEBUG: adding rule (add path 'ptyQ*' unhide)
++014394ms /etc/rc: DEBUG: adding rule (add path 'ptyR*' unhide)
++014394ms /etc/rc: DEBUG: adding rule (add path 'ptyS*' unhide)
++014412ms /etc/rc: DEBUG: adding rule (add path 'ptyl*' unhide)
++014412ms /etc/rc: DEBUG: adding rule (add path 'ptym*' unhide)
++014412ms /etc/rc: DEBUG: adding rule (add path 'ptyn*' unhide)
++014459ms /etc/rc: DEBUG: adding rule (add path 'ptyo*' unhide)
++014509ms /etc/rc: DEBUG: adding rule (add path 'ptyL*' unhide)
++014559ms /etc/rc: DEBUG: adding rule (add path 'ptyM*' unhide)
++014559ms /etc/rc: DEBUG: adding rule (add path 'ptyN*' unhide)
++014559ms /etc/rc: DEBUG: adding rule (add path 'ptyO*' unhide)
++014576ms /etc/rc: DEBUG: adding rule (add path 'ttyp*' unhide)
++014576ms /etc/rc: DEBUG: adding rule (add path 'ttyq*' unhide)
++014594ms /etc/rc: DEBUG: adding rule (add path 'ttyr*' unhide)
++014594ms /etc/rc: DEBUG: adding rule (add path 'ttys*' unhide)
++014594ms /etc/rc: DEBUG: adding rule (add path 'ttyP*' unhide)
++014623ms /etc/rc: DEBUG: adding rule (add path 'ttyQ*' unhide)
++014623ms /etc/rc: DEBUG: adding rule (add path 'ttyR*' unhide)
++014623ms /etc/rc: DEBUG: adding rule (add path 'ttyS*' unhide)
++014665ms /etc/rc: DEBUG: adding rule (add path 'ttyl*' unhide)
++014679ms /etc/rc: DEBUG: adding rule (add path 'ttym*' unhide)
++014696ms /etc/rc: DEBUG: adding rule (add path 'ttyn*' unhide)
++014696ms /etc/rc: DEBUG: adding rule (add path 'ttyo*' unhide)
++014709ms /etc/rc: DEBUG: adding rule (add path 'ttyL*' unhide)
++014739ms /etc/rc: DEBUG: adding rule (add path 'ttyM*' unhide)
++014755ms /etc/rc: DEBUG: adding rule (add path 'ttyN*' unhide)
++014788ms /etc/rc: DEBUG: adding rule (add path 'ttyO*' unhide)
++014988ms /etc/rc: DEBUG: adding rule (add path ptmx unhide)
++015035ms /etc/rc: DEBUG: adding rule (add path pts unhide)
++015035ms /etc/rc: DEBUG: adding rule (add path 'pts/*' unhide)
++015050ms /etc/rc: DEBUG: adding rule (add path fd unhide)
++015050ms /etc/rc: DEBUG: adding rule (add path 'fd/*' unhide)
++015050ms /etc/rc: DEBUG: adding rule (add path stdin unhide)
++015066ms /etc/rc: DEBUG: adding rule (add path stdout unhide)
++015066ms /etc/rc: DEBUG: adding rule (add path stderr unhide)
++015081ms /etc/rc: DEBUG: found ruleset: devfsrules_jail=4
++015110ms /etc/rc: DEBUG: adding rule (add include $devfsrules_hide_all)
++015147ms /etc/rc: DEBUG: adding rule (add include $devfsrules_unhide_basic)
++015209ms /etc/rc: DEBUG: adding rule (add include $devfsrules_unhide_login)
++015209ms /etc/rc: DEBUG: adding rule (add path fuse unhide)
++015238ms /etc/rc: DEBUG: adding rule (add path zfs unhide)
++015238ms /etc/rc: DEBUG: found ruleset: devfsrules_jail_vnet=5
++015238ms /etc/rc: DEBUG: adding rule (add include $devfsrules_hide_all)
++015254ms /etc/rc: DEBUG: adding rule (add include $devfsrules_unhide_basic)
++015271ms /etc/rc: DEBUG: adding rule (add include $devfsrules_unhide_login)
++015321ms /etc/rc: DEBUG: adding rule (add include $devfsrules_jail)
++015391ms /etc/rc: DEBUG: adding rule (add path pf unhide)
++015514ms /etc/rc: DEBUG: devfs_rulesets_from_file: no such file (/etc/devfs.rules)
++015514ms /etc/rc: DEBUG: devfs_init_rulesets: devfs rulesets initialized
++015533ms /etc/rc: DEBUG: checkyesno: gptboot_enable is set to YES.
++015533ms /etc/rc: DEBUG: checkyesno: gptboot_svcj is set to NO.
++015547ms /etc/rc: DEBUG: run_rc_command: doit:  gptboot_report 
++015760ms /etc/rc: DEBUG: checkyesno: osrelease_enable is set to YES.
++015784ms /etc/rc: DEBUG: checkyesno: osrelease_svcj is set to NO.
++015784ms /etc/rc: DEBUG: run_rc_command: doit:  osrelease_start 
++015784ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++015818ms Updating /var/run/os-release /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++015818ms done.
++015818ms /etc/rc: DEBUG: checkyesno: hostapd_enable is set to NO.
++015872ms /etc/rc: DEBUG: checkyesno: newsyslog_enable is set to YES.
++015872ms /etc/rc: DEBUG: checkyesno: newsyslog_svcj is set to NO.
++015872ms /etc/rc: DEBUG: run_rc_command: doit:  newsyslog_start 
++015885ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++015922ms Creating and/or trimming log files/etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++015922ms .
++015949ms /etc/rc: DEBUG: checkyesno: syslogd_enable is set to YES.
++015949ms /etc/rc: DEBUG: run_rc_command: start_precmd: syslogd_precmd 
++015965ms /etc/rc: DEBUG: checkyesno: syslogd_svcj is set to NO.
++015988ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++015988ms Starting syslogd.
++016002ms /etc/rc: DEBUG: checkyesno: syslogd_svcj is set to NO.
++016002ms /etc/rc: DEBUG: run_rc_command: doit:  limits -C daemon   /usr/sbin/syslogd -s 
++016126ms /etc/rc: DEBUG: checkyesno: syslogd_svcj is set to NO.
++016155ms /etc/rc: DEBUG: checkyesno: auditd_enable is set to NO.
++016155ms /etc/rc: DEBUG: checkyesno: ntpdate_enable is set to NO.
++016169ms /etc/rc: DEBUG: checkyesno: watchdogd_enable is set to NO.
++016185ms /etc/rc: DEBUG: checkyesno: pwcheck_svcj is set to NO.
++016202ms /etc/rc: DEBUG: run_rc_command: doit:  pwcheck_start 
++016220ms /etc/rc: DEBUG: checkyesno: bsnmpd_enable is set to NO.
++016254ms /etc/rc: DEBUG: checkyesno: savecore_enable is set to YES.
++016254ms /etc/rc: DEBUG: run_rc_command: start_precmd: savecore_prestart 
++016269ms /etc/rc: DEBUG: No dump device. Quitting.
++016269ms /etc/rc: DEBUG: checkyesno: hastd_enable is set to NO.
++016285ms /etc/rc: DEBUG: checkyesno: auditdistd_enable is set to NO.
++016285ms /etc/rc: DEBUG: checkyesno: rpcbind_enable is set to NO.
++016302ms /etc/rc: DEBUG: checkyesno: nfs_client_enable is set to NO.
++016314ms /etc/rc: DEBUG: checkyesno: nisdomain_svcj is set to NO.
++016330ms /etc/rc: DEBUG: run_rc_command: doit:  nisdomain_start 
++016330ms /etc/rc: DEBUG: checkyesno: rpc_statd_enable is set to NO.
++016342ms /etc/rc: DEBUG: checkyesno: nis_server_enable is set to NO.
++016376ms /etc/rc: DEBUG: checkyesno: nis_ypldap_enable is set to NO.
++016376ms /etc/rc: DEBUG: checkyesno: nis_ypxfrd_enable is set to NO.
++016408ms /etc/rc: DEBUG: checkyesno: rpc_ypupdated_enable is set to NO.
++016408ms /etc/rc: DEBUG: checkyesno: nis_client_enable is set to NO.
++016408ms /etc/rc: DEBUG: checkyesno: rpc_lockd_enable is set to NO.
++016562ms /etc/rc: DEBUG: checkyesno: nis_ypset_enable is set to NO.
++016562ms /etc/rc: DEBUG: checkyesno: nis_yppasswdd_enable is set to NO.
++016562ms /etc/rc: DEBUG: checkyesno: autofs_enable is set to NO.
++016578ms /etc/rc: DEBUG: checkyesno: quota_enable is set to NO.
++016594ms /etc/rc: DEBUG: checkyesno: autofs_enable is set to NO.
++016627ms /etc/rc: DEBUG: checkyesno: local_svcj is set to NO.
++016642ms /etc/rc: DEBUG: run_rc_command: doit:  local_start 
++016657ms /etc/rc: DEBUG: checkyesno: sdpd_enable is set to NO.
++016704ms /etc/rc: DEBUG: checkyesno: rtadvd_enable is set to NO.
++016720ms /etc/rc: DEBUG: checkyesno: rwhod_enable is set to NO.
++016737ms /etc/rc: DEBUG: checkyesno: mountlate_svcj is set to NO.
++016794ms /etc/rc: DEBUG: run_rc_command: doit:  mountlate_start 
++016794ms Mounting late filesystems:.
++016811ms /etc/rc: DEBUG: checkyesno: nscd_enable is set to NO.
++016827ms /etc/rc: DEBUG: checkyesno: ntpd_enable is set to NO.
++016858ms /etc/rc: DEBUG: checkyesno: lpd_enable is set to NO.
++016874ms /etc/rc: DEBUG: checkyesno: powerd_enable is set to NO.
++016910ms /etc/rc: DEBUG: checkyesno: rarpd_enable is set to NO.
++016910ms /etc/rc: DEBUG: checkyesno: moused_enable is set to NO.
++016910ms /etc/rc: DEBUG: checkyesno: hcsecd_enable is set to NO.
++016942ms /etc/rc: DEBUG: checkyesno: bootparamd_enable is set to NO.
++016956ms /etc/rc: DEBUG: checkyesno: apm_enable is set to NO.
++016973ms /etc/rc: DEBUG: checkyesno: ubthidhci_enable is set to NO.
++016989ms /etc/rc: DEBUG: checkyesno: utx_enable is set to YES.
++017004ms /etc/rc: DEBUG: checkyesno: utx_svcj is set to NO.
++017018ms /etc/rc: DEBUG: run_rc_command: doit:  utx boot 
++017032ms /etc/rc: DEBUG: checkyesno: ftpproxy_enable is set to NO.
++017045ms /etc/rc: DEBUG: checkyesno: swaplate_svcj is set to NO.
++017060ms /etc/rc: DEBUG: run_rc_command: doit:  /sbin/swapon -aLq 
++017077ms /etc/rc: DEBUG: checkyesno: mountd_enable is set to NO.
++017077ms /etc/rc: DEBUG: checkyesno: bthidd_enable is set to NO.
++017094ms /etc/rc: DEBUG: checkyesno: rfcomm_pppd_server_enable is set to NO.
++017094ms /etc/rc: DEBUG: checkyesno: nfs_server_enable is set to NO.
++017145ms /etc/rc: DEBUG: checkyesno: msgs_svcj is set to NO.
++017159ms /etc/rc: DEBUG: run_rc_command: doit:  msgs_start 
++017192ms /etc/rc: DEBUG: checkyesno: inetd_enable is set to NO.
++017208ms /etc/rc: DEBUG: checkyesno: sshd_enable is set to YES.
++017208ms /etc/rc: DEBUG: run_rc_command: start_precmd: sshd_precmd 
++017208ms /etc/rc: DEBUG: checkyesno: sshd_enable is set to YES.
++017225ms /etc/rc: DEBUG: checkyesno: sshd_svcj is set to NO.
++017225ms /etc/rc: DEBUG: run_rc_command: doit:  sshd_keygen 
++017241ms /etc/rc: DEBUG: checkyesno: sshd_rsa_enable is set to yes.
++017241ms /etc/rc: DEBUG: checkyesno: sshd_ecdsa_enable is set to yes.
++017241ms /etc/rc: DEBUG: checkyesno: sshd_ed25519_enable is set to yes.
++017256ms /etc/rc: DEBUG: checkyesno: sshd_enable is set to YES.
++017256ms /etc/rc: DEBUG: checkyesno: sshd_svcj is set to NO.
++017256ms /etc/rc: DEBUG: run_rc_command: doit:  sshd_configtest 
++017256ms Performing sanity check on sshd configuration.
++017503ms /etc/rc: DEBUG: checkyesno: sshd_svcj is set to NO.
++017515ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++017515ms Starting sshd.
++017527ms /etc/rc: DEBUG: checkyesno: sshd_svcj is set to NO.
++017527ms /etc/rc: DEBUG: run_rc_command: doit:  limits -C daemon   /usr/sbin/sshd  
++017546ms /etc/rc: DEBUG: run_rc_command: start_precmd: syscons_precmd 
++017562ms /etc/rc: DEBUG: checkyesno: sysctl_lastload_svcj is set to NO.
++017562ms /etc/rc: DEBUG: run_rc_command: doit:  /etc/rc.d/sysctl lastload 
++017673ms /etc/rc.d/sysctl: DEBUG: checkyesno: sysctl_svcj is set to NO.
++017701ms /etc/rc.d/sysctl: DEBUG: checkyesno: sysctl_svcj is set to NO.
++017701ms /etc/rc.d/sysctl: DEBUG: run_rc_command: doit:  sysctl_start last 
++017718ms /etc/rc: DEBUG: checkyesno: sendmail_enable is set to NO.
++017731ms /etc/rc: DEBUG: checkyesno: sendmail_submit_enable is set to NO.
++017731ms /etc/rc: DEBUG: checkyesno: sendmail_outbound_enable is set to NO.
++017747ms /etc/rc: DEBUG: checkyesno: sendmail_msp_queue_enable is set to NO.
++017764ms /etc/rc: DEBUG: checkyesno: sendmail_enable is set to NO.
++017764ms /etc/rc: DEBUG: checkyesno: cron_dst is set to YES.
++017781ms /etc/rc: DEBUG: checkyesno: cron_enable is set to YES.
++017799ms /etc/rc: DEBUG: checkyesno: cron_svcj is set to NO.
++017859ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++017859ms Starting cron.
++017871ms /etc/rc: DEBUG: checkyesno: cron_svcj is set to NO.
++017871ms /etc/rc: DEBUG: run_rc_command: doit:  limits -C daemon   /usr/sbin/cron  -s 
++017902ms /etc/rc: DEBUG: checkyesno: background_fsck is set to YES.
++017919ms /etc/rc: DEBUG: run_rc_command: start_precmd: bgfsck_start_precmd 
++017919ms /etc/rc: DEBUG: checkyesno: background_fsck_svcj is set to NO.
++017936ms /etc/rc: DEBUG: run_rc_command: doit:  bgfsck_start 
++017952ms /etc/rc: DEBUG: checkyesno: rc_startmsgs is set to YES.
++017952ms Starting background file system checks in 60 seconds.
++017969ms /etc/rc: DEBUG: checkyesno: jail_enable is set to NO.
++017969ms /etc/rc: DEBUG: checkyesno: kern_securelevel_enable is set to NO.
++017986ms Wed Sep 23 09:58:15 UTC 2026
++017986ms FreeBSD/arm64 (smolbsd-arm64) (ttyu0)
++017986ms login: 

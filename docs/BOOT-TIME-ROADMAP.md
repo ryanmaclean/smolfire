@@ -131,11 +131,91 @@ it: firmware 5,351 ms median, 5,251–5,368). QEMU's `-boot menu=on,splash-time=
 (fw_cfg `etc/boot-menu-wait`=0) removes it; the Phase-1 "11 s" figure
 very likely carried this 5 s too. Wire it into `bin/qemu-smolfire-vm.nu` and
 `tests/time-to-ready-aarch64.exp`. (2) rc dominates what remains: a
-1.9–6.8 s gap between `Starting devd.` and `Starting dhclient.` (not yet
-attributed — needs TSLOG `tslog_user` on this image), then sshd config
+1.9–6.8 s gap between `Starting devd.` and `Starting dhclient.` — **now
+attributed, §1.2** — then sshd config
 check, sshd, cron (~0.3–0.7 s each). (3) An unclean previous shutdown adds a foreground fsck of
 ~3.4 s (`aarch64-hvf-diskimage-dirtyfs-run1.log`) — killed-VM gates should
 use `snapshot=on`.
+
+### 1.2 The `Starting devd.` → `Starting dhclient.` gap — ATTRIBUTED (2026-09-23)
+
+**Method.** `tests/boot-gap-experiments.nu` (`prepare`/`run`/`analyze`):
+`--base` is an APFS clone (`cp -c`) of the Phase-1 image, booted clean once
+to clear the dirty-fs flag; each of 11 variants gets its own APFS-cloned,
+one-time-configured qcow2 (`prepare`), then 3 interleaved boots each
+(`run --runs 3`, `snapshot=on`, `-boot menu=on,splash-time=0`) through
+`bin/boot-phases.nu`, serial-timestamped. Host was shared with other
+concurrent jobs (load average 12→150 over the session — see the wide
+min–max bands below); medians are reported precisely because of that noise.
+Raw logs + per-boot JSON: `docs/boot-time/2026-09-23/aarch64-hvf-gap-*.log`.
+Analysis: `nu tests/boot-gap-experiments.nu analyze --out-dir
+docs/boot-time/2026-09-23` (schema `smolfire.boot-gap/v1`).
+
+| Variant (one change from baseline) | devd→dhclient median ms (n=3, range) | login median ms (range) |
+|---|---|---|
+| baseline | 3,166 (2,516–6,004) | 10,739 (8,434–12,405) |
+| a-dad0: `net.inet6.ip6.dad_count=0` + `net.inet.ip.dad_count=0` | 4,495 (2,916–6,909) | 13,937 (7,399–14,197) |
+| b1-syncdhcp: `ifconfig_vtnet0="SYNCDHCP"` | n/a (dhclient starts *before* devd — see below) | 8,553 (7,078–9,521) |
+| b2-bgdhclient: `background_dhclient="YES"` | 3,868 (2,457–6,922) | 11,429 (7,452–14,953) |
+| c-nodevd: `devd_enable="NO"` | n/a (no devd, no `Starting dhclient.` line) | **37,650** (35,373–44,145) |
+| d-rcdebug: `rc_debug="YES"` | 9,507 (6,910–12,615) | 23,502 (17,986–31,570) |
+| e-nousb: `-machine usb=off` | 4,010 (3,892–10,920) | 13,835 (9,129–22,377) |
+| f-devd-n: `devd_flags="-n"` | n/a (no `Starting dhclient.` line, 3/3 boots) | 8,878 (5,442–23,695) |
+| g-nodevmatch: `devmatch_enable="NO"` | 2,800 (1,582–7,142) | 7,009 (3,774–18,088) |
+| h-nomatch-mmio: devd.conf `nomatch` policy for `_HID "LNRO0005"` | 993 (990–1,678) | 6,609 (4,343–15,450) |
+| **i-nomatch-tunable: `hw.bus.devctl_nomatch_enabled="0"`** | **329 (257–1,401)** | **4,827 (1,680–14,217)** |
+
+**Attribution.** `d-rcdebug`'s `rc_debug=YES` trace places the cause
+precisely: once `/etc/rc.d/dhclient`'s `run_rc_command` actually fires,
+`dhclient_prestart` → `Starting dhclient.` takes ~100 ms — dhclient itself
+is not slow. What *is* slow, filling the gap, is `/etc/rc.d/devmatch`
+being invoked over and over — `DEBUG: run_rc_command: doit: devmatch_start`
+recurs roughly every 150–400 ms, back to back, for more than a dozen
+iterations in the same trace. `/etc/devd/devmatch.conf` (base FreeBSD)
+wires a `notify` action (`/etc/rc.d/devmatch quietstart`, one `/bin/sh`
+fork+exec + `rc.subr`/`rc.conf` resourcing per event) to every DEVFS
+`CREATE`, and a `nomatch` action (`kldload -n $pnpinfo`, another fork+exec)
+to every unmatched device. `/etc/rc.d/dhclient` `REQUIRE`s `devd`, and rc.d
+scripts run strictly serially, so dhclient cannot start until `devd`'s own
+start action returns — and that action must first replay devd's queued
+cold-plug backlog of these per-event shell actions. On this image (QEMU
+`virt` + EDK2 ACPI), that backlog is inflated by spurious/duplicate ACPI
+child nodes with no matching driver (the `h`/`i` experiments target exactly
+this: `_HID "LNRO0005"` is one such node). The four variants that touch
+different layers of this pipeline show effect sizes that line up with the
+theory: `i` (kill NOMATCH events at the kernel, so neither the `kldload`
+nomatch action nor most of the coldplug DEVFS churn happens) removes ~90 %
+of the gap; `h` (devd.conf policy silencing nomatch for just that one HID)
+removes ~69 %; `g` (`devmatch_enable=NO`, which only short-circuits
+`devmatch_start`'s payload *after* the fork+exec has already happened)
+removes only ~12 %; and `c` (no devd at all) does not skip the wait, it
+relocates and enlarges it — FreeBSD's `/etc/rc` falls back to its
+~30 s device-wait timeout elsewhere, so total boot gets **3.5× worse**, not
+better. `a-dad0` (the mechanism a prior NetBSD investigation attributed a
+similar-looking gap to) shows no improvement on this image — duplicate
+address detection is not implicated here. `b1-syncdhcp` corroborates the
+model from a different angle: `SYNCDHCP` makes `/etc/rc.d/netif` invoke
+`dhclient` synchronously and directly, bypassing the standalone
+`/etc/rc.d/dhclient` service (and its `REQUIRE: devd`) entirely — in that
+variant's logs `Starting dhclient.` sometimes prints *before*
+`Starting devd.`, which is only possible if dhclient is not gated on devd
+in that path.
+
+**Fix applied:** `hw.bus.devctl_nomatch_enabled="0"` added to
+`release/tools/smolfire-qemu-aarch64.conf`'s `loader.conf` heredoc — a
+one-line, kernel-level tunable, no devd.conf changes needed, the largest and
+most reproducible effect of the 9 variants tested. Not applied: disabling
+devd (`c`, regresses hard), `rc_debug` (diagnostic only, not a fix),
+`-machine usb=off` (`e`, no significant effect — USB was not implicated on
+this board). `f-devd-n`'s dropped `Starting dhclient.` line in all 3 boots
+is unexplained and out of scope here; flagged for follow-up, not relied on
+for the fix.
+
+**Caveat:** the host ran other concurrent jobs throughout (load average
+12→150); absolute medians should be treated as ballpark, but the *relative*
+ranking across variants — reproduced over 3 interleaved-per-round boots
+each, on the same noisy host — is the load-bearing evidence, not any single
+absolute number.
 
 ## 2. Ranked candidate reductions — re-ranked on measured data
 

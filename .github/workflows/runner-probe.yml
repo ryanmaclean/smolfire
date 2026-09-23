@@ -58,13 +58,12 @@ jobs:
         if: runner.os == 'macOS'
         continue-on-error: true
         run: |
-          # ~2-4 min brew install; then ask qemu itself whether hvf works.
-          brew install --quiet qemu 2>/dev/null || brew install qemu
+          # macOS ships no `timeout` (run #1's false FAILED verdict came from
+          # exactly that) — use gtimeout from coreutils.
+          brew install --quiet qemu coreutils 2>/dev/null || brew install qemu coreutils
           echo "PROBE[${{ matrix.os }}]: qemu=$(qemu-system-aarch64 --version | head -1)"
-          # Accel probe: launch with -accel hvf and no kernel; success of
-          # machine init (reaching monitor 'quit') proves HVF is usable.
           if [ "$(uname -m)" = "arm64" ]; then QBIN=qemu-system-aarch64; MACH=virt; else QBIN=qemu-system-x86_64; MACH=q35; fi
-          if echo quit | timeout 60 "$QBIN" -M "$MACH" -accel hvf -m 256M -display none -monitor stdio -S 2>probe.err; then
+          if echo quit | gtimeout 60 "$QBIN" -M "$MACH" -accel hvf -m 256M -display none -monitor stdio -S 2>probe.err; then
             echo "PROBE[${{ matrix.os }}]: HVF=WORKS ($QBIN -M $MACH)"
           else
             echo "PROBE[${{ matrix.os }}]: HVF=FAILED:"; sed 's/^/PROBE[${{ matrix.os }}]:   /' probe.err

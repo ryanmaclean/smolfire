@@ -66,7 +66,7 @@ invocation in `bin/build-smolfire-vm.nu` and `bin/build-smolfire-vm-image.nu` �
 Confirmation came from the repo's own history, not just the mirror review: the
 `.planning/phases/03-*` records and `.github/workflows/build-image.yml` show the
 prior self-hosted CI builds succeeded with `cloudware-release` + `CLOUDWARE=smolfire` +
-`SMOLFIRE_FORMAT=qcow2 SMOLFIRE_FSLIST=ufs` (generating `cw-smolbsd-ufs-qcow2`,
+`SMOLFIRE_FORMAT=qcow2 SMOLFIRE_FSLIST=ufs` (generating `cw-smolfire-ufs-qcow2`,
 artifact at `<objdir>/usr/src/release/vm.ufs.qcow2`) — while still passing the
 fake `CLOUDWARE_CONF`, meaning even those builds never sourced the conf. And
 `PHASE-1-RESULTS.md` records the Phase-1 aarch64 image was created **manually**
@@ -116,7 +116,7 @@ Every FIX-9/FIX-10 assumption was checked directly against
 | Assumption | Verdict | Action taken |
 |---|---|---|
 | `cloudware-release` exists and needs `WITH_CLOUDWARE` + non-empty `CLOUDWARE` | TRUE (Makefile.vm:112, 307–311; empty target otherwise) | We pass both; also added `WITH_CLOUDWARE=yes` to build-image.yml |
-| Per-type conf var is `SMOLFIRECONF`; must be passed explicitly | TRUE (`${_CW:tu}CONF`; auto-default only if `tools/smolbsd.conf` exists — it doesn't) | Passed explicitly everywhere |
+| Per-type conf var is `SMOLFIRECONF`; must be passed explicitly | TRUE (`${_CW:tu}CONF`; auto-default only if `tools/smolfire.conf` exists — it doesn't) | Passed explicitly everywhere |
 | `-s ${VMSIZE}` / `SWAPSIZE` reach mk-vmimage on the cw path | TRUE (Makefile.vm:141, 156) | Conf `${VMSIZE:-2g}` pattern correct as-is |
 | Artifact basename | `smolfire.ufs.qcow2` in release objdir root (`${_CW:tl}.${_FS}.${_FMT}`, Makefile.vm:124) — `vm.ufs.qcow2` seen in prior self-hosted CI runs is that tree's stable/15 naming | harvest.sh default updated; workflow ls/scp made glob-tolerant; find_qcow2 already globs |
 | `WITH_PKGBASE=yes` selects pkgbase | FALSE — no such release variable; pkgbase is the DEFAULT, `NOPKGBASE=yes` opts out (vmimage.subr:98) | Removed from all invocations and headers |
@@ -139,8 +139,8 @@ catalogs. The original sub-100 MiB raw target is MET; the download is
 33 MB. The auto-chained TPM run (30122923572) went red exactly as
 predicted pre-merge (main's copy predates the eviction — not a
 regression; resolves on merge). The SIZEREPORT block is in the run's
-`smolbsd-build-vm.log` artifact — parse with `nu bin/sizereport.nu` for
-round-2 targeting. To publish: dispatch "Release smolBSD Image" with
+`smolfire-build-vm.log` artifact — parse with `nu bin/sizereport.nu` for
+round-2 targeting. To publish: dispatch "Release smolfire Image" with
 run_id 30109365470.
 
 Changes shipped together, validated by the run above:
@@ -160,8 +160,8 @@ Changes shipped together, validated by the run above:
    `local.sqlite` kept), recursive `/usr/lib` `*.a` sweep.
 4. **SIZEREPORT instrumentation** at the end of `vm_extra_pre_umount`:
    du/largest-files/pkg-by-size printed into the in-VM make log
-   (`smolbsd-build-vm.log` artifact); parse with `nu bin/sizereport.nu
-   smolbsd-build-vm.log` (or raw: `grep '^SIZEREPORT:'`). This is
+   (`smolfire-build-vm.log` artifact); parse with `nu bin/sizereport.nu
+   smolfire-build-vm.log` (or raw: `grep '^SIZEREPORT:'`). This is
    the ground truth for round 2 (FreeBSD-utilities file-level cuts — the
    ~48 MiB grab-bag leaf with no narrower official replacement on pkgbase).
 
@@ -306,7 +306,7 @@ falls back to curve25519). Projected: **~66 MiB raw / ~25 MiB download**.
 
 ## Empirical results — hosted pipeline run #6: GREEN (2026-07-18)
 
-**The scripted pipeline produced a gated smolBSD image end-to-end for the
+**The scripted pipeline produced a gated smolfire image end-to-end for the
 first time.** Run 29637188773, commit bc852b7: buildworld+kernel ~3h,
 cloudware-release ~5m, **size gate PASS** (<= 512 MiB; the whole artifact
 zip incl. logs is 87 MB compressed), **boot gate PASS: TIME_TO_LOGIN=9s**
@@ -342,7 +342,7 @@ tail printed on failure, so the next cycle is self-diagnosing. Gates
    no manual host needed — builds, size-gates, and boot-gates amd64
    end-to-end; cross-builds aarch64). Manual alternative: on a FreeBSD host,
    `sudo nu bin/build-smolfire-vm.nu --arch <arch>`, streaming
-   `/var/tmp/smolbsd-build.log`.
+   `/var/tmp/smolfire-build.log`.
 3. **Run the size audit** on the artifact: `sh bin/analyze-image.sh <qcow2>`.
    Capture the top-30 dir/file lists and the budget delta. This is the ground
    truth that replaces all the estimation above.

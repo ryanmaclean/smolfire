@@ -1,4 +1,4 @@
-# smolBSD CI/CD — TPM VM Test Pipeline
+# smolfire CI/CD — TPM VM Test Pipeline
 
 This document describes the CI/CD infrastructure for reproducible TPM integration
 tests on a self-hosted runner.
@@ -7,17 +7,18 @@ tests on a self-hosted runner.
 
 ## Overview
 
-The pipeline boots a FreeBSD 15.1-STABLE VM under QEMU+KVM with a software TPM
-(swtpm), reads PCR0 via `tpm2_pcrread` over SSH, and asserts it matches the
-known-good value established during manual validation.
+The pipeline boots the smolfire amd64 TPM image under QEMU+KVM with a software
+TPM (swtpm), waits for the SSH boot gate, runs the T1–T6 TPM acceptance suite
+over SSH, and asserts PCR0 matches the known-good value established during
+manual validation.
 
 | Component | Value |
 |-----------|-------|
 | Workflow  | `.github/workflows/tpm-vm-test.yml` |
-| Test driver | `tests/tpm-smoke-test.py` |
+| Test driver | `tests/bhyve-tpm-pcr-verify.nu` (T1–T6 suite) via `bin/swtpm-setup.nu` and `bin/qemu-smolfire.nu` |
 | Runner setup | `bin/setup-runner.sh` |
 | Runner host | <kvm-host> (<kvm-host-ip>) |
-| FreeBSD image | `FreeBSD-15.1-STABLE-amd64-ufs.qcow2.xz` (UFS, amd64) |
+| Image under test | `/home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2` (built by `build-image.yml`; the historical `smolbsd-ci` directory name is kept on the runner) |
 | Expected PCR0 | `B6A903D197F7F1DFDAD0C3D74244009C9AA407F55AE5F753D7F8B3F0C10F5727` |
 
 ---
@@ -27,7 +28,7 @@ known-good value established during manual validation.
 ### 1. Get a registration token
 
 Go to:
-**GitHub → ryanmaclean/smolBSD → Settings → Actions → Runners → New self-hosted runner**
+**GitHub → ryanmaclean/smolfire → Settings → Actions → Runners → New self-hosted runner**
 
 Copy the token shown in the "Configure" step (it is valid for ~1 hour).
 
@@ -40,7 +41,7 @@ ssh studio@<kvm-host-ip>
 ### 3. Run the setup script
 
 ```sh
-cd ~/smolBSD   # or wherever the repo is cloned
+cd ~/smolfire   # or wherever the repo is cloned
 GITHUB_RUNNER_TOKEN=<token> sh bin/setup-runner.sh
 ```
 
@@ -66,50 +67,45 @@ systemctl status 'actions.runner.ryanmaclean-smolBSD.*'
 ```
 
 The runner should appear as **Idle** at:
-https://github.com/ryanmaclean/smolBSD/settings/actions/runners
+https://github.com/ryanmaclean/smolfire/settings/actions/runners
 
 ---
 
 ## What the TPM workflow tests
 
-`.github/workflows/tpm-vm-test.yml` runs the following sequence:
+`.github/workflows/tpm-vm-test.yml` runs the following sequence (paths are the
+workflow's `env:` values):
 
-1. **Cache restore** — looks up the FreeBSD qcow2 image by a SHA-256 of the
-   download URL.  On a hit the ~1 GB download is skipped.
+1. **Install Nushell** — fetches the pinned `nu` release into `~/.local/bin`.
 
-2. **Image download** (cache miss only) — fetches the `.qcow2.xz` from
-   `download.freebsd.org` and decompresses it into `/tmp/smolbsd-ci/`.
+2. **Verify smolfire image exists** — requires the pre-built image at
+   `SMOLFIRE_IMAGE=/home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2`. It is
+   produced by `build-image.yml`; the job fails fast if it is missing. There is
+   no download or cache step in this workflow.
 
-3. **Working copy** — `cp`s the cached image to `/tmp/` so the cached original
-   is never mutated.
+3. **Ensure UEFI fallback bootloader in ESP** — uses `guestfish` to inject
+   `EFI/BOOT/BOOTX64.EFI` into the image's ESP if it is absent, so OVMF boots
+   without a stored boot entry.
 
-4. **swtpm start** — launches `swtpm socket --tpm2` as a daemon writing state to
-   `/tmp/smolbsd-tpm/`; polls for the Unix socket (max 3s).
+4. **Reset swtpm state** — `nu bin/swtpm-setup.nu --action reset --state-dir
+   /tmp/smolfire-tpm-ci` gives every run a fresh PCR baseline.
 
-5. **QEMU boot** — starts `qemu-system-x86_64` with:
-   - `-accel kvm -cpu host` for near-native speed
-   - OVMF UEFI firmware
-   - virtio disk + NIC with SSH forwarded to `127.0.0.1:2241`
-   - `tpm-tis` device backed by the swtpm socket
-   - A Unix serial console socket at `/tmp/smolbsd-console.sock`
+5. **Boot smolfire with QEMU+swtpm** — `nu bin/qemu-smolfire.nu` starts
+   `qemu-system-x86_64` in the background with `-accel kvm -cpu host`, OVMF
+   firmware, a `tpm-tis` device backed by the swtpm socket, and SSH forwarded
+   to `127.0.0.1:2241`. QEMU output goes to `/tmp/smolfire-qemu-ci.log`.
 
-6. **Console fix** (`tests/tpm-smoke-test.py`) —
-   - Connects to the QEMU console socket and waits for the FreeBSD login prompt.
-   - Logs in as root.
-   - **Removes XMSS SSH host keys** (`/etc/ssh/ssh_host_xmss_*`).  The standard
-     UFS image regenerates these on first boot; XMSS key generation can take
-     several hours and blocks sshd from starting.  Removing the keys causes sshd
-     to start immediately using only RSA/ECDSA/Ed25519 keys.
-   - Sets a CI root password and starts sshd.
+6. **Wait for SSH boot-gate** — polls SSH for up to 120 s; on timeout it prints
+   the tail of `/tmp/smolfire-qemu-ci.log` and fails.
 
-7. **PCR0 read** — SSHes in (via `sshpass`), installs `tpm2-tools` from pkg if
-   absent, runs `tpm2_pcrread sha256:0`, parses the output, and compares to the
-   expected value.
+7. **Run T1–T6 TPM acceptance suite** — `tests/bhyve-tpm-pcr-verify.nu` over
+   SSH; results are written to `/tmp/smolfire-t1t6-ci.toml`.
 
-8. **Summary** — writes PCR0 / expected / pass-fail to the job summary page.
+8. **Report T1–T6 results** — appends the TOML results to the job summary.
 
-9. **Cleanup** — kills QEMU and swtpm, removes ephemeral files.  Always runs,
-   even on failure.
+9. **Cleanup** — shuts the guest down, stops swtpm via
+   `bin/swtpm-setup.nu --action stop`, and removes ephemeral files. Always
+   runs, even on failure.
 
 ---
 
@@ -125,40 +121,44 @@ In the GitHub UI:
 Via CLI (`gh`):
 
 ```sh
-gh workflow run tpm-vm-test.yml --repo ryanmaclean/smolBSD
+gh workflow run tpm-vm-test.yml --repo ryanmaclean/smolfire
 ```
 
 Watch live:
 
 ```sh
-gh run watch --repo ryanmaclean/smolBSD
+gh run watch --repo ryanmaclean/smolfire
 ```
 
 ---
 
-## Image cache
+## Image and state paths on the runner
 
 | Detail | Value |
 |--------|-------|
-| Cache action | `actions/cache@v4` |
-| Cache path | `/tmp/smolbsd-ci/FreeBSD-15.1-STABLE-amd64-ufs.qcow2` |
-| Cache key | `freebsd-image-<sha256(IMAGE_URL)>` |
-| Typical image size | ~900 MB uncompressed |
-| Cache lives on | the runner host filesystem (self-hosted runner cache) |
+| Image under test | `/home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2` (+ `.sha256`) |
+| Produced by | `.github/workflows/build-image.yml` (`OUTPUT_DIR=/home/studio/smolbsd-ci`) |
+| swtpm state | `/tmp/smolfire-tpm-ci` (reset at the start of every run) |
+| QEMU log | `/tmp/smolfire-qemu-ci.log` |
+| T1–T6 results | `/tmp/smolfire-t1t6-ci.toml` |
 
-### Invalidating the cache
+The `smolbsd-ci` directory name on the runner predates the rename and is kept
+so existing runner setups keep working; the workflow's `env:` block is the
+source of truth.
 
-Change `IMAGE_URL` in the workflow `env:` block.  The SHA-256 of the URL changes,
-producing a new cache key and forcing a fresh download.
+### Rebuilding the image
 
-To manually clear it on the runner:
+The TPM workflow never downloads or caches an image. To refresh the image under
+test, run `build-image.yml` (which stages a FreeBSD builder VM from
+`/home/studio/smolbsd-tpm-test/` and writes the new qcow2 into
+`/home/studio/smolbsd-ci/`), or copy a locally built image to that path.
+
+To clear swtpm state or logs by hand on the runner:
 
 ```sh
 ssh studio@<kvm-host-ip>
-rm -rf /tmp/smolbsd-ci
+rm -rf /tmp/smolfire-tpm-ci /tmp/smolfire-qemu-ci.log /tmp/smolfire-t1t6-ci.toml
 ```
-
-The next run will re-download and re-populate the cache.
 
 ---
 
@@ -193,8 +193,8 @@ available matching runner — no workflow changes needed.
 |---------|-------------|-----|
 | `swtpm socket did not appear` | swtpm not installed or permission issue | `sudo apt install swtpm` on <kvm-host>; ensure runner user can `sudo swtpm` |
 | QEMU exits immediately | `/dev/kvm` not accessible | `sudo chmod 666 /dev/kvm` or add runner user to `kvm` group |
-| `Login prompt not seen within 240s` | QEMU too slow / image corrupt | Check QEMU output; re-download image by clearing `/tmp/smolbsd-ci` |
-| SSH timeout | XMSS fix did not apply | Check console log for errors; XMSS removal step may have failed |
+| SSH boot-gate timeout (120s) | QEMU too slow / image corrupt / missing ESP fallback | Check `/tmp/smolfire-qemu-ci.log`; rebuild the image with `build-image.yml` |
+| `smolfire image not found` | `build-image.yml` has not produced `/home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2` | Run `build-image.yml` first or copy an image to that path |
 | PCR0 mismatch | Firmware or image changed | Re-run manual validation, update `EXPECTED_PCR0` in workflow |
 | Runner shows offline | systemd service stopped | `ssh studio@<kvm-host-ip> 'sudo systemctl start actions.runner.*'` |
 

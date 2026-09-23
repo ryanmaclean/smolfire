@@ -73,11 +73,112 @@ def save-state [state: record, path: string] {
 
 # Emit a structured TOML log line to stdout.
 # Every coordinator action is observable via stdout — pipe to `tee` if needed.
+#
+# log-event is for free-form DIAGNOSTIC events (payload shape varies per event).
+# FSM state transitions and reply verdicts MUST NOT go through log-event — use
+# log-transition / log-verdict below, which emit the fixed telemetry schema.
 def log-event [event: string, payload: record] {
     let ts  = date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ"
     let row = {ts: $ts, event: $event} | merge $payload
     $row | to toml | print
     print "---"
+}
+
+# ── Deterministic telemetry (schema v1) ───────────────────────────────────────
+#
+# Every FSM step emits exactly one `state_transition` event; every reply the
+# harvester classifies emits exactly one `verdict` event. Both kinds share ONE
+# record shape, built in exactly one place (telemetry-record), so field names
+# and key order are identical across every code path and every run.
+#
+# Wire format: same as log-event — a TOML document on stdout followed by a
+# `---` separator line. Field order (schema_version = "v1"):
+#
+#   schema_version  string  always "v1"
+#   ts              string  RFC 3339 UTC, second resolution
+#   event           string  "state_transition" | "verdict"
+#   state_from      string  idle | harvesting | dispatching | waiting | halted
+#                           ("unknown" only for the corrupt-state recovery step)
+#   state_to        string  idle | harvesting | dispatching | waiting | halted
+#   task_id         string  "" = null (no task context)
+#   verdict         string  "" = null | pass | fail | blocked | malformed | unknown
+#   attempt         int     -1 = null; else dispatch attempts recorded for task_id
+#   reason          string  non-empty, from TELEMETRY_TRANSITION_REASONS or
+#                           TELEMETRY_VERDICT_REASONS
+#   message_id      string  "" = null; Message-ID the event is about
+#
+# TOML has no null, so nullable fields use a fixed-type sentinel ("" / -1)
+# instead of being omitted — omission would change the column set.
+const TELEMETRY_SCHEMA_VERSION = "v1"
+const TELEMETRY_VERDICTS = ["pass", "fail", "blocked", "malformed", "unknown"]
+const TELEMETRY_TRANSITION_REASONS = [
+    "spool-absent", "no-new-messages", "new-messages",
+    "new-request", "retry", "task-halted", "harvest-complete",
+    "reply-received", "no-reply", "reply-timeout",
+    "dispatch-sent",
+    "halt-marker-present", "awaiting-resume", "resume-action",
+    "unknown-state",
+]
+const TELEMETRY_VERDICT_REASONS = [
+    "accepted", "retry", "retry-exhausted", "no-unblocker",
+    "parse-error", "unrecognized-verdict",
+]
+
+# The single constructor for telemetry records. Do not build these elsewhere.
+def telemetry-record [
+    event: string
+    state_from: string
+    state_to: string
+    task_id: string
+    verdict: string
+    attempt: int
+    reason: string
+    message_id: string
+] {
+    {
+        schema_version: $TELEMETRY_SCHEMA_VERSION
+        ts:             (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ")
+        event:          $event
+        state_from:     $state_from
+        state_to:       $state_to
+        task_id:        $task_id
+        verdict:        $verdict
+        attempt:        $attempt
+        reason:         $reason
+        message_id:     $message_id
+    }
+}
+
+def emit-telemetry [row: record] {
+    $row | to toml | print
+    print "---"
+}
+
+# Emit one `state_transition` event. Call exactly once per FSM step.
+def log-transition [
+    state_from: string
+    state_to: string
+    reason: string
+    --task-id: string = ""
+    --verdict: string = ""
+    --attempt: int = -1
+    --message-id: string = ""
+] {
+    emit-telemetry (telemetry-record "state_transition" $state_from $state_to $task_id $verdict $attempt $reason $message_id)
+}
+
+# Emit one `verdict` event for a harvested reply. `verdict` is normalized to the
+# closed TELEMETRY_VERDICTS enum (anything else becomes "unknown").
+def log-verdict [
+    verdict: string
+    reason: string
+    state_to: string          # FSM state this verdict routes the coordinator to
+    --task-id: string = ""
+    --attempt: int = -1
+    --message-id: string = ""
+] {
+    let v = if $verdict in $TELEMETRY_VERDICTS { $verdict } else { "unknown" }
+    emit-telemetry (telemetry-record "verdict" "harvesting" $state_to $task_id $v $attempt $reason $message_id)
 }
 
 # Check whether the HALT marker exists.
@@ -273,13 +374,14 @@ def process-resume-actions [state: record, root: string, spool: string, event_pr
         if (($matched | length) == 0) { continue }
 
         let task = $matched | first
-        let action_hdr = (($msg.headers | get "X-Resume-Action"? | default "retry") | str downcase)
+        let action_hdr = (($msg.headers | get "X-Resume-Action"? | default "retry") | str lowercase)
         let is_retry_as = ($action_hdr | str starts-with "retry-as-")
         log-event $"($event_prefix)_resume_action" {task_id: $task, resume_tag: $resume_tag, action: $action_hdr}
 
         if $action_hdr == "retry" or $action_hdr == "edit" or $is_retry_as {
             let per_halt = [$root, "var", "mail", $"HALT.($task)"] | path join
             if ($per_halt | path exists) { rm $per_halt }
+            log-transition $next_state.fsm_state "idle" "resume-action" --task-id $task --message-id $id
             $next_state = ($next_state
                 | update halted_tasks ($next_state.halted_tasks | where {|t| $t != $task})
                 | update fsm_state "idle")
@@ -303,6 +405,7 @@ def process-resume-actions [state: record, root: string, spool: string, event_pr
 def state-idle [state: record, spool: string, root: string, remaining: int] {
     if not ($spool | path exists) {
         log-event "spool_absent" {spool: $spool}
+        log-transition "idle" "idle" "spool-absent"
         return ($state | update fsm_state "idle")
     }
 
@@ -319,10 +422,12 @@ def state-idle [state: record, spool: string, root: string, remaining: int] {
 
     if ($new_msgs | length) == 0 {
         log-event "idle_no_new_messages" {spool: $spool, total_msgs: ($messages | length)}
+        log-transition "idle" "idle" "no-new-messages"
         return ($state | update fsm_state "idle")
     }
 
     log-event "idle_new_messages_found" {count: ($new_msgs | length)}
+    log-transition "idle" "harvesting" "new-messages"
     # Transition to harvesting — process the unseen messages.
     tick ($state | update fsm_state "harvesting") $spool $root ($remaining - 1)
 }
@@ -338,6 +443,12 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
     mut dispatch_state = $state   # overwritten when a dispatch target is found
     mut has_dispatch   = false
     mut current_state  = $state
+    # Telemetry context for the harvesting→dispatching transition.
+    mut dispatch_reason  = ""
+    mut dispatch_verdict = ""
+    mut dispatch_attempt = -1
+    mut dispatch_task    = ""
+    mut dispatch_msgid   = ""
 
     for msg in $messages {
         # Stop processing once we've identified a dispatch target.
@@ -354,6 +465,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                 from_line:   $msg.from_line
                 parse_error: ($payload._parse_error)
             }
+            log-verdict "malformed" "parse-error" "harvesting" --message-id $id
         } else {
             let to_addr   = $msg.headers | get "To"? | default "unknown"
             let from_addr = $msg.headers | get "From"? | default "unknown"
@@ -378,7 +490,9 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                 # Get current attempt count for this task
                 let attempt_n = $current_state.attempt_counts | get -o $task_id | default 0
 
-                if $verdict == "pass" {
+                # Classify the reply into one telemetry verdict category plus a
+                # decision. retry → dispatching; halt → idle; accept/ignore → keep harvesting.
+                let category = if $verdict == "pass" {
                     # Check attestation requirement from both reply and originating request.
                     # Agents may omit attestation_required in replies; coordinator must enforce
                     # the requirement declared in the request envelope.
@@ -387,44 +501,48 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                     let reply_attestation_required = $payload | get "attestation_required"? | default false
                     let attestation_required = $request_attestation_required or $reply_attestation_required
                     let claims = $payload | get "claims"? | default []
+                    if $attestation_required and (($claims | length) == 0) { "malformed" } else { "pass" }
+                } else if $verdict in ["fail", "blocked"] {
+                    $verdict
+                } else {
+                    "unknown"
+                }
 
-                    if $attestation_required and (($claims | length) == 0) {
-                        # Treat as MALFORMED (treat as fail for retry purposes)
-                        log-event "harvest_malformed" {
-                            message_id:  $id
-                            task_id:     $task_id
-                            reason:      "attestation_required=true but no [[claims]] block present"
-                        }
-                        if $attempt_n < 3 {
-                            $new_seen = $new_seen | append $id
-                            $dispatch_state = ($current_state
-                                | update seen_ids           $new_seen
-                                | update pending_request_id $id
-                                | update pending_task_id    $task_id
-                                | update pending_to_addr    $from_addr
-                                | update fsm_state          "dispatching")
-                            $has_dispatch = true
-                            log-event "harvest_reply_retry" {message_id: $id, task_id: $task_id, verdict: "fail", attempt: $attempt_n}
-                        } else {
-                            let _ = write-halt-marker $root $task_id "retry-exhausted" $verdict $id $attempt_n
-                            append-halt-message $spool $task_id "retry-exhausted" $verdict $attempt_n ["retry", "abort"]
-                            try-irc-dm $task_id "retry-exhausted" $root
-                            $current_state = ($current_state | update halted_tasks ($current_state.halted_tasks | append $task_id))
-                            log-event "harvest_reply_halt" {message_id: $id, task_id: $task_id, verdict: $verdict, reason: "retry-exhausted"}
-                            $new_seen = $new_seen | append $id
-                            return ($current_state | update seen_ids $new_seen | update fsm_state "idle")
-                        }
-                    } else {
-                        # pass + verified
-                        log-event "harvest_reply_pass" {message_id: $id, task_id: $task_id}
+                if $category == "malformed" {
+                    log-event "harvest_malformed" {
+                        message_id:  $id
+                        task_id:     $task_id
+                        reason:      "attestation_required=true but no [[claims]] block present"
+                    }
+                }
+
+                # D2 retry table.
+                #   pass (verified)            → accept
+                #   malformed / fail           → retry while attempts < 3, else HALT retry-exhausted
+                #   blocked + blocked_by       → retry while attempts < 3, else HALT retry-exhausted
+                #   blocked, no blocked_by     → immediate HALT no-unblocker
+                #   anything else              → ignored (unrecognized verdict)
+                let blocked_by = $payload | get "blocked_by"? | default ""
+                let decision = match $category {
+                    "pass"    => "accepted"
+                    "unknown" => "unrecognized-verdict"
+                    "blocked" if ($blocked_by | str length) == 0 => "no-unblocker"
+                    _ => (if $attempt_n < 3 { "retry" } else { "retry-exhausted" })
+                }
+
+                match $decision {
+                    "accepted" => {
+                        log-verdict $category $decision "harvesting" --task-id $task_id --attempt $attempt_n --message-id $id
                         let cleared_counts = if $task_id in $current_state.attempt_counts { $current_state.attempt_counts | reject $task_id } else { $current_state.attempt_counts }
                         $new_seen = $new_seen | append $id
                         $current_state = ($current_state | update seen_ids $new_seen | update attempt_counts $cleared_counts)
                         continue
                     }
-                } else if $verdict == "fail" {
-                    # D2 retry table: retry if attempts < 3, else HALT
-                    if $attempt_n < 3 {
+                    "unrecognized-verdict" => {
+                        log-verdict $category $decision "harvesting" --task-id $task_id --attempt $attempt_n --message-id $id
+                    }
+                    "retry" => {
+                        log-verdict $category $decision "dispatching" --task-id $task_id --attempt $attempt_n --message-id $id
                         $new_seen = $new_seen | append $id
                         $dispatch_state = ($current_state
                             | update seen_ids           $new_seen
@@ -432,48 +550,22 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                             | update pending_task_id    $task_id
                             | update pending_to_addr    $from_addr
                             | update fsm_state          "dispatching")
-                        $has_dispatch = true
-                        log-event "harvest_reply_retry" {message_id: $id, task_id: $task_id, verdict: $verdict, attempt: $attempt_n}
-                    } else {
-                        let _ = write-halt-marker $root $task_id "retry-exhausted" $verdict $id $attempt_n
-                        append-halt-message $spool $task_id "retry-exhausted" $verdict $attempt_n ["retry", "abort"]
-                        try-irc-dm $task_id "retry-exhausted" $root
-                        $current_state = ($current_state | update halted_tasks ($current_state.halted_tasks | append $task_id))
-                        log-event "harvest_reply_halt" {message_id: $id, task_id: $task_id, verdict: $verdict, reason: "retry-exhausted"}
-                        $new_seen = $new_seen | append $id
-                        return ($current_state | update seen_ids $new_seen | update fsm_state "idle")
+                        $has_dispatch     = true
+                        $dispatch_reason  = "retry"
+                        $dispatch_verdict = $category
+                        $dispatch_attempt = $attempt_n
+                        $dispatch_task    = $task_id
+                        $dispatch_msgid   = $id
                     }
-                } else if $verdict == "blocked" {
-                    # D2 retry table: blocked_by present → retry up to 3; no blocked_by → immediate HALT
-                    let blocked_by = $payload | get "blocked_by"? | default ""
-                    if ($blocked_by | str length) > 0 {
-                        # unblocker named — retry if attempts < 3
-                        if $attempt_n < 3 {
-                            $new_seen = $new_seen | append $id
-                            $dispatch_state = ($current_state
-                                | update seen_ids           $new_seen
-                                | update pending_request_id $id
-                                | update pending_task_id    $task_id
-                                | update pending_to_addr    $from_addr
-                                | update fsm_state          "dispatching")
-                            $has_dispatch = true
-                            log-event "harvest_reply_retry" {message_id: $id, task_id: $task_id, verdict: $verdict, attempt: $attempt_n}
-                        } else {
-                            let _ = write-halt-marker $root $task_id "retry-exhausted" $verdict $id $attempt_n
-                            append-halt-message $spool $task_id "retry-exhausted" $verdict $attempt_n ["retry", "abort"]
-                            try-irc-dm $task_id "retry-exhausted" $root
-                            $current_state = ($current_state | update halted_tasks ($current_state.halted_tasks | append $task_id))
-                            log-event "harvest_reply_halt" {message_id: $id, task_id: $task_id, verdict: $verdict, reason: "retry-exhausted"}
-                            $new_seen = $new_seen | append $id
-                            return ($current_state | update seen_ids $new_seen | update fsm_state "idle")
-                        }
-                    } else {
-                        # no blocked_by — immediate HALT, no retry
-                        let _ = write-halt-marker $root $task_id "no-unblocker" $verdict $id $attempt_n
-                        append-halt-message $spool $task_id "no-unblocker" $verdict $attempt_n ["abort", "edit"]
-                        try-irc-dm $task_id "no-unblocker" $root
+                    _ => {
+                        # HALT: retry-exhausted | no-unblocker
+                        let proposed = if $decision == "no-unblocker" { ["abort", "edit"] } else { ["retry", "abort"] }
+                        let _ = write-halt-marker $root $task_id $decision $verdict $id $attempt_n
+                        append-halt-message $spool $task_id $decision $verdict $attempt_n $proposed
+                        try-irc-dm $task_id $decision $root
+                        log-verdict $category $decision "idle" --task-id $task_id --attempt $attempt_n --message-id $id
+                        log-transition "harvesting" "idle" "task-halted" --task-id $task_id --verdict $category --attempt $attempt_n --message-id $id
                         $current_state = ($current_state | update halted_tasks ($current_state.halted_tasks | append $task_id))
-                        log-event "harvest_reply_halt" {message_id: $id, task_id: $task_id, verdict: $verdict, reason: "no-unblocker"}
                         $new_seen = $new_seen | append $id
                         return ($current_state | update seen_ids $new_seen | update fsm_state "idle")
                     }
@@ -522,7 +614,12 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         | update pending_task_id    $task_id
                         | update pending_to_addr    $to_addr
                         | update fsm_state          "dispatching")
-                    $has_dispatch = true
+                    $has_dispatch     = true
+                    $dispatch_reason  = "new-request"
+                    $dispatch_verdict = ""
+                    $dispatch_attempt = ($current_state.attempt_counts | get -o $task_id | default 0)
+                    $dispatch_task    = $task_id
+                    $dispatch_msgid   = $id
                     # break is implicit: has_dispatch will stop outer loop
                 }
             }
@@ -534,8 +631,10 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
     }
 
     if $has_dispatch {
+        log-transition "harvesting" "dispatching" $dispatch_reason --task-id $dispatch_task --verdict $dispatch_verdict --attempt $dispatch_attempt --message-id $dispatch_msgid
         tick $dispatch_state $spool $root ($remaining - 1)
     } else {
+        log-transition "harvesting" "idle" "harvest-complete"
         $current_state
         | update seen_ids $new_seen
         | update fsm_state "idle"
@@ -547,6 +646,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
 def state-waiting [state: record, spool: string, root: string, remaining: int] {
     if not ($spool | path exists) {
         log-event "waiting_no_reply" {pending_request_id: $state.pending_request_id, reason: "spool absent"}
+        log-transition "waiting" "waiting" "spool-absent" --task-id $state.pending_task_id --message-id $state.pending_request_id
         return $state
     }
 
@@ -567,6 +667,7 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
             pending_request_id: $state.pending_request_id
             pending_task_id:    $state.pending_task_id
         }
+        log-transition "waiting" "harvesting" "reply-received" --task-id $state.pending_task_id --attempt ($state.attempt_counts | get -o $state.pending_task_id | default 0) --message-id (msg-id ($reply | first))
         let next_state = $state
             | update pending_request_id ""
             | update pending_task_id    ""
@@ -601,10 +702,12 @@ verdict = \"fail\"
 failure_reason = \"timeout: no reply within 300s\"
 "
                 $synth_msg | save --append $spool
+                log-transition "waiting" "idle" "reply-timeout" --task-id $state.pending_task_id --attempt ($state.attempt_counts | get -o $state.pending_task_id | default 0) --message-id $state.pending_request_id
                 return ($state | update fsm_state "idle" | update dispatched_at "")
             }
         }
 
+        log-transition "waiting" "waiting" "no-reply" --task-id $state.pending_task_id --attempt ($state.attempt_counts | get -o $state.pending_task_id | default 0) --message-id $state.pending_request_id
         $state
     }
 }
@@ -647,6 +750,8 @@ action = \"dispatch\"
     let agent_type = ($to_addr | split row "@" | first | default "general-purpose")
     spawn-subagent $agent_type $task_id $spool $root
 
+    log-transition "dispatching" "waiting" "dispatch-sent" --task-id $task_id --attempt $next_attempt --message-id $msg_id
+
     let updated_counts = $state.attempt_counts | upsert $task_id $next_attempt
     tick ($state
         | update fsm_state          "waiting"
@@ -659,7 +764,10 @@ action = \"dispatch\"
 # halted: global HALT marker is present or all tasks failed.
 # Per spec §13: wait for user to rm var/mail/HALT and post a resume message.
 # We return here; the next cron/manual invocation will re-check.
-def state-halted [state: record, root: string, spool: string] {
+# `reason` is the telemetry reason for staying/entering halted:
+#   halt-marker-present — global var/mail/HALT exists
+#   awaiting-resume     — fsm_state was persisted as halted, no global marker
+def state-halted [state: record, root: string, spool: string, reason: string] {
     let halt_path = [$root, "var", "mail", "HALT"] | path join
     let halt_info = try { open --raw $halt_path | from toml } catch { {} }
     log-event "halted" {
@@ -671,9 +779,11 @@ def state-halted [state: record, root: string, spool: string] {
 
     let resumed_state = process-resume-actions $state $root $spool "halted"
     if $resumed_state != $state {
+        # process-resume-actions already emitted the resume-action transition.
         return $resumed_state
     }
 
+    log-transition $state.fsm_state "halted" $reason
     $state | update fsm_state "halted"
 }
 
@@ -696,7 +806,7 @@ def tick [state: record, spool: string, root: string, remaining: int] {
 
     # O(1) HALT check before every state dispatch — spec §13.
     if (halt-present $root) {
-        return (state-halted $resumed_state $root $spool)
+        return (state-halted $resumed_state $root $spool "halt-marker-present")
     }
 
     let next_count = $resumed_state.tick_count + 1
@@ -711,9 +821,10 @@ def tick [state: record, spool: string, root: string, remaining: int] {
         "dispatching" => { state-dispatching $stamped $spool $root $remaining }
         "waiting"     => { state-waiting     $stamped $spool $root $remaining }
         "harvesting"  => { state-harvesting  $stamped $spool $root $remaining }
-        "halted"      => { state-halted      $stamped $root $spool }
+        "halted"      => { state-halted      $stamped $root $spool "awaiting-resume" }
         _             => {
             log-event "unknown_state" {fsm_state: $stamped.fsm_state}
+            log-transition "unknown" "idle" "unknown-state"
             $stamped | update fsm_state "idle"
         }
     }

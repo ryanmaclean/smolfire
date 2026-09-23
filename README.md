@@ -2,16 +2,6 @@
 
 [![CI](https://github.com/ryanmaclean/smolfire/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanmaclean/smolfire/actions/workflows/ci.yml)
 
-> **Formerly "smolBSD".** That name belongs to
-> [NetBSDfr/smolBSD](https://github.com/NetBSDfr/smolBSD) by Emile "iMil"
-> Heitor — the NetBSD micro-VM builder (smolbsd.org, FOSDEM 2025/2026) that
-> inspired this project and predates it. This project is **not affiliated**
-> with it; we adopted the name of our microVM flagship, **SMOLFIRE**,
-> project-wide. Kernconfs: `SMOLFIRE` (microVM one-ELF), `SMOLFIRE-VM`
-> (full VM, formerly `SMOLBSD`), `SMOLFIRE-PI5`/`SMOLFIRE-RK3588` (boards).
-> Guest login is now `root`/`smolfire`; images ≤ 0.4.0 still use the old
-> `smolbsd` password. History (rename phases): issue #41.
-
 ## What it is
 
 smolfire is a minimal FreeBSD 15 VM (aarch64 primary, amd64 secondary) paired

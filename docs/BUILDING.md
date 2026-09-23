@@ -1,6 +1,6 @@
-# Building smolBSD
+# Building smolfire
 
-One command builds the complete smolBSD qcow2 image from a clean FreeBSD source tree.
+One command builds the complete smolfire qcow2 image from a clean FreeBSD source tree.
 
 ## Prerequisites
 
@@ -88,7 +88,7 @@ The release configs in `release/tools/` filter packages and strip non-essential
 rootfs content in `vm_extra_pre_umount()`. To diagnose size after a build:
 
 ```sh
-bin/analyze-image.sh path/to/FreeBSD-15-aarch64-smolbsd.qcow2
+bin/analyze-image.sh path/to/FreeBSD-15-aarch64-smolfire.qcow2
 ```
 
 This mounts the image read-only and reports top directories, top files, and
@@ -96,12 +96,12 @@ installed packages, then exits non-zero if total exceeds 512 MiB.
 
 CI builds need no mount at all: the release confs print a `SIZEREPORT` block
 (rootfs total, directories, largest files, packages by size) into the in-VM
-make log, which the hosted workflow uploads as `smolbsd-build-vm.log`. Parse
+make log, which the hosted workflow uploads as `smolfire-build-vm.log`. Parse
 it with:
 
 ```sh
-nu bin/sizereport.nu smolbsd-build-vm.log        # tables, largest first
-nu bin/sizereport.nu smolbsd-build-vm.log --top 30
+nu bin/sizereport.nu smolfire-build-vm.log        # tables, largest first
+nu bin/sizereport.nu smolfire-build-vm.log --top 30
 ```
 
 ## Partial runs

@@ -1,4 +1,4 @@
-# SMOLFIRE — smolBSD microVM kernel, rump-kernel spirit on FreeBSD:
+# SMOLFIRE — smolfire microVM kernel, rump-kernel spirit on FreeBSD:
 # direct PVH kernel boot (Firecracker / QEMU microvm) with a static
 # /rescue-based MFS root embedded IN the kernel. No bootloader, no ESP,
 # no disk, no fsck — one ELF file is the whole OS.

@@ -34,8 +34,8 @@
         "tests/coord-tick-test.nu"
       ],
       "passes": false,
-      "status": "passing",
-      "evidence": "coord-tick-test tests 7/15/16/16b/16c cover halt and resume"
+      "status": "blocked",
+      "evidence": "coord-tick-test.nu tests 7/15/16/16b/16c pass (HALT file -> halted; retry resume clears halted task; abort resume keeps task halted; retry resume clears per-task halt without global HALT; retry-as-role clears per-task halt); sh tests/run-all.sh -> \"results: 10 passed, 2 skipped, 0 failed\". NOT passing: a halt->auto-un-halt bug via X-Resume-Tag was reproduced on origin/main (cf9dda6e): the coordinator's own [HALT] message carries X-Resume-Tag: resume-<task>, and on the next tick process-resume-actions treats it as an operator resume (default action retry), deleting HALT.<task> and clearing halted_tasks with no operator input. Per-task isolation therefore does not hold past one tick; tracked as a follow-up (fix + two-tick regression test). None of tests 7/15/16/16b/16c exercises a second tick without an operator resume message."
     },
     {
       "id": "S-003",
@@ -47,9 +47,9 @@
         "tests/coord-escalate-test.nu",
         "docs/superpowers/specs/2026-04-30-mailbox-jec-handoff-design.md"
       ],
-      "passes": false,
+      "passes": true,
       "status": "passing",
-      "evidence": "coord-tick-test tests 8/9/10/13 cover retry + escalation"
+      "evidence": "coord-tick-test.nu tests 8/9/10/13 pass (fail on first attempt -> retry dispatched, no global HALT; attempt counter increments on fail; retry exhausted -> HALT file created; blocked+no-unblocker -> immediate HALT, no retry); coord-escalate-test.nu 13/13 pass via run-all.sh; sh tests/run-all.sh -> \"results: 10 passed, 2 skipped, 0 failed\"."
     },
     {
       "id": "S-004",
@@ -60,9 +60,9 @@
         "bin/coord-tick.nu",
         "tests/coord-tick-test.nu"
       ],
-      "passes": false,
+      "passes": true,
       "status": "passing",
-      "evidence": "coord-tick-test test 11 covers capability gate dispatch check"
+      "evidence": "coord-tick-test.nu test 11 passes (capability mismatch -> message skipped, no dispatch); sh tests/run-all.sh -> \"results: 10 passed, 2 skipped, 0 failed\"."
     },
     {
       "id": "S-005",

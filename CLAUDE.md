@@ -47,6 +47,8 @@ Optional environment variables:
 | `SPOOL` | `var/mail/spool` | mbox spool path |
 | `SMOLFIRE_CLAUDE_MODEL` | `claude-sonnet-5` | Claude model for subagent dispatch |
 | `SMOLFIRE_EXECUTOR` | `vm` | `vm` or `jail` (experimental, FreeBSD only — see `docs/JAIL-EXECUTOR.md`) |
+| `SMOLFIRE_SPAWN_SUBAGENT` | unset (disabled) | Billed-subprocess guard: must be set to exactly `1` to allow `coord-tick.nu`/`coord-dispatch.nu` to actually launch a real `claude` CLI subagent (`--max-budget-usd 1.0`, real API spend). Unset (the default, and the required setting for every test and CI run) makes spawning a no-op that logs `subagent_spawn_skipped` instead. |
+| `SMOLFIRE_SUBAGENT_CMD` | `claude` | Overrides the binary name/path resolved and launched as the subagent CLI. Tests use this to point at a harmless stub instead of relying solely on PATH ordering/stripping to keep a real `claude` from being resolved. |
 
 Run a single tick manually:
 
@@ -65,6 +67,37 @@ Or run all tests at once:
 
 ```sh
 sh tests/run-all.sh
+```
+
+**Billed-subprocess guard:** `coord-tick.nu`/`coord-dispatch.nu` only ever
+launch a real `claude` CLI subagent (real API spend, `--max-budget-usd 1.0`)
+when `SMOLFIRE_SPAWN_SUBAGENT=1` is explicitly exported — see the env var
+table above. Every test in this repo relies on that default-off behavior
+and must NOT set it. If your shell profile happens to export
+`SMOLFIRE_SPAWN_SUBAGENT=1` globally, unset it before running tests:
+`hide-env SMOLFIRE_SPAWN_SUBAGENT` (nu) or `unset SMOLFIRE_SPAWN_SUBAGENT` (sh).
+
+As defense-in-depth beyond that default, some integration tests also strip
+PATH down to directories that don't contain a real `claude`/`codex`/
+`opencode`/`ollama` binary. Do this by checking actual binary existence per
+directory, never a `grep -v claude`-style string match on the directory
+*name* — a real install directory such as `/opt/homebrew/bin` or
+`~/.local/bin` doesn't contain the substring "claude" and survives that
+filter untouched even though the binary lives inside it:
+
+```sh
+# WRONG — leaves /opt/homebrew/bin (and any other dir whose NAME doesn't
+# contain "claude") on PATH even if a real claude binary lives there:
+PATH=$(echo "$PATH" | tr ':' '\n' | grep -v claude | paste -sd: -)
+
+# RIGHT — drops any directory that actually resolves one of these binaries:
+PATH=$(IFS=':'; safe=""; for d in $PATH; do
+  skip=0
+  for bin in claude codex opencode ollama; do
+    [ -x "$d/$bin" ] && skip=1 && break
+  done
+  [ "$skip" = 0 ] && safe="${safe:+$safe:}$d"
+done; echo "$safe")
 ```
 
 ## 5. Key spec

@@ -83,6 +83,19 @@ options 	COMPAT_FREEBSD14
 # riscv enumeration path on FreeBSD 15)
 options 	FDT
 
+# First riscv64 build (2026-09-23, run 35828913448) failed: "fatal error:
+# 'clknode_if.h' file not found" compiling dev/ofw/ofw_cpu.c. Root cause,
+# confirmed against sys/conf/files (freebsd-src main, 2026-09-23):
+#   dev/ofw/ofw_cpu.c        optional fdt   <- unconditional once FDT is set,
+#                                              and includes dev/clk/clk.h
+#   dev/clk/clknode_if.m     optional clk   <- generates clknode_if.h, but
+#                                              only when `device clk` is set
+# `options FDT` therefore has a de facto dependency on the clk framework
+# on riscv that this config was missing. sys/riscv/conf/GENERIC carries
+# `device clk` for the same reason. No functional clock driver is added —
+# this is the framework glue ofw_cpu.c needs to compile.
+device		clk
+
 # Serial console — QEMU virt exposes an ns16550-compatible UART
 device		uart			# Generic UART driver
 device		uart_ns8250		# ns8250/ns16550-type UART driver

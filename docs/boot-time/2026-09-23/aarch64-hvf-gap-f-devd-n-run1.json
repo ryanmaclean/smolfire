@@ -1,0 +1,35 @@
+{
+  "variant": "f-devd-n",
+  "run": 1,
+  "env": {
+    "host": "MacBookPro18,4",
+    "cpu": "Apple M1 Max",
+    "macos": "26.6.2",
+    "qemu": "QEMU emulator version 10.2.1",
+    "accel": "hvf",
+    "mem": "256M",
+    "cpus": 2,
+    "nic": "user,model=virtio-net-pci",
+    "qemu_extra": "-boot menu=on,splash-time=0",
+    "poll_ms": 10,
+    "loadavg_before": "{ 233.87 229.06 223.25 }",
+    "loadavg_after": "{ 226.75 227.67 222.79 }",
+    "date": "2026-09-23T01:35:46-0700"
+  },
+  "markers_ms": {
+    "first_byte": 115,
+    "loader": 537,
+    "kernel": 827,
+    "root_mount": 972,
+    "rc": 1390,
+    "login": 8878
+  },
+  "phases_ms": {
+    "firmware": 537,
+    "loader": 290,
+    "kernel": 145,
+    "mount_to_rc": 418,
+    "rc_to_login": 7488,
+    "total": 8878
+  }
+}

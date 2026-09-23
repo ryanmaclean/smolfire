@@ -5,6 +5,18 @@
 # tests/time-to-ready-aarch64.exp
 # Expected: PASS on <hypervisor-host> (Apple Silicon, HVF = native-ISA acceleration)
 # Contrast: amd64 leg expected to FAIL this gate on <hypervisor-host> (TCG = ~5-10x slower)
+# Usage: expect tests/time-to-ready-aarch64.exp [image.qcow2]   (default: FreeBSD-15-arm64-smolfire.qcow2)
+#
+# Firmware: `-boot menu=on,splash-time=0` removes EDK2's ~5.1 s BDS boot-menu
+# wait on every boot (docs/BOOT-TIME-ROADMAP.md §1, PR #55: time-to-login
+# 17.6 -> 8.5 s median). Set SMOLFIRE_FW_MENU_WAIT=1 to keep the firmware
+# default (A/B measurement). snapshot=on: expect kills QEMU at login:, so
+# without it the next boot pays a ~3.4 s foreground fsck (same doc, finding 3).
+set image [expr {$argc > 0 ? [lindex $argv 0] : "FreeBSD-15-arm64-smolfire.qcow2"}]
+set boot_menu [list -boot menu=on,splash-time=0]
+if {[info exists env(SMOLFIRE_FW_MENU_WAIT)] && $env(SMOLFIRE_FW_MENU_WAIT) eq "1"} {
+  set boot_menu [list]
+}
 set timeout 120
 set t0 [clock seconds]
 spawn /opt/homebrew/bin/qemu-system-aarch64 \
@@ -12,8 +24,9 @@ spawn /opt/homebrew/bin/qemu-system-aarch64 \
   -cpu host \
   -bios /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
   -m 256M -smp 2 \
-  -drive file=FreeBSD-15-arm64-smolfire.qcow2,format=qcow2,if=virtio \
+  -drive file=$image,format=qcow2,if=virtio,snapshot=on \
   -nic user,model=virtio-net-pci,hostfwd=tcp::2231-:22 \
+  {*}$boot_menu \
   -serial stdio -nographic
 expect {
   "login:" { puts "TIME_TO_LOGIN=[expr {[clock seconds] - $t0}]s" }

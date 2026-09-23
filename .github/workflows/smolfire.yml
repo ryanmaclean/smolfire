@@ -236,7 +236,7 @@ jobs:
           {
             echo "### SMOLFIRE microVM size report"
             echo '```'
-            grep -H -a -E '^SMOLFIRE_METRIC |^SMOLFIRE_SECTION ' \
+            grep -h -a -E '^SMOLFIRE_METRIC |^SMOLFIRE_SECTION ' \
               "$WORK/smolfire-build-vm.log" "$WORK/smolfire-gate.log" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

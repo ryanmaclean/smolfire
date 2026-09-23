@@ -258,8 +258,8 @@ nu 0.115.1, 2026-09-23):
 
 | # | Result | Notes |
 |---|---|---|
-| 1 | PASS | Read-only base, tmpfs cap enforced, `securelevel=3`, network gated. DNS gap now handled (see §1) |
-| 2 | PASS | maxproc enforced. memoryuse alone was not a hard cap, so `vmemoryuse` was added. pcpu is approximate |
+| 1 | PARTIAL | Read-only base, tmpfs cap enforced, `securelevel=3`, network gated; the new resolv.conf path has not been rerun on the host |
+| 2 | PARTIAL | maxproc enforced and prior memoryuse checks passed; the new `vmemoryuse` rule has not been rerun on the host |
 | 3 | PASS after fix | The executor now uses `mdo -i`. `mac.do=disable` blocks mdo inside the jail |
 | 4 | PASS | Hung and TERM-ignoring commands are killed. A leftover background process causes exit 124 (see §1) |
 | 5 | PASS | No jails, mounts, directories or rctl rules are left behind |

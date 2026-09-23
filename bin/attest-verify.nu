@@ -13,10 +13,20 @@
 # Usage:
 #   nu bin/attest-verify.nu --quote quote.toml --expected-pcr-digest <hex> --nonce <hex>
 #   nu bin/attest-verify.nu --quote quote.toml --expected-pcr-digest-file pcr.hex --nonce-file nonce.hex
+#   # With raw guest artifacts (copied alongside attestation.toml by the A5
+#   # workflow step): raw files take precedence for signature verification.
+#   nu bin/attest-verify.nu --quote attestation.toml --expected-pcr-digest <hex> --nonce <hex> \
+#     --quote-msg quote.msg --quote-sig quote.sig --ak-pub ak.pub
 #
 # Dependencies:
-#   - openssl (for signature verification)
-#   - tpm2-tools (optional, for tpm2_checkquote fallback)
+#   - openssl (RSA fallback signature verification for test fixtures)
+#   - tpm2-tools (tpm2_checkquote: required for REAL TPM quotes; optional locally)
+#
+# Verification paths (see verify-signature):
+#   - tpm2 path  = real ECC TPM quotes (guest AK is ECC, quote is TPMS_ATTEST).
+#                  Runs tpm2_checkquote; exit 0 = valid.
+#   - openssl path = RSA test fixtures only (tests/tpm-attest-verify-test.nu
+#                  self-signs with RSA keys). Returns false for ECC blobs.
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -46,55 +56,122 @@ def parse-quote [path: string] {
 }
 
 # ── Signature verification ───────────────────────────────────────────────────
+#
+# Two paths, and when each applies:
+#   - tpm2_checkquote path: REAL TPM quotes. The guest (bin/guest-attest.nu)
+#     creates an ECC AK (tpm2_createak -G ecc) and tpm2_quote emits a
+#     TPMS_ATTEST blob + ECC signature. Only tpm2_checkquote understands that
+#     format, so whenever the binary is present it runs first.
+#   - openssl path: RSA TEST FIXTURES only. tests/tpm-attest-verify-test.nu
+#     self-signs quote JSON with throwaway RSA keys. An ECC blob fed here
+#     simply fails verification (returns false, never throws).
 
 # Verify quote signature using AK public key.
-# Returns true if signature is valid, false otherwise.
+# Raw guest files (quote.msg/quote.sig/ak.pub, copied from the guest by the
+# A5 workflow step) take precedence when all three are provided and exist;
+# otherwise the base64 blobs bundled in the quote TOML are decoded to temp
+# files (byte-identical to the raw guest files — the guest base64-encodes
+# them with `openssl base64 -A`).
+# Returns true if signature is valid, false otherwise. Never throws on
+# bad input — unparseable keys/signatures are verification failures (false).
 def verify-signature [
     quote_data: string    # base64-encoded quote
     signature: string     # base64-encoded signature
     ak_public: string     # base64-encoded AK public key
+    challenge_nonce: string = ""  # hex challenge nonce (anti-replay, for tpm2_checkquote -q)
+    quote_msg_path: string = ""   # raw quote.msg from guest (optional)
+    quote_sig_path: string = ""   # raw quote.sig from guest (optional)
+    ak_pub_path: string = ""      # raw ak.pub from guest (optional)
 ] {
-    # Write temporary files for openssl
     let tmpdir = ^mktemp -d | str trim
+
+    # Resolve the three input files: raw guest files win when all present.
+    let use_raw = ($quote_msg_path != "") and ($quote_sig_path != "") and ($ak_pub_path != "") and ($quote_msg_path | path exists) and ($quote_sig_path | path exists) and ($ak_pub_path | path exists)
+    if not $use_raw and (($quote_msg_path != "") or ($quote_sig_path != "") or ($ak_pub_path != "")) {
+        log $"verifier: WARNING: incomplete raw-file set, falling back to bundled TOML blobs"
+    }
     let quote_file = $"($tmpdir)/quote.dat"
     let sig_file = $"($tmpdir)/quote.sig"
     let ak_file = $"($tmpdir)/ak.pub"
 
-    # Decode base64
-    (echo $quote_data | ^base64 -d | save --force $quote_file)
-    (echo $signature | ^base64 -d | save --force $sig_file)
-    (echo $ak_public | ^base64 -d | save --force $ak_file)
-
-    # Try tpm2-tools first (proper TPM quote verification)
-    let tpm2_check = (which tpm2_checkquote | is-not-empty)
-    let verified = if $tpm2_check {
-        verify-with-tpm2-tools $quote_file $sig_file $ak_file
+    if $use_raw {
+        # Stage caller-owned raw files into the scratch dir so downstream
+        # steps (including the openssl .pem sidecar) never write next to
+        # the guest artifacts.
+        cp $quote_msg_path $quote_file
+        cp $quote_sig_path $sig_file
+        cp $ak_pub_path $ak_file
     } else {
-        # Fallback: openssl RSA signature verification
+        # Decode base64 blobs (byte-identical to the raw guest files).
+        let decoded = try {
+            (echo $quote_data | ^base64 -d | save --force $quote_file)
+            (echo $signature | ^base64 -d | save --force $sig_file)
+            (echo $ak_public | ^base64 -d | save --force $ak_file)
+            true
+        } catch {
+            false
+        }
+        if not $decoded {
+            ^rm -rf $tmpdir
+            return false
+        }
+    }
+
+    # Real-TPM path first (ECC quotes); RSA-fixture fallback second.
+    # A tpm2 failure is NOT trusted as a verdict on its own: RSA fixture
+    # blobs are not TPMS_ATTEST format, so tpm2_checkquote rejects them even
+    # when the RSA signature is genuinely valid. Fall through to openssl.
+    let tpm2_ok = verify-with-tpm2-tools $quote_file $sig_file $ak_file $challenge_nonce
+    let verified = if $tpm2_ok {
+        true
+    } else {
         verify-with-openssl $quote_file $sig_file $ak_file
     }
 
-    # Cleanup
+    # Cleanup scratch dir (raw guest files were staged as copies, so
+    # caller-owned originals are untouched).
     ^rm -rf $tmpdir
 
     $verified
 }
 
-# Verify using tpm2_checkquote if available.
-def verify-with-tpm2-tools [quote_file: string, sig_file: string, ak_file: string] {
-    # Create temporary TSS context files
-    let tmpdir = ^mktemp -d | str trim
-    let result = try {
-        # tpm2_checkquote requires specific file formats
-        # For now, return false to trigger openssl fallback
+# Verify using tpm2_checkquote (real ECC TPM quotes).
+# Mirrors the exact guest commands in bin/guest-attest.nu:
+#   guest: tpm2_createak -C <primary> -g sha256 -G ecc -c ak.ctx -u ak.pub
+#          tpm2_quote -c ak.ctx -l sha256:0,7 -q $nonce -m quote.msg -s quote.sig
+#   here:  tpm2_checkquote -u ak.pub -m quote.msg -s quote.sig -g sha256 -q <hex-nonce>
+# Format-flag semantics (tpm2-tools 5.6 man page, man/tpm2_checkquote.1.md):
+# -f/--pcr takes a PCR INPUT FILE; -F/--format is DEPRECATED and IGNORED; the
+# signature format (tss vs plain) is auto-detected. Passing `-f tss` therefore
+# passes the literal string "tss" as a PCR file path (`Could not open file:
+# "tss"`), so no -f/-F flag is passed here. PCR digest coverage is not lost:
+# verify-pcr-digest checks the digest separately.
+# Exit 0 = valid. Missing binary or any tool error -> false (caller falls
+# back to the openssl RSA-fixture path). Never throws. On tool failure the
+# trimmed stderr is logged so the next CI failure is diagnosable without a
+# trace run.
+def verify-with-tpm2-tools [quote_file: string, sig_file: string, ak_file: string, nonce: string] {
+    if (which tpm2_checkquote | is-empty) {
+        return false
+    }
+    try {
+        let result = (^tpm2_checkquote -u $ak_file -m $quote_file -s $sig_file -g sha256 -q $nonce | complete)
+        if $result.exit_code != 0 {
+            let trimmed = ($result.stderr | str trim)
+            log $"verifier: tpm2_checkquote failed \(exit=($result.exit_code)\): ($trimmed)"
+        }
+        $result.exit_code == 0
+    } catch {|err|
+        log $"verifier: tpm2_checkquote error: ($err.msg)"
         false
-    } catch { false }
-
-    ^rm -rf $tmpdir
-    $result
+    }
 }
 
-# Verify using openssl RSA-PSS signature.
+# Verify using openssl RSA signature (RSA TEST FIXTURES only).
+# The fixtures in tests/tpm-attest-verify-test.nu are PEM RSA pubkeys /
+# openssl-signed blobs. ECC AKs / TPMS_ATTEST signatures are not RSA and
+# fail here (returns false, never throws) — real quotes must pass via the
+# tpm2_checkquote path above.
 def verify-with-openssl [quote_file: string, sig_file: string, ak_file: string] {
     let result = try {
         # Convert AK public to PEM if needed
@@ -168,10 +245,24 @@ def emit-attestation [
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 # Compute SHA-256 fingerprint of AK public key.
+# Portable hex via `openssl dgst -sha256` (default output already contains
+# the hex digest, e.g. `SHA2-256(stdin)= <hex>`; take the last field with
+# awk — same idiom as compute-pcr-digest in bin/guest-attest.nu, works on
+# stock ubuntu-latest and FreeBSD openssl). NOTE: `openssl enc` has NO -hex
+# flag, so no `enc` step here.
 def ak-fingerprint [ak_public_b64: string] {
     try {
-        let fp = (echo $ak_public_b64 | ^base64 -d | ^openssl dgst -sha256 -binary | ^openssl enc -hex 2>/dev/null | str trim)
-        $fp
+        let fp = (echo $ak_public_b64 | ^base64 -d | ^openssl dgst -sha256 | ^awk '{print $NF}' | str trim | str lowercase)
+        if ($fp | is-empty) { "unknown" } else { $fp }
+    } catch { "unknown" }
+}
+
+# Compute SHA-256 fingerprint of a raw AK public key file.
+# Same portable `dgst -sha256 | awk '{print $NF}'` hex idiom as above.
+def ak-fingerprint-file [ak_path: string] {
+    try {
+        let fp = (^openssl dgst -sha256 $ak_path | ^awk '{print $NF}' | str trim | str lowercase)
+        if ($fp | is-empty) { "unknown" } else { $fp }
     } catch { "unknown" }
 }
 
@@ -183,11 +274,15 @@ def main [
     --expected-pcr-digest-file: string = ""  # File with expected PCR digest
     --nonce: string = ""                     # Challenge nonce (hex)
     --nonce-file: string = ""               # File with challenge nonce
+    --quote-msg: string = ""                # Raw quote.msg from guest (optional, for tpm2_checkquote)
+    --quote-sig: string = ""                # Raw quote.sig from guest (optional, for tpm2_checkquote)
+    --ak-pub: string = ""                   # Raw ak.pub from guest (optional, for tpm2_checkquote)
 ] {
     # Validate inputs
     if $quote == "" {
         print "Usage: nu bin/attest-verify.nu --quote <file> --expected-pcr-digest <hex> --nonce <hex>"
         print "       nu bin/attest-verify.nu --quote <file> --expected-pcr-digest-file <file> --nonce-file <file>"
+        print "       [plus optional --quote-msg <quote.msg> --quote-sig <quote.sig> --ak-pub <ak.pub> raw guest files]"
         exit 1
     }
 
@@ -234,12 +329,13 @@ def main [
     let nonce_match = verify-nonce $quote_data.nonce $challenge_nonce
     log $"verifier: nonce match=($nonce_match)"
 
-    # Verify signature
-    let sig_valid = verify-signature $quote_data.quote_data $quote_data.signature $quote_data.ak_public
+    # Verify signature (raw guest files take precedence when provided;
+    # challenge nonce is passed through for tpm2_checkquote -q).
+    let sig_valid = verify-signature $quote_data.quote_data $quote_data.signature $quote_data.ak_public $challenge_nonce $quote_msg $quote_sig $ak_pub
     log $"verifier: signature valid=($sig_valid)"
 
-    # Compute AK fingerprint
-    let fp = ak-fingerprint $quote_data.ak_public
+    # Compute AK fingerprint (prefer the raw guest ak.pub when provided).
+    let fp = if ($ak_pub != "") and ($ak_pub | path exists) { ak-fingerprint-file $ak_pub } else { ak-fingerprint $quote_data.ak_public }
 
     # Determine verdict
     let all_pass = $pcr_match and $nonce_match and $sig_valid

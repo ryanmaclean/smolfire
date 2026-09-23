@@ -50,7 +50,7 @@
 #
 # Build host: the aarch64 builder (FreeBSD 15 aarch64); native arm64 build.
 # UART: PL011 at 0xfe201000 (uart0). loader.conf: console="uart0"
-# See: release/tools/smolbsd-pi5.conf, plans/tinyos/PHASE-2-PHYSICAL-BOOT.md
+# See: release/tools/smolfire-pi5.conf, plans/tinyos/PHASE-2-PHYSICAL-BOOT.md
 #
 # Maintainer: planner@smolbsd.local
 

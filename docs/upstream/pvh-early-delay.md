@@ -3,7 +3,7 @@
 Ready-to-file FreeBSD Bugzilla report (Base System > kern) + patch
 (`pvh-early-delay.patch`, unified diff against releng/15.0 `sys/x86/xen/pv.c`;
 main is byte-identical at the target as of 2026-07-28). Discovered and
-validated by smolBSD's SMOLFIRE CI (see `docs/UR-BSD-VERIFY.md`, SMOLFIRE
+validated by smolfire's SMOLFIRE CI (see `docs/UR-BSD-VERIFY.md`, SMOLFIRE
 section, runs #5–#9).
 
 ## Summary (paste as the report body)
@@ -51,5 +51,5 @@ Xen.
   used before `init_ops` is installed (the `CRASH()` macro).
 - Alternative shape (mutating the `init_ops` copy in `hammer_time_xen`
   under `!isxen()`) is functionally equivalent if preferred.
-- The smolBSD build applies this exact patch via
+- The smolfire build applies this exact patch via
   `bin/build-smolfire.sh`; drop that block once this lands.

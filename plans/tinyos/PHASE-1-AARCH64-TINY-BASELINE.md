@@ -212,16 +212,16 @@ fewer upstream physical device drivers in the arm64 GENERIC baseline.
 
 ---
 
-## 7. Build Pipeline: `smolbsd-qemu-aarch64.conf`
+## 7. Build Pipeline: `smolfire-qemu-aarch64.conf`
 
-### 7.1 File: `release/tools/smolbsd-qemu-aarch64.conf`
+### 7.1 File: `release/tools/smolfire-qemu-aarch64.conf`
 
 ```sh
 #!/bin/sh
-# smolbsd-qemu-aarch64.conf — FreeBSD 15 arm64 minimal QEMU VM image
+# smolfire-qemu-aarch64.conf — FreeBSD 15 arm64 minimal QEMU VM image
 # Used with: make release KERNCONF=SMOLBSD WITH_PKGBASE=yes \
 #                 VMFORMATS=qcow2 VMSIZE=4g \
-#                 CLOUDWARE_CONF=tools/smolbsd-qemu-aarch64.conf
+#                 CLOUDWARE_CONF=tools/smolfire-qemu-aarch64.conf
 
 export VMSIZE=4g
 export SWAPSIZE=512m
@@ -287,7 +287,7 @@ EOF
 cp sys/arm64/conf/SMOLBSD /usr/src/sys/arm64/conf/SMOLBSD
 
 # Step 3: Place release config
-cp smolbsd-qemu-aarch64.conf /usr/src/release/tools/smolbsd-qemu-aarch64.conf
+cp smolfire-qemu-aarch64.conf /usr/src/release/tools/smolfire-qemu-aarch64.conf
 
 # Step 4: Build world + kernel (native arm64 — no TARGET flags needed)
 make -j4 -C /usr/src buildworld buildkernel KERNCONF=SMOLBSD
@@ -301,7 +301,7 @@ make -C /usr/src/release vm-image \
     WITH_PKGBASE=yes \
     VMFORMATS=qcow2 \
     VMSIZE=4g \
-    CLOUDWARE_CONF=/usr/src/release/tools/smolbsd-qemu-aarch64.conf
+    CLOUDWARE_CONF=/usr/src/release/tools/smolfire-qemu-aarch64.conf
 
 # Output: /usr/obj/arm64.aarch64/usr/src/release/vm/
 #   FreeBSD-15.0-RELEASE-arm64-SMOLBSD.qcow2
@@ -315,7 +315,7 @@ make -C /usr/src/release -f Makefile.vm vm-image \
     VMFORMATS="qcow2 raw" \
     VMSIZE=4g \
     KERNCONF=SMOLBSD \
-    CLOUDWARE_CONF=tools/smolbsd-qemu-aarch64.conf
+    CLOUDWARE_CONF=tools/smolfire-qemu-aarch64.conf
 ```
 
 ---
@@ -421,7 +421,7 @@ echo "CRASH_RECOVERY_TIME=$(($(date +%s) - T0))s"
 | File | Location in tree | Purpose |
 |------|-----------------|---------|
 | `SMOLBSD` | `sys/arm64/conf/SMOLBSD` | Kernel config delta (§4, already written) |
-| `smolbsd-qemu-aarch64.conf` | `release/tools/smolbsd-qemu-aarch64.conf` | Release config + package filter (§7.1) |
+| `smolfire-qemu-aarch64.conf` | `release/tools/smolfire-qemu-aarch64.conf` | Release config + package filter (§7.1) |
 | `time-to-ready-aarch64.exp` | `tests/time-to-ready-aarch64.exp` | Expect script for §8.2 gate |
 | `rc.conf` fragment | injected by `vm_extra_pre_umount()` | Minimal boot config |
 | `loader.conf` fragment | injected by `vm_extra_pre_umount()` | UART console + fast boot |

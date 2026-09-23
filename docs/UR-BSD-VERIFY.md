@@ -66,7 +66,7 @@ invocation in `bin/build-smolfire-vm.nu` and `bin/build-smolfire-vm-image.nu` �
 Confirmation came from the repo's own history, not just the mirror review: the
 `.planning/phases/03-*` records and `.github/workflows/build-image.yml` show the
 prior self-hosted CI builds succeeded with `cloudware-release` + `CLOUDWARE=smolfire` +
-`SMOLFIRE_FORMAT=qcow2 SMOLFIRE_FSLIST=ufs` (generating `cw-smolbsd-ufs-qcow2`,
+`SMOLFIRE_FORMAT=qcow2 SMOLFIRE_FSLIST=ufs` (generating `cw-smolfire-ufs-qcow2`,
 artifact at `<objdir>/usr/src/release/vm.ufs.qcow2`) — while still passing the
 fake `CLOUDWARE_CONF`, meaning even those builds never sourced the conf. And
 `PHASE-1-RESULTS.md` records the Phase-1 aarch64 image was created **manually**
@@ -116,7 +116,7 @@ Every FIX-9/FIX-10 assumption was checked directly against
 | Assumption | Verdict | Action taken |
 |---|---|---|
 | `cloudware-release` exists and needs `WITH_CLOUDWARE` + non-empty `CLOUDWARE` | TRUE (Makefile.vm:112, 307–311; empty target otherwise) | We pass both; also added `WITH_CLOUDWARE=yes` to build-image.yml |
-| Per-type conf var is `SMOLFIRECONF`; must be passed explicitly | TRUE (`${_CW:tu}CONF`; auto-default only if `tools/smolbsd.conf` exists — it doesn't) | Passed explicitly everywhere |
+| Per-type conf var is `SMOLFIRECONF`; must be passed explicitly | TRUE (`${_CW:tu}CONF`; auto-default only if `tools/smolfire.conf` exists — it doesn't) | Passed explicitly everywhere |
 | `-s ${VMSIZE}` / `SWAPSIZE` reach mk-vmimage on the cw path | TRUE (Makefile.vm:141, 156) | Conf `${VMSIZE:-2g}` pattern correct as-is |
 | Artifact basename | `smolfire.ufs.qcow2` in release objdir root (`${_CW:tl}.${_FS}.${_FMT}`, Makefile.vm:124) — `vm.ufs.qcow2` seen in prior self-hosted CI runs is that tree's stable/15 naming | harvest.sh default updated; workflow ls/scp made glob-tolerant; find_qcow2 already globs |
 | `WITH_PKGBASE=yes` selects pkgbase | FALSE — no such release variable; pkgbase is the DEFAULT, `NOPKGBASE=yes` opts out (vmimage.subr:98) | Removed from all invocations and headers |
@@ -139,8 +139,8 @@ catalogs. The original sub-100 MiB raw target is MET; the download is
 33 MB. The auto-chained TPM run (30122923572) went red exactly as
 predicted pre-merge (main's copy predates the eviction — not a
 regression; resolves on merge). The SIZEREPORT block is in the run's
-`smolbsd-build-vm.log` artifact — parse with `nu bin/sizereport.nu` for
-round-2 targeting. To publish: dispatch "Release smolBSD Image" with
+`smolfire-build-vm.log` artifact — parse with `nu bin/sizereport.nu` for
+round-2 targeting. To publish: dispatch "Release smolfire Image" with
 run_id 30109365470.
 
 Changes shipped together, validated by the run above:
@@ -160,8 +160,8 @@ Changes shipped together, validated by the run above:
    `local.sqlite` kept), recursive `/usr/lib` `*.a` sweep.
 4. **SIZEREPORT instrumentation** at the end of `vm_extra_pre_umount`:
    du/largest-files/pkg-by-size printed into the in-VM make log
-   (`smolbsd-build-vm.log` artifact); parse with `nu bin/sizereport.nu
-   smolbsd-build-vm.log` (or raw: `grep '^SIZEREPORT:'`). This is
+   (`smolfire-build-vm.log` artifact); parse with `nu bin/sizereport.nu
+   smolfire-build-vm.log` (or raw: `grep '^SIZEREPORT:'`). This is
    the ground truth for round 2 (FreeBSD-utilities file-level cuts — the
    ~48 MiB grab-bag leaf with no narrower official replacement on pkgbase).
 
@@ -306,7 +306,7 @@ falls back to curve25519). Projected: **~66 MiB raw / ~25 MiB download**.
 
 ## Empirical results — hosted pipeline run #6: GREEN (2026-07-18)
 
-**The scripted pipeline produced a gated smolBSD image end-to-end for the
+**The scripted pipeline produced a gated smolfire image end-to-end for the
 first time.** Run 29637188773, commit bc852b7: buildworld+kernel ~3h,
 cloudware-release ~5m, **size gate PASS** (<= 512 MiB; the whole artifact
 zip incl. logs is 87 MB compressed), **boot gate PASS: TIME_TO_LOGIN=9s**
@@ -342,7 +342,7 @@ tail printed on failure, so the next cycle is self-diagnosing. Gates
    no manual host needed — builds, size-gates, and boot-gates amd64
    end-to-end; cross-builds aarch64). Manual alternative: on a FreeBSD host,
    `sudo nu bin/build-smolfire-vm.nu --arch <arch>`, streaming
-   `/var/tmp/smolbsd-build.log`.
+   `/var/tmp/smolfire-build.log`.
 3. **Run the size audit** on the artifact: `sh bin/analyze-image.sh <qcow2>`.
    Capture the top-30 dir/file lists and the budget delta. This is the ground
    truth that replaces all the estimation above.
@@ -407,3 +407,75 @@ with NO RDRAND/AES-NI and randomdev_wait_until_seeded stalls ~27 s
 before unblocking (28.4 s boot, still pass) — always pass -cpu host
 under HVF, and know that entropy-starved platforms cost ~27 s, not a
 hang.
+## Finding 5 — 15.1 pkgbase first-boot base auto-update: guard installed (2026-08-23)
+
+FreeBSD 15.1 pkgbase VM/cloud images auto-update base packages on first
+boot: "A firstboot package auto updater has been introduced for cloud
+images. On first boot, the base system packages are automatically
+updated to patch the system"
+(<https://www.freebsd.org/releases/15.1R/relnotes/>). We are on
+releng/15.0 (not yet affected), but the guard is installed NOW so a 15.1
+rebase cannot silently break image determinism or TPM PCR stability
+(issue #39 item 1; docs/RESEARCH-2026-07.md §2 flagged this).
+
+**Exact mechanism (verified against sources, not just relnotes):**
+
+- The updater is the rc.d script `firstboot_pkg_upgrade`, shipped by the
+  ports package `firstboot-pkg-upgrade` (`sysutils/firstboot-pkg-upgrade`,
+  `USE_RC_SUBR` → installs to `/usr/local/etc/rc.d/firstboot_pkg_upgrade`).
+  Source: `files/firstboot_pkg_upgrade.in` in freebsd-ports
+  (<https://github.com/freebsd/freebsd-ports/blob/main/sysutils/firstboot-pkg-upgrade/files/firstboot_pkg_upgrade.in>).
+- `KEYWORD: firstboot` — it runs only when the firstboot(7) `/firstboot`
+  sentinel exists; rcvar `firstboot_pkg_upgrade_enable` (default NO in
+  the script; cloud images set YES); repos limited via
+  `firstboot_pkg_upgrade_repos="FreeBSD-base"`. It runs
+  `pkg update` + `env AUTOCLEAN=ON IGNORE_OSVERSION=yes pkg upgrade -r
+  FreeBSD-base -y`, and on -BETA/-RC/-RELEASE touches
+  `/firstboot-reboot` so rc reboots the instance after updating.
+- Stock cloud confs (`release/tools/ec2-base.conf`, `ec2-small.conf`,
+  `azure.conf`, `gce.conf`, `basic-cloudinit.conf` on freebsd-src main)
+  enable it by adding `firstboot_pkg_upgrade` to `VM_RC_LIST` and
+  appending `firstboot_pkg_upgrade_repos="FreeBSD-base"` to rc.conf.
+  15.1 relnotes also note the related ports updater `firstboot_pkgs` is
+  now opt-in on EC2 small (`firstboot_pkgs_enable="YES"` required).
+
+**Guard applied (both `release/tools/smolfire-qemu.conf` and
+`release/tools/smolfire-qemu-aarch64.conf`, in `vm_extra_pre_umount`):**
+
+1. rc.conf gets explicit `firstboot_pkg_upgrade_enable="NO"` and
+   `firstboot_pkgs_enable="NO"` — **this is the load-bearing guard.**
+   These lines are appended after `vm_extra_enable_services` has already
+   written its YES lines (mk-vmimage.sh step order: enable_services →
+   pre_umount), so the NO wins by rc.conf last-write ordering.
+2. `/firstboot` and `/firstboot-reboot` sentinels removed — defensive
+   only: verified on releng/15.0 that `vmimage.subr` does
+   `touch ${DESTDIR}/firstboot` inside `vm_create_disk`, AFTER
+   `vm_extra_pre_umount` returns (same late-write class as the msdosfs
+   fstab line in Finding 2). The shipped image WILL contain /firstboot;
+   the knob, not the sentinel rm, is what disables the updater. This
+   also deliberately keeps other firstboot-keyword scripts (e.g.
+   growfs) working.
+3. `rm -f` of the rc.d script itself from both plausible homes
+   (`/usr/local/etc/rc.d/firstboot_pkg_upgrade`, plus `firstboot_pkgs`
+   and a hypothetical base `/etc/rc.d/firstboot_pkg_upgrade`),
+   `2>/dev/null || true` — today these paths don't exist in our images
+   (our `VM_RC_LIST="sshd"` and FIX-10 package list never install the
+   port), so this is belt+braces against a 15.1 vmimage.subr default.
+
+**Re-verify at 15.1 rebase time:**
+
+- Whether 15.1's `vmimage.subr` installs `firstboot-pkg-upgrade`
+  unconditionally (via `VM_EXTRA_PACKAGES` defaults or a new hook) or
+  only via the per-cloud confs — if a new default hook exists, confirm
+  our conf still suppresses it.
+- Whether the script moved from ports into base pkgbase packaging (the
+  relnotes wording "for cloud images" suggests ports; re-grep
+  `libexec/rc/rc.d` and `release/tools` on releng/15.1 — as of this
+  writing releng/15.1 raw fetches for a base copy 404).
+- Whether `vm_extra_enable_services` / `VM_RC_LIST` semantics changed,
+  which would invalidate the rc.conf ordering argument in (1).
+- Boot-gate check: serial log must NOT show `pkg update`/`pkg upgrade`
+  or a firstboot-triggered second reboot; `pkg info` package versions in
+  the booted guest must equal the build-time set (determinism check),
+  and TPM T1-T6 PCR values must be stable across two boots of the same
+  image.

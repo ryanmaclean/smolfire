@@ -66,7 +66,7 @@ then `make release KERNCONF=SMOLBSD WITH_PKGBASE=yes VMFORMATS=qcow2`.
 | `poudriere image` | Reject | Alpha feature, interface unstable; better for port-heavy images, not base-only. |
 
 **Decision**: Use `release/Makefile.vm` with a custom `.conf` file
-(`release/tools/smolbsd-qemu.conf`) that invokes `vm_extra_filter_base_packages()`
+(`release/tools/smolfire-qemu.conf`) that invokes `vm_extra_filter_base_packages()`
 to enforce the package set below.
 
 ---
@@ -351,7 +351,7 @@ Part 3: freebsd-swap  512 MiB    (1 GiB reduced to 512 MiB for smolBSD)
 Part 4: freebsd-ufs   remainder  (UFS2 soft-updates, no journaling by default)
 ```
 
-**Total provisioned image size**: 4 GiB (matches `VMSIZE=4g` in smolbsd-qemu.conf).
+**Total provisioned image size**: 4 GiB (matches `VMSIZE=4g` in smolfire-qemu.conf).
 **Expected qcow2 artifact size** after sparse allocation: 128–200 MiB.
 
 ---
@@ -387,16 +387,16 @@ are further pruned and pkg bootstrap is deferred to first-boot script.
 
 ---
 
-## 7. Build Pipeline: `smolbsd-qemu.conf`
+## 7. Build Pipeline: `smolfire-qemu.conf`
 
 The build uses FreeBSD's standard `release/` machinery. The custom configuration
 file is the only novel artifact.
 
-### 7.1 File: `release/tools/smolbsd-qemu.conf`
+### 7.1 File: `release/tools/smolfire-qemu.conf`
 
 ```sh
 #!/bin/sh
-# smolbsd-qemu.conf — FreeBSD 15 amd64 minimal QEMU VM image
+# smolfire-qemu.conf — FreeBSD 15 amd64 minimal QEMU VM image
 # Used with: make release KERNCONF=SMOLBSD WITH_PKGBASE=yes \
 #                 VMFORMATS=qcow2 VMSIZE=4g \
 #                 CLOUDWARE=smolbsd CLOUDWARE_FLAGS=...
@@ -466,7 +466,7 @@ cp /usr/src/sys/amd64/conf/SMOLBSD.conf /usr/src/sys/amd64/conf/SMOLBSD
 # (or write it per §4.3 above)
 
 # Step 3: Place release config
-cp smolbsd-qemu.conf /usr/src/release/tools/smolbsd-qemu.conf
+cp smolfire-qemu.conf /usr/src/release/tools/smolfire-qemu.conf
 
 # Step 4: Build world + kernel cross-compiled to amd64
 # (if on aarch64 <aarch64-builder>):
@@ -488,7 +488,7 @@ make -C /usr/src/release vm-image \
     WITH_PKGBASE=yes \
     VMFORMATS=qcow2 \
     VMSIZE=4g \
-    CLOUDWARE_CONF=/usr/src/release/tools/smolbsd-qemu.conf
+    CLOUDWARE_CONF=/usr/src/release/tools/smolfire-qemu.conf
 
 # Output: /usr/obj/amd64.amd64/usr/src/release/vm/
 #   FreeBSD-15.0-RELEASE-amd64-SMOLBSD.qcow2
@@ -502,7 +502,7 @@ make -C /usr/src/release -f Makefile.vm vm-image \
     VMFORMATS="qcow2 raw" \
     VMSIZE=4g \
     KERNCONF=SMOLBSD \
-    CLOUDWARE_CONF=tools/smolbsd-qemu.conf
+    CLOUDWARE_CONF=tools/smolfire-qemu.conf
 ```
 
 ---
@@ -588,7 +588,7 @@ echo "CRASH_RECOVERY_TIME=$(($(date +%s) - T0))s"
 | File | Location in tree | Purpose |
 |------|-----------------|---------|
 | `SMOLBSD` | `/usr/src/sys/amd64/conf/SMOLBSD` | Kernel config delta (§4.3) |
-| `smolbsd-qemu.conf` | `/usr/src/release/tools/smolbsd-qemu.conf` | Release config + package filter (§7.1) |
+| `smolfire-qemu.conf` | `/usr/src/release/tools/smolfire-qemu.conf` | Release config + package filter (§7.1) |
 | `rc.conf` fragment | injected by `vm_extra_pre_umount()` | Minimal boot config |
 | `loader.conf` fragment | injected by `vm_extra_pre_umount()` | Serial console + fast boot |
 | `sshd_config` fragment | injected by `vm_extra_pre_umount()` | Initial access |

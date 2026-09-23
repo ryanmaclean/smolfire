@@ -76,7 +76,7 @@ literal is acceptable in a French-language document (it is idiomatic for CLI doc
 to leave argument placeholders in English, but a native speaker may prefer
 `"votre-message"` as a no-spaces placeholder instead).
 
-### F-2: `release/tools/smolbsd-qemu-aarch64.conf` missing from main tree
+### F-2: `release/tools/smolfire-qemu-aarch64.conf` missing from main tree
 
 The file is defined in `plans/tinyos/PHASE-1-AARCH64-TINY-BASELINE.md §7.1`
 and exists in worktree `blissful-shockley-eeb73b`. It has not been merged to
@@ -150,6 +150,6 @@ pass.
 ### D-5: worktree `blissful-shockley-eeb73b`
 
 The `.claude/worktrees/blissful-shockley-eeb73b/` tree is a live jj worktree
-with additional files (`PHASE-2-PHYSICAL-BOOT.md`, `smolbsd-qemu-aarch64.conf`,
+with additional files (`PHASE-2-PHYSICAL-BOOT.md`, `smolfire-qemu-aarch64.conf`,
 `docs/fr/PHASE-1-OVERVIEW.md`, `docs/ja/PHASE-1-OVERVIEW.md`). These are
 work-in-progress and not yet in the main tree. Noted; not modified.

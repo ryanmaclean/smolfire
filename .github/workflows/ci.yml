@@ -20,7 +20,9 @@ jobs:
 
       - name: Install Nushell
         run: |
-          NU_VERSION="0.112.2"
+          # Single source of truth for the Nushell version used by every workflow
+          # and expected locally: .github/nu-version (bump it there, nowhere else).
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
           # uname -m returns "arm64" on Apple Silicon; Nushell releases use "aarch64"
           ARCH=$(uname -m | sed 's/arm64/aarch64/')
           case "$(uname -s)" in
@@ -57,6 +59,11 @@ jobs:
         working-directory: .
         run: nu tests/spawn-subagent-test.nu
 
+      # jail-execute-test.nu: experimental jail executor + coord-tick executor
+      # selection. FreeBSD tools are PATH stubs, so this runs on Linux too.
+      - name: jail executor tests
+        run: nu tests/jail-execute-test.nu
+
       # Execute the pre-push guard against fixtures so hook refactors have
       # real coverage (nothing else runs this script; a parse error here
       # would otherwise only surface at push time on a developer machine).
@@ -71,6 +78,9 @@ jobs:
 
       - name: sizereport parser tests
         run: nu tests/sizereport-test.nu
+
+      - name: pkgbase-watch parser tests (fixtures, offline)
+        run: nu tests/pkgbase-watch-test.nu
 
       - name: smolfire rootfs assembly test
         run: nu tests/smolfire-rootfs-test.nu

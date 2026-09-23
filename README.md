@@ -2,25 +2,6 @@
 
 [![CI](https://github.com/ryanmaclean/smolfire/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanmaclean/smolfire/actions/workflows/ci.yml)
 
-> **Formerly "smolBSD".** That name belongs to
-> [NetBSDfr/smolBSD](https://github.com/NetBSDfr/smolBSD) by Emile "iMil"
-> Heitor — the NetBSD micro-VM builder (smolbsd.org, FOSDEM 2025/2026) that
-> inspired this project and predates it. This project is **not affiliated**
-> with it; we adopted the name of our microVM flagship, **SMOLFIRE**,
-> project-wide. Kernconfs: `SMOLFIRE` (microVM one-ELF), `SMOLFIRE-VM`
-> (full VM, formerly `SMOLBSD`), `SMOLFIRE-PI5`/`SMOLFIRE-RK3588` (boards).
-> Guest login is now `root`/`smolfire`; images ≤ 0.4.0 still use the old
-> `smolbsd` password. History (rename phases): issue #41.
-
-> **Renaming in progress — formerly "smolBSD".** That name belongs to
-> [NetBSDfr/smolBSD](https://github.com/NetBSDfr/smolBSD) by Emile "iMil"
-> Heitor — the NetBSD micro-VM builder (smolbsd.org, FOSDEM 2025/2026) that
-> inspired this project and predates it. This project is **not affiliated**
-> with it; we're adopting the name of our microVM flagship, **SMOLFIRE**,
-> project-wide. Internal identifiers (`bin/smolbsd.nu`, `@smolbsd.local`
-> spool addressing, `SMOLBSD` kernconfs) are renamed in a tracked second
-> phase — see the rename tracking issue.
-
 ## What it is
 
 smolfire is a minimal FreeBSD 15 VM (aarch64 primary, amd64 secondary) paired
@@ -45,9 +26,10 @@ plan, `docs/PHASE-1-RESULTS.md` for the original baseline report.
 
 ## Quickstart
 
-**Prerequisite everywhere:** [Nushell](https://www.nushell.sh) **0.112.2+**
+**Prerequisite everywhere:** [Nushell](https://www.nushell.sh) **0.115.1**, the
+version CI pins in [`.github/nu-version`](.github/nu-version)
 (`pkg install nushell` / `brew install nushell` / a GitHub release binary —
-0.111 and older fail on `get -o`).
+0.112.2 fails on `str lowercase` in `bin/coord-tick.nu`; 0.111 and older fail on `get -o`).
 
 Three ways in, depending on what you have:
 

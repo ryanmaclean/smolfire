@@ -104,7 +104,7 @@ There is also a separate "TPM VM Smoke Test" workflow visible in `gh run list` o
 - Lints `bin/coord-run.sh`, `tests/run-all.sh`, `bin/analyze-image.sh`, `bin/harvest.sh`, plus two `release/tools/` conf files.
 
 `conf-hook-test` (`ubuntu-latest`):
-- Smoke-tests `vm_extra_pre_umount` trim logic from `release/tools/smolbsd-qemu.conf`, including the empty-`DESTDIR` guard.
+- Smoke-tests `vm_extra_pre_umount` trim logic from `release/tools/smolfire-qemu.conf`, including the empty-`DESTDIR` guard.
 
 ---
 
@@ -116,7 +116,7 @@ Tests in `tests/` not explicitly run by CI (not covered by `run-tests.nu --suite
 |---|---|
 | `coord-vm-e2e-tests.nu` | Intentionally excluded (requires qcow2) — no stale ref risk |
 | `run-all-vm-tests.nu` | VM-only, excluded |
-| `smolbsd-test-report.nu` | Reporting helper, not a test runner |
+| `smolfire-test-report.nu` | Reporting helper, not a test runner |
 | `sd-write.nu` | Hardware (SD card write), excluded |
 | `*.exp` (8 Expect scripts) | Hardware/VM timing tests, excluded |
 

@@ -114,7 +114,7 @@ completed: 2026-06-05
 
 ## Known Stubs
 
-The `PasswordAuthentication yes` + `PermitRootLogin yes` sshd_config fix and the root authorized_keys entry are runtime-only — not baked into the qcow2 image. Future guest boots will require this fix again. The permanent fix (baking the config into the image via smolbsd-qemu.conf or a dedicated image-fixup step) is deferred to a future image rebuild plan.
+The `PasswordAuthentication yes` + `PermitRootLogin yes` sshd_config fix and the root authorized_keys entry are runtime-only — not baked into the qcow2 image. Future guest boots will require this fix again. The permanent fix (baking the config into the image via smolfire-qemu.conf or a dedicated image-fixup step) is deferred to a future image rebuild plan.
 
 ## Self-Check: PASSED
 

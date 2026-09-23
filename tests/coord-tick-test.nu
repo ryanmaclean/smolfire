@@ -855,4 +855,60 @@ do {
     ^rm -rf $tmp
 }
 
+print "test 18: HALT message with X-Resume-Tag must NOT auto-resume on next tick"
+do {
+    let tmp = make-temp-dir
+    let state_rel = "var/run/coord-state.toml"
+    let state_abs = [$tmp, $state_rel] | path join
+    let spool_rel = "var/mail/spool"
+    let spool_abs = [$tmp, $spool_rel] | path join
+
+    let mail_dir = [$tmp, "var", "mail"] | path join
+    mkdir $mail_dir
+
+    # Write HALT.t18 marker
+    let halt_path = [$mail_dir, "HALT.t18"] | path join
+    "task_id = \"t18\"\nreason = \"retry-exhausted\"" | save --force $halt_path
+
+    # Write the coordinator's HALT message to spool (has X-Resume-Tag)
+    let halt_msg = ("From coordinator@smolfire.local 20260101T000000\n" +
+                    "From: coordinator@smolfire.local\n" +
+                    "To: user@smolfire.local\n" +
+                    "Subject: [HALT] t18 — retry-exhausted\n" +
+                    "Message-ID: <halt-t18.coord@smolfire.local>\n" +
+                    "X-Halt-Reason: retry-exhausted\n" +
+                    "X-Resume-Tag: resume-t18\n" +
+                    "Content-Type: text/toml; charset=utf-8\n\n" +
+                    "task_id = \"t18\"\n" +
+                    "reason = \"retry-exhausted\"\n")
+    write-spool $spool_abs $halt_msg
+
+    write-state $state_abs {
+        version:            "1"
+        tick_count:         5
+        fsm_state:          "halted"
+        seen_ids:           []
+        last_tick_at:       "2026-01-01T00:00:00Z"
+        pending_request_id: ""
+        pending_task_id:    ""
+        pending_to_addr:    ""
+        halted_tasks:       ["t18"]
+    }
+
+    run-tick $tmp $state_rel $spool_rel
+
+    let state = read-state $state_abs
+    # BUG: t18 was being auto-resumed by the coordinator's own HALT message.
+    # FIXED: process-resume-actions now skips messages with Subject: [HALT]
+    assert equal ($state.halted_tasks | length) 1
+    assert equal ($state.halted_tasks | first) "t18"
+    assert equal $state.fsm_state "halted"
+
+    # The HALT message should be in seen_ids (consumed, not re-processed)
+    assert equal ($state.seen_ids | length) 1
+    assert equal ($state.seen_ids | first) "<halt-t18.coord@smolfire.local>"
+
+    ^rm -rf $tmp
+}
+
 print "all tests passed"

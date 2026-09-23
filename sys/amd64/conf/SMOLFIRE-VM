@@ -84,7 +84,7 @@ nodevice rsu
 # -----------------------------------------------------------------------
 # Strip USB (no USB devices in headless QEMU VM)
 # -----------------------------------------------------------------------
-nodevice uhci           # USB 1.1 OHCI/UHCI — no USB in smolBSD QEMU
+nodevice uhci           # USB 1.1 OHCI/UHCI — no USB in smolfire QEMU
 nodevice ohci
 nodevice ehci           # USB 2.0
 nodevice xhci           # USB 3.0

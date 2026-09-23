@@ -71,7 +71,7 @@ PR (flagged but out-of-scope for this repo). Gitea: `<gitea-host>:3001`, not
 |----------|------|--------|
 | amd64 kernel config | `sys/amd64/conf/SMOLBSD` | Complete |
 | arm64 kernel config | `sys/arm64/conf/SMOLBSD` | Complete |
-| amd64 QEMU release config | `release/tools/smolbsd-qemu.conf` | Complete |
+| amd64 QEMU release config | `release/tools/smolfire-qemu.conf` | Complete |
 | Coordinator loop | `bin/coord-tick.nu` | Complete, smoke-tested |
 | mbox parser | `bin/mbox-parse.nu` | Complete, 6/6 unit tests pass |
 | amd64 boot-timing gate | `tests/time-to-ready.exp` | Complete |
@@ -105,7 +105,7 @@ Two `buildworld` + `buildkernel` + `make release` pipelines are in flight:
    `FreeBSD-15-*.qcow2` artifacts and run `tests/run-tests.nu --suite e2e`.
 2. **Timing gate** — boot each qcow2 and verify ≤ 30s to login prompt.
 3. **Size gate** — verify disk image ≤ 512 MiB; qcow2 ≤ 128 MiB.
-4. **aarch64 release config** — `release/tools/smolbsd-qemu-aarch64.conf` is
+4. **aarch64 release config** — `release/tools/smolfire-qemu-aarch64.conf` is
    defined in `PHASE-1-AARCH64-TINY-BASELINE.md §7.1` but not yet in the main
    tree (exists in worktree `blissful-shockley-eeb73b`); needs merge.
 5. **Phase II** — physical boot on Pi 5 / RK3588 (plan in worktree; pending

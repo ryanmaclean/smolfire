@@ -1,0 +1,139 @@
+</div>
+<div class="sect1">
+<h2 id="projects">Projects</h2>
+<div class="sectionbody">
+<h3 id="_freebsd_cra_eurobsdcon_and_security_team">FreeBSD, CRA, EuroBSDCon, and Security Team</h3>
+<div class="paragraph">
+<p>Links:<br/>
+<a href="https://alpha-omega.dev">Alpha-Omega — Linux Foundation Project</a> URL: <a href="https://alpha-omega.dev" class="bare">https://alpha-omega.dev</a><br/>
+<a href="https://freebsdfoundation.org">FreeBSD Foundation</a> URL: <a href="https://freebsdfoundation.org" class="bare">https://freebsdfoundation.org</a><br/>
+<a href="https://www.freebsd.org/security/">FreeBSD Security Information</a> URL: <a href="https://www.freebsd.org/security/" class="bare">https://www.freebsd.org/security/</a><br/>
+<a href="https://2026.eurobsdcon.org">EuroBSDCon 2026</a> URL: <a href="https://2026.eurobsdcon.org" class="bare">https://2026.eurobsdcon.org</a></p>
+</div>
+<div class="paragraph">
+<p>Contact: Pierre Pronchery &lt;<a href="mailto:pierre@freebsdfoundation.org">pierre@freebsdfoundation.org</a>&gt;</p>
+</div>
+<div class="paragraph">
+<p>This quarter marked the beginning of my participation to Alpha-Omega’s new initiative around AI.
+The new wave of LLM-assisted disclosures of security vulnerabilities has been hard to miss, and Alpha-Omega is now assisting prominent Open Source ecosystems facing this challenge.
+This includes FreeBSD, and given the situation, I have volunteered and been accepted into FreeBSD’s security team.
+My objective there, besides helping with incoming reports where I can, is to understand existing processes and suggest improvements to facilitate and scale operations.
+This started with a new instance of <a href="https://requesttracker.com/rtir/">RTIR</a>, and with an experimental instance of <a href="https://forgejo.org">Forgejo</a> for CI/CD and possible leveraging of LLM integration with the security team’s workflow.</p>
+</div>
+<div class="paragraph">
+<p>On a related note, and in an effort to facilitate compliance with the European <a href="https://en.wikipedia.org/wiki/Cyber_Resilience_Act">Cyber Resilience Act</a> (CRA), <a href="http://pkgconf.org">pkgconf</a> was imported at version 2.9.93 in FreeBSD’s base system.
+This now includes <a href="https://man.freebsd.org/cgi/man.cgi?query=spdxtool&amp;sektion=1&amp;format=html">spdxtool(1)</a>, which supports the generation of <a href="https://en.wikipedia.org/wiki/Software_supply_chain">Software Bill of Material</a> (SBOM) conforming to <a href="https://spdx.github.io/spdx-spec/v3.0.1/">SPDX 3.0.1 specification</a>.
+Together with Tuukka Pasanen, we are offering a framework for review to that effect in <a href="https://reviews.freebsd.org/D56474">D56474</a>, which still requires polishing before import unfortunately.</p>
+</div>
+<div class="paragraph">
+<p>First, it should be updated to reflect the availability of spdxtool (a patch is already available).
+More importantly, finding the correct granularity for the amount of SBOM files to generate while fitting FreeBSD’s build system was not easy.
+This explains the metadata still missing in some cases; we are working on it for an approach as consistent as possible from the start.
+Lastly, I apologize in advance for the 1.000+ files added to the coming release; hopefully, this will be mitigated by the switch to pkgbase, with which we believe it will fit perfectly.
+The SBOM files are expected to be automatically provided in the corresponding packages installed, allowing subsequent SBOM tooling to function with the exact knowledge of the system’s status as installed.</p>
+</div>
+<div class="paragraph">
+<p>In this context, I am glad to announce that Alice Sowerby, Peter Hansteen, and myself are teaming up to host a workshop about CRA compliance for BSD-based systems during the coming EuroBSDCon conference in Brussels, this September 2026.
+You are welcome to join us there for practical information about CRA compliance in our ecosystem!</p>
+</div>
+<div class="paragraph">
+<p>Sponsor: Alpha-Omega, The FreeBSD Foundation</p>
+</div>
+<hr/>
+</div>
+<div class="sect2">
+<h3 id="_cyber_resilience_act_cra_readiness_project">Cyber Resilience Act (CRA) Readiness Project</h3>
+<div class="paragraph">
+<p>Links:<br/>
+<a href="https://github.com/FreeBSDFoundation/all-projects/tree/main/Cyber%20Resilience%20Act%20Readiness">Cyber Resilience Act Readiness</a> URL: <a href="https://github.com/FreeBSDFoundation/all-projects/tree/main/Cyber%20Resilience%20Act%20Readiness" class="bare">https://github.com/FreeBSDFoundation/all-projects/tree/main/Cyber%20Resilience%20Act%20Readiness</a></p>
+</div>
+<div class="paragraph">
+<p>The Foundation is running a project through 2026 to actively prepare the FreeBSD Foundation, Project, and the community for the EU Cyber Resilience Act.
+There are six main areas of focus: Security and Vulnerability Handling, SBOM Toolchain, Public Documentation, Community Legislative Engagement, Public Project Repository, and Communications.</p>
+</div>
+<div class="paragraph">
+<p>Over Q2 the project has made significant progress on its key goals.</p>
+</div>
+<div class="paragraph">
+<p>Security efforts have focused on improving vulnerability handling and supply chain readiness through discussions with downstream vendors about reporting processes, Software Bill of Materials (SBOM) usage, and potential funding for compliance work.</p>
+</div>
+<div class="paragraph">
+<p>The Foundation has also strengthened collaboration with the wider open source ecosystem by participating in Open Regulatory Compliance and OpenSSF activities, joining the OpenSSF as an associate member, attending Open Source Summit North America, and engaging with projects such as Zephyr to share CRA readiness strategies.</p>
+</div>
+<div class="paragraph">
+<p>The SBOM toolchain work has advanced significantly and is now close to full end-to-end functionality.
+We plan to publish a technical blog once the remaining work is complete.</p>
+</div>
+<div class="paragraph">
+<p>The Foundation also created draft CRA guidance for the FreeBSD community and we plan to publish this along with a dedicated section of the Foundation website providing permanent compliance information.</p>
+</div>
+<div class="paragraph">
+<p>Transparency remained a priority, and the Foundation has published monthly public updates and meeting minutes on the repo linked above.
+There will be a full day CRA and SBOM tutorial at EuroBSDCon, which we invite you to attend!</p>
+</div>
+<hr/>
+</div>
+<div class="sect2">
+<h3 id="_freebsd_software_bill_of_materials_sbom">FreeBSD Software Bill of Materials (SBOM)</h3>
+<div class="paragraph">
+<p>Links:<br/>
+<a href="https://github.com/illuusio/freebsd-src/tree/freebsd-lua-tools-sbom/share/sbom">FreeBSD Lua Tools for SBOM</a> URL: <a href="https://github.com/illuusio/freebsd-src/tree/freebsd-lua-tools-sbom/share/sbom" class="bare">https://github.com/illuusio/freebsd-src/tree/freebsd-lua-tools-sbom/share/sbom</a><br/>
+<a href="https://github.com/illuusio/freebsd-src/tree/sbom-pkgconfig-meld/share/sbom">FreeBSD pkg-config WIP SBOM files which are base for Pierre Pronchery’s work</a> URL: <a href="https://github.com/illuusio/freebsd-src/tree/sbom-pkgconfig-meld/share/sbom" class="bare">https://github.com/illuusio/freebsd-src/tree/sbom-pkgconfig-meld/share/sbom</a><br/>
+<a href="https://reviews.freebsd.org/D56474">Generate SBOM files as part of the build review</a> URL: <a href="https://reviews.freebsd.org/D56474" class="bare">https://reviews.freebsd.org/D56474</a><br/></p>
+</div>
+<div class="paragraph">
+<p>Open upstream SPDX license identifier PRs:<br/>
+<a href="https://github.com/freebsd/atf/pull/128">ATF PR#128</a> URL: <a href="https://github.com/freebsd/atf/pull/128" class="bare">https://github.com/freebsd/atf/pull/128</a><br/>
+<a href="https://gnats.netbsd.org/60308">bmake NetBSD GNATS#60308</a> URL: <a href="https://gnats.netbsd.org/60308" class="bare">https://gnats.netbsd.org/60308</a><br/>
+<a href="https://github.com/NLnetLabs/ldns/issues/305">LDNS ISSUE#305</a> URL: <a href="https://github.com/NLnetLabs/ldns/issues/305" class="bare">https://github.com/NLnetLabs/ldns/issues/305</a><br/>
+<a href="https://github.com/gwsw/less/pull/792">Less PR#792</a> URL: <a href="https://github.com/gwsw/less/pull/792" class="bare">https://github.com/gwsw/less/pull/792</a><br/>
+<a href="https://github.com/libarchive/libarchive/pull/3129">Libarchive PR#3129</a> URL: <a href="https://github.com/libarchive/libarchive/pull/3129" class="bare">https://github.com/libarchive/libarchive/pull/3129</a><br/>
+<a href="https://github.com/PJK/libcbor/issues/430">LibCBOR ISSUE#430</a> URL: <a href="https://github.com/PJK/libcbor/issues/430" class="bare">https://github.com/PJK/libcbor/issues/430</a><br/>
+<a href="https://gnats.netbsd.org/60309">libedit NetBSD GNATS#60309</a> URL: <a href="https://gnats.netbsd.org/60309" class="bare">https://gnats.netbsd.org/60309</a><br/>
+<a href="https://github.com/libevent/libevent/issues/1864">Libevent ISSUE#1864</a> URL: <a href="https://github.com/libevent/libevent/issues/1864" class="bare">https://github.com/libevent/libevent/issues/1864</a><br/>
+<a href="https://github.com/the-tcpdump-group/libpcap/pull/1689">LibPCAP PR#1689</a> URL: <a href="https://github.com/the-tcpdump-group/libpcap/pull/1689" class="bare">https://github.com/the-tcpdump-group/libpcap/pull/1689</a><br/>
+<a href="https://github.com/vstakhov/libucl/pull/386">LibUCL PR#386</a> URL: <a href="https://github.com/vstakhov/libucl/pull/386" class="bare">https://github.com/vstakhov/libucl/pull/386</a><br/>
+<a href="https://bugs.astron.com/view.php?id=777">TCSH Mantis#777</a> URL: <a href="https://bugs.astron.com/view.php?id=777" class="bare">https://bugs.astron.com/view.php?id=777</a><br/></p>
+</div>
+<div class="paragraph">
+<p>Contact: Tuukka Pasanen &lt;<a href="mailto:tuukka.pasanen@ilmi.fi">tuukka.pasanen@ilmi.fi</a>&gt;</p>
+</div>
+<div class="paragraph">
+<p>The FreeBSD Software Bill of Materials (SBOM) effort has been continued during Q2 2026.
+This quarter’s focus has been reviewing and updating pkg-config <span class="filename">.pc</span> files and adding SPDX-License-Identifier to third-party projects included in the FreeBSD source.
+This effort will be continued in Q3.</p>
+</div>
+<div class="paragraph">
+<p>As said, most of the quarter’s work has been dedicated to polishing pkg-config <span class="filename">.pc</span>, as these files are needed when generating SPDX 2.2 and SPDX Lite 3.0.1-compatible SBOM files.
+During this year Pierre Pronchery has been adding other crucial parts like pkgconf to the FreeBSD source.
+Currently, the biggest effort lead by him on the tooling side is the review of the SBOM generation part of the build, which holds <span class="filename">.pc</span> as part of the review.
+When the review is ready and the source is added to FreeBSD, SBOMs can be created during the building process.</p>
+</div>
+<div class="paragraph">
+<p>Besides work on <span class="filename">.pc</span>, there has also been polishing of The FreeBSD Lua Tools for SBOM, which have been used to create the current set of <span class="filename">.pc</span> files and can be used for future updates.
+These scripts are still somewhat raw and complicated to use but are now in much better shape than before, and there is documentation on how to use them.</p>
+</div>
+<div class="paragraph">
+<p>Adding SPDX-License-Identifier to third-party repositories is also a work in progress and will proceed in an order that aligns with project maintainers’ preferences.
+Why are license identifiers being added to third-party projects?
+There is no simple answer to this question, but the closest explanation is that machine-readable license identifiers help maintain SBOM information in the future.</p>
+</div>
+<div class="paragraph">
+<p>If you want to help with this effort:</p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>Review <span class="filename">.pc</span> files in Phabricator as part of the &#34;Generate SBOM files as part of the build&#34; review.</p>
+</li>
+<li>
+<p>Assist in reviewing the pkgconf 3.0 import to the FreeBSD source.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p>Sponsor: FreeBSD Foundation</p>
+</div>
+<hr/>
+</div>
+<div class="sect2">

@@ -34,7 +34,7 @@ running `make release` inside it. <kvm-host> already has:
 - The full FreeBSD source tree
 
 Steps: boot FreeBSD QEMU VM on <kvm-host> → clone/copy smolBSD repo inside →
-`cp release/tools/smolbsd-qemu.conf` into src → run `make release KERNCONF=SMOLBSD
+`cp release/tools/smolfire-qemu.conf` into src → run `make release KERNCONF=SMOLBSD
 WITH_PKGBASE=yes VMFORMATS=qcow2 VMSIZE=2g` → scp artifact back to host.
 
 `bin/copy-configs-to-freebsd.sh` already implements config copy. Use
@@ -42,14 +42,14 @@ WITH_PKGBASE=yes VMFORMATS=qcow2 VMSIZE=2g` → scp artifact back to host.
 
 ### D-02: tpm2-tools Inclusion in Image
 Add `tpm2-tools` to the release configuration via `VM_RC_LIST` extension and
-add to the `vm_extra_install_packages` hook in `release/tools/smolbsd-qemu.conf`.
+add to the `vm_extra_install_packages` hook in `release/tools/smolfire-qemu.conf`.
 This avoids any `pkg install` at test time (which requires network/DHCP —
 known to fail under QEMU SLIRP with stock images).
 
 Pre-bake approach: image ships with `tpm2-tools` already installed so CI tests
 can run `tpm2_pcrread`, `tpm2_createprimary`, `tpm2_unseal` without internet.
 
-Also add to smolbsd-qemu.conf:
+Also add to smolfire-qemu.conf:
 - `sshd_keygen_enable="NO"` in rc.conf (already added via fix-freebsd-vm.py pattern)
 - Explicit `HostKey` list to prevent XMSS blocking (already in qemu.conf)
 - `ifconfig_vtnet0="DHCP"` for pkg bootstrap during build (not needed for test)
@@ -82,7 +82,7 @@ Update `tpm-vm-test.yml` to:
 ### D-05: fix-freebsd-vm.py Not Needed for Real Image
 The console-socket fixer (`bin/fix-freebsd-vm.py`) is only needed for the
 stock FreeBSD UFS image (which lacks sshd_keygen_enable, XMSS removal, etc.).
-The smolBSD image already has all these baked in via `smolbsd-qemu.conf`.
+The smolBSD image already has all these baked in via `smolfire-qemu.conf`.
 For the smolBSD image CI path: poll SSH directly, no console fix step needed.
 
 ### Claude's Discretion
@@ -103,8 +103,8 @@ For the smolBSD image CI path: poll SSH directly, no console fix step needed.
 - `.planning/STATE.md` — Current status; what's done vs pending
 
 ### Release configuration
-- `release/tools/smolbsd-qemu.conf` — amd64 release build config (ownership fixes, SSH key pre-gen, size-trim)
-- `release/tools/smolbsd-qemu-aarch64.conf` — aarch64 reference for pattern consistency
+- `release/tools/smolfire-qemu.conf` — amd64 release build config (ownership fixes, SSH key pre-gen, size-trim)
+- `release/tools/smolfire-qemu-aarch64.conf` — aarch64 reference for pattern consistency
 
 ### Kernel configs
 - `sys/amd64/conf/SMOLBSD` — amd64 kernel (already has `device tpm`)
@@ -146,17 +146,17 @@ For the smolBSD image CI path: poll SSH directly, no console fix step needed.
 - Log-step TOML format (`{ts, step, payload}`) used throughout all .nu scripts
 - Attestation `[[claims]]` blocks expected by the coord-tick.nu proveryay hook
 - All timestamps use `date to-timezone utc | format date "%Y-%m-%dT%H:%M:%SZ"`
-- Tests emit structured TOML results; smolbsd-test-report.nu aggregates them
+- Tests emit structured TOML results; smolfire-test-report.nu aggregates them
 
 ### Integration Points
 - `tpm-vm-test.yml` needs: (1) image path env var, (2) remove fix-freebsd-vm.py step, (3) call run-vm-tests.nu
 - `build-image.yml` needs: <kvm-host> runner + FreeBSD build VM + scp artifact back
-- smolbsd-qemu.conf needs: `vm_extra_install_packages` hook for tpm2-tools package
+- smolfire-qemu.conf needs: `vm_extra_install_packages` hook for tpm2-tools package
 
 ### Known Constraint
 - QEMU aarch64 TPM: `tpm-tis-device` generates ControlArea=0 ACPI → FreeBSD CRB driver refuses
 - aarch64 TPM testing is Phase 4 (physical board only)
-- VMSIZE already reduced to 2g in current smolbsd-qemu.conf (was 4g)
+- VMSIZE already reduced to 2g in current smolfire-qemu.conf (was 4g)
 
 </code_context>
 

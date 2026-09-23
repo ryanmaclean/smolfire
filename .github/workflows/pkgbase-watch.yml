@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: Apache-2.0
+# pkgbase-watch.yml — issue #39 item 5: quarterly check of whether a custom
+# kernel (SMOLFIRE-VM) can be shipped as a first-class pkgbase package.
+#
+# Runs bin/pkgbase-watch.nu against live upstream sources (FreeBSD status
+# reports, ports-mgmt/pkg, src Makefile.inc1 + release/Makefile, Handbook
+# ch. 27.8), writes the verdict to the job summary, and uploads the JSON as
+# an artifact. Only when the verdict is `reevaluate` does it touch GitHub
+# state: it creates — or updates in place — ONE marker-tagged comment on #39.
+# See docs/PKGBASE-WATCH.md for the schema and the classification rule.
+#
+# Status reports publish ~4-6 weeks after quarter end, so the run on the
+# 1st of a quarter sees the report for the quarter before last; the
+# Makefile.inc1 / Handbook / pkg checks are always current.
+
+name: pkgbase watch
+
+on:
+  schedule:
+    - cron: "17 9 1 1,4,7,10 *"   # 09:17 UTC on the 1st of Jan/Apr/Jul/Oct
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # used only on verdict == reevaluate (one comment on #39)
+
+concurrency:
+  group: pkgbase-watch
+  cancel-in-progress: false
+
+env:
+  WATCH_ISSUE: "39"
+  MARKER: "<!-- pkgbase-watch:v1 -->"
+
+jobs:
+  watch:
+    name: pkgbase custom-kernel watch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Install Nushell
+        run: |
+          NU_VERSION="0.112.2"
+          ARCH=$(uname -m | sed 's/arm64/aarch64/')
+          case "$(uname -s)" in
+            Linux)  TRIPLE="${ARCH}-unknown-linux-musl" ;;
+            Darwin) TRIPLE="${ARCH}-apple-darwin" ;;
+          esac
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Show Nushell version
+        run: nu --version
+
+      # Parser regression gate first: a broken parser must not post verdicts.
+      - name: Offline parser tests (fixtures)
+        run: nu tests/pkgbase-watch-test.nu
+
+      - name: Run watch (live upstream)
+        id: watch
+        run: |
+          set +e
+          nu bin/pkgbase-watch.nu --json > pkgbase-watch.json
+          rc=$?
+          set -e
+          {
+            echo "rc=$rc"
+            echo "verdict=$(jq -r .verdict pkgbase-watch.json)"
+            echo "status=$(jq -r .custom_kernel_pkgbase.status pkgbase-watch.json)"
+          } >> "$GITHUB_OUTPUT"
+          nu bin/pkgbase-watch.nu --from pkgbase-watch.json --markdown > pkgbase-watch.md
+          {
+            cat pkgbase-watch.md
+            echo
+            echo "<details><summary>pkgbase-watch.json (schema v1)</summary>"
+            echo
+            echo '```json'
+            cat pkgbase-watch.json
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JSON
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: pkgbase-watch
+          path: |
+            pkgbase-watch.json
+            pkgbase-watch.md
+
+      - name: Open/update comment on #39 (reevaluate only)
+        if: steps.watch.outputs.verdict == 'reevaluate'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "$MARKER"
+            cat pkgbase-watch.md
+            echo
+            echo "_Posted by [pkgbase-watch]($RUN_URL); this comment is updated in place on later \`reevaluate\` runs._"
+          } > comment.md
+          existing=$(gh api "repos/$REPO/issues/$WATCH_ISSUE/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id" | head -n1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@comment.md --jq .html_url
+          else
+            gh api -X POST "repos/$REPO/issues/$WATCH_ISSUE/comments" -F body=@comment.md --jq .html_url
+          fi
+
+      # Fail the run (visibly) if any upstream source could not be read, after
+      # the summary/artifact are written so the partial result is inspectable.
+      - name: Fail on incomplete sources
+        if: steps.watch.outputs.rc != '0'
+        env:
+          RC: ${{ steps.watch.outputs.rc }}
+        run: |
+          echo "pkgbase-watch exited $RC — see errors[] in the JSON"
+          jq -r '.errors[]' pkgbase-watch.json
+          exit 1

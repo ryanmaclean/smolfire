@@ -1,10 +1,11 @@
 {
-  "project": "smolBSD coordinator",
-  "version": "1.1",
+  "project": "smolfire coordinator",
+  "version": "1.2",
   "branchName": "main",
   "qualityChecks": [
     "nu tests/mbox-parse-test.nu",
     "nu tests/coord-tick-test.nu",
+    "nu tests/coord-fsm-tests.nu",
     "sh tests/run-all.sh"
   ],
   "userStories": [
@@ -32,9 +33,9 @@
         "bin/coord-run.sh",
         "tests/coord-tick-test.nu"
       ],
-      "passes": false,
+      "passes": true,
       "status": "passing",
-      "evidence": "coord-tick-test tests 7/15/16/16b/16c cover halt and resume"
+      "evidence": "coord-tick-test 7/15/16/16b/16c/18 pass: HALT file -> halted; retry resume clears halted task; abort resume keeps task halted; retry resume clears per-task halt without global HALT; retry-as-role clears per-task halt; HALT message with X-Resume-Tag does NOT auto-resume on next tick (bug fixed in process-resume-actions: skip messages with Subject: [HALT])."
     },
     {
       "id": "S-003",
@@ -43,12 +44,12 @@
       "description": "As a maintainer, I need retries capped with backoff and escalation so blocked work does not loop forever.",
       "filesHint": [
         "bin/coord-tick.nu",
-        "tests/coord-fsm-tests.nu",
+        "tests/coord-escalate-test.nu",
         "docs/superpowers/specs/2026-04-30-mailbox-jec-handoff-design.md"
       ],
-      "passes": false,
+      "passes": true,
       "status": "passing",
-      "evidence": "coord-tick-test tests 8/9/10/13 cover retry + escalation"
+      "evidence": "coord-tick-test.nu tests 8/9/10/13 pass (fail on first attempt -> retry dispatched, no global HALT; attempt counter increments on fail; retry exhausted -> HALT file created; blocked+no-unblocker -> immediate HALT, no retry); coord-escalate-test.nu 13/13 pass via run-all.sh; sh tests/run-all.sh -> \"results: 10 passed, 2 skipped, 0 failed\"."
     },
     {
       "id": "S-004",
@@ -59,9 +60,9 @@
         "bin/coord-tick.nu",
         "tests/coord-tick-test.nu"
       ],
-      "passes": false,
+      "passes": true,
       "status": "passing",
-      "evidence": "coord-tick-test test 11 covers capability gate dispatch check"
+      "evidence": "coord-tick-test.nu test 11 passes (capability mismatch -> message skipped, no dispatch); sh tests/run-all.sh -> \"results: 10 passed, 2 skipped, 0 failed\"."
     },
     {
       "id": "S-005",
@@ -72,9 +73,9 @@
         "bin/coord-tick.nu",
         "tests/coord-fsm-tests.nu"
       ],
-      "passes": false,
+      "passes": true,
       "status": "passing",
-      "evidence": "coord-tick.nu emits log-event for every FSM transition"
+      "evidence": "coord-fsm-tests.nu 9/9 pass incl. determinism assertions; wired into run-all.sh and qualityChecks. coord-tick.nu routes every FSM transition/verdict through log-transition/log-verdict (single telemetry-record constructor, schema_version v1: schema_version,ts,event,state_from,state_to,task_id,verdict,attempt,reason,message_id). Tests 6-9 assert identical ordered columns per event kind, closed enums for state_from/state_to/verdict/reason, expected sequences for full-cycle/halt/fail-retry/escalate/malformed runs, and run-to-run equality modulo ts/message-id timestamps; renaming or reordering a field makes the gate exit 1."
     }
   ]
 }

@@ -305,8 +305,8 @@ ls -l smolbsd-aarch64-pi5.raw
 | Path | Purpose | Status |
 |------|---------|--------|
 | `plans/tinyos/PHASE-2-PHYSICAL-BOOT.md` | This scope document | done |
-| `release/tools/smolbsd-pi5.conf` | Board config for Pi 5 raw image conversion | pending |
-| `release/tools/smolbsd-rk3588.conf` | Board config for RK3588 raw image conversion | pending |
+| `release/tools/smolfire-pi5.conf` | Board config for Pi 5 raw image conversion | pending |
+| `release/tools/smolfire-rk3588.conf` | Board config for RK3588 raw image conversion | pending |
 | `tests/time-to-ready-physical.exp` | Serial expect script for physical time-to-login gate | pending |
 | `tests/crash-recovery-physical.exp` | Power-cycle + serial recovery gate | pending |
 | `scripts/qcow2-to-board-raw.sh` | Conversion pipeline wrapper (steps 1–6 of §4.1) | pending |

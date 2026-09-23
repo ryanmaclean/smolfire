@@ -30,7 +30,7 @@
 #   sudo nu bin/build-smolfire-vm.nu --check            # preflight checks only
 
 export def main [
-    --arch: string = ""              # aarch64 | amd64 (auto-detect if empty)
+    --arch: string = ""              # aarch64 | amd64 | riscv64-experimental (auto-detect if empty)
     --src: string = "/usr/src"       # FreeBSD source tree
     --obj: string = "/usr/obj"       # obj directory
     --kernconf: string = "SMOLFIRE-VM"   # kernel config name
@@ -54,11 +54,16 @@ export def main [
     let arch_target = match $resolved_arch {
         "aarch64" | "arm64" => "aarch64",
         "amd64" | "x86_64"  => "amd64",
+        "riscv64" | "riscv" => "riscv64",   # EXPERIMENTAL — cross-build only, no boot gate
         _ => {
-            error make {msg: $"Unknown arch: ($resolved_arch) — expected aarch64 or amd64"}
+            error make {msg: $"Unknown arch: ($resolved_arch) — expected aarch64, amd64, or riscv64"}
         }
     }
-    let arch_freebsd = if $arch_target == "aarch64" { "arm64" } else { "amd64" }
+    let arch_freebsd = match $arch_target {
+        "aarch64" => "arm64",
+        "riscv64" => "riscv",
+        _         => "amd64",
+    }
 
     # --- Resolve job count ---
     let nj = if $jobs == 0 {
@@ -71,10 +76,10 @@ export def main [
 
     # --- Resolve conf paths ---
     let kernconf_path = $"($src)/sys/($arch_freebsd)/conf/($kernconf)"
-    let conf_name = if $arch_target == "aarch64" {
-        "smolfire-qemu-aarch64.conf"
-    } else {
-        "smolfire-qemu.conf"
+    let conf_name = match $arch_target {
+        "aarch64" => "smolfire-qemu-aarch64.conf",
+        "riscv64" => "smolfire-qemu-riscv64.conf",
+        _         => "smolfire-qemu.conf",
     }
     let release_conf = $"($src)/release/tools/($conf_name)"
 
@@ -320,7 +325,7 @@ def setup [src: string] {
         "."
     }
 
-    for arch_pair in [["arm64" "aarch64"] ["amd64" "amd64"]] {
+    for arch_pair in [["arm64" "aarch64"] ["amd64" "amd64"] ["riscv" "riscv64"]] {
         let af = ($arch_pair | get 0)
         let at = ($arch_pair | get 1)
         let kconf_src = $"($repo_dir)/sys/($af)/conf/SMOLFIRE-VM"
@@ -331,7 +336,7 @@ def setup [src: string] {
         }
     }
 
-    for conf_pair in [["smolfire-qemu.conf" ""] ["smolfire-qemu-aarch64.conf" ""]] {
+    for conf_pair in [["smolfire-qemu.conf" ""] ["smolfire-qemu-aarch64.conf" ""] ["smolfire-qemu-riscv64.conf" ""]] {
         let cname = ($conf_pair | get 0)
         let csrc = $"($repo_dir)/release/tools/($cname)"
         let cdst = $"($src)/release/tools/($cname)"

@@ -5,11 +5,16 @@ FAIL=0
 SKIP=0
 PYTHON3=""
 PY_OK=""
+PY_SKIP_REASON="python3 >= 3.10 required"
 if command -v python3 >/dev/null 2>&1; then
     PYTHON3=$(command -v python3)
     if "$PYTHON3" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
         PY_OK=1
+    else
+        PY_SKIP_REASON="python3 >= 3.10 required (found $PYTHON3)"
     fi
+else
+    PY_SKIP_REASON="python3 >= 3.10 required (python3 not found)"
 fi
 # Roster: every tests/*-test.nu and tests/*-test.py, plus gates whose names
 # predate those patterns.
@@ -19,7 +24,7 @@ for f in tests/*-test.nu tests/*-test.py tests/coord-fsm-tests.nu; do
     case "$f" in
         *.py)
             if [ -z "$PY_OK" ]; then
-                echo "skip"
+                echo "skip ($PY_SKIP_REASON)"
                 SKIP=$((SKIP + 1))
                 continue
             fi

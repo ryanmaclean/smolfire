@@ -1,0 +1,133 @@
+schema_version = "v1"
+issue = 63
+title = "Filesystem-native BOP state matrix"
+status = "recommendation"
+method = "source-review"
+measured = false
+recommendation = "netbsd_ffs_wapbl_fss"
+follow_on = "hammer2_pfs_snapshot"
+summary = "Carry forward NetBSD FFS with WAPBL and persistent fss snapshots for the first smolfire/sibling NetBSD experiments. It is the smallest already-available primitive set that closes durable state, crash recovery, and replayable history without inventing new retention semantics."
+non_goal = "Do not assume HAMMER2 is the answer before testing HAMMER1, LFS, and FFS."
+
+workload = [
+  "create_card_bundle",
+  "rename_pending_to_running",
+  "append_logs",
+  "write_artifacts",
+  "rename_running_to_done_or_failed",
+  "crash_at_random_points",
+  "recover",
+  "reconstruct_prior_state",
+]
+
+required_primitives = [
+  "atomic_rename",
+  "fsync_file_and_parent_directory",
+  "append_only_log_writes",
+  "immutable_or_historical_view_handle",
+  "mount_time_crash_recovery",
+  "stable_run_identity",
+]
+
+metrics = [
+  "ram",
+  "disk_amplification",
+  "metadata_overhead",
+  "rename_latency",
+  "fsync_latency",
+  "mount_recovery_time",
+  "history_retained_per_gib",
+  "prune_clean_cost",
+  "openlineage_derivation_without_external_db",
+]
+
+[citations]
+hammer1 = "DragonFlyBSD/DragonFlyBSD share/man/man5/hammer.5"
+hammer2 = "DragonFlyBSD/DragonFlyBSD sbin/hammer2/hammer2.8"
+lfs = "NetBSD/src sys/ufs/lfs/README"
+ffs_fss = "NetBSD/src share/man/man4/fss.4"
+ffs_wapbl = "NetBSD/src share/man/man4/wapbl.4"
+
+[[candidates]]
+id = "hammer1"
+name = "DragonFly HAMMER1"
+history_model = "native_transaction_history"
+primitive_set = [
+  "atomic_rename",
+  "fsync_flush_modes",
+  "transaction_ids",
+  "historical_path_lookup",
+  "snapshots",
+  "pfs",
+  "prune_min",
+]
+crash_recovery = "instant_crash_recovery"
+identity_basis = ["transaction_id", "pfs_shared_uuid", "snapshot_path"]
+history_without_extra_db = true
+lineage_derivation = "strong"
+portability = "dragonfly_only"
+operational_cost = "high"
+notes = "Best semantic fit: native transaction IDs plus historical path lookup provide durable state and temporal reconstruction without layering a second event log. Operationally heavier because retention depends on prune/reblock policy and the implementation is tied to DragonFly."
+recommendation_rank = 2
+
+[[candidates]]
+id = "hammer2"
+name = "HAMMER2"
+history_model = "snapshot_and_pfs"
+primitive_set = [
+  "atomic_rename",
+  "copy_on_write_snapshots",
+  "pfs",
+  "checksums",
+  "compression",
+  "recover_scan",
+  "cluster_and_pfs_ids",
+]
+crash_recovery = "copy_on_write_with_recovery_tools"
+identity_basis = ["pfs_clid", "pfs_fsid", "snapshot_label"]
+history_without_extra_db = true
+lineage_derivation = "good"
+portability = "dragonfly_primary_with_other_bsd_ports"
+operational_cost = "medium"
+notes = "Strong cross-BSD candidate, but it does not expose HAMMER1-style per-transaction history. To reconstruct prior BOP state you must schedule snapshots/PFS boundaries explicitly, so the primitive set is larger than the FFS baseline when judged only by what the workflow needs."
+recommendation_rank = 2
+
+[[candidates]]
+id = "netbsd_lfs"
+name = "NetBSD LFS"
+history_model = "checkpointed_log_without_retention"
+primitive_set = [
+  "atomic_rename",
+  "checkpointed_segment_log",
+  "roll_forward_recovery",
+  "cleaner_ifile",
+]
+crash_recovery = "checkpoint_and_roll_forward"
+identity_basis = ["ifile_inode_entry", "segment_summary_timestamp"]
+history_without_extra_db = false
+lineage_derivation = "weak"
+portability = "netbsd"
+operational_cost = "high"
+notes = "LFS already writes chronologically, but older states are cleaner input, not a durable user-visible history surface. Carrying BOP state here would require a new retention or snapshot scheme before it can replace a second event log."
+recommendation_rank = 4
+
+[[candidates]]
+id = "netbsd_ffs_wapbl_fss"
+name = "NetBSD FFS + WAPBL + persistent fss"
+history_model = "scheduled_snapshots"
+primitive_set = [
+  "atomic_rename",
+  "fsync_file_and_parent_directory",
+  "wapbl_metadata_journal",
+  "persistent_fss_snapshot",
+  "snapshot_timestamp",
+  "inode_and_generation_identity",
+]
+crash_recovery = "journal_replay_on_mount"
+identity_basis = ["snapshot_time", "inode_number", "inode_generation"]
+history_without_extra_db = true
+lineage_derivation = "good_enough"
+portability = "netbsd"
+operational_cost = "medium"
+notes = "This is the smallest primitive set that is already present in NetBSD and directly matches the workload: rename+fsync for state transitions, WAPBL for crash recovery, and persistent fss snapshots at bundle creation plus terminal state changes for temporal reconstruction and OpenLineage versioning."
+recommendation_rank = 1

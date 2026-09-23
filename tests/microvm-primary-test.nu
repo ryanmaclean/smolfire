@@ -40,7 +40,6 @@ for needle in [
 for needle in [
     "pull_request:"
     "push:"
-    "tests/microvm-primary-test.nu"
     "- name: Artifact size gate"
     "- name: Firecracker network gate"
     "- name: Firecracker boot-time gate"

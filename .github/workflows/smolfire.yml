@@ -23,25 +23,7 @@ permissions:
 # net pass at 569ms, de-debugged kernel, isxen() pv.c patch active.)
 on:
   pull_request:
-    paths:
-      - '.github/workflows/smolfire.yml'
-      - 'bin/build-smolfire.sh'
-      - 'README.md'
-      - 'docs/BUILDING.md'
-      - 'docs/BOOT-TIME-ROADMAP.md'
-      - 'sys/amd64/conf/SMOLFIRE*'
-      - 'tests/microvm-primary-test.nu'
-      - 'tests/smolfire-rootfs-test.nu'
   push:
-    paths:
-      - '.github/workflows/smolfire.yml'
-      - 'bin/build-smolfire.sh'
-      - 'README.md'
-      - 'docs/BUILDING.md'
-      - 'docs/BOOT-TIME-ROADMAP.md'
-      - 'sys/amd64/conf/SMOLFIRE*'
-      - 'tests/microvm-primary-test.nu'
-      - 'tests/smolfire-rootfs-test.nu'
   workflow_dispatch:
     inputs:
       tslog:

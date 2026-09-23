@@ -1,0 +1,147 @@
+{
+  "schema_version": "v1",
+  "issue": 72,
+  "title": "Prototype the lower bound: rump/rumprun + LFS/FFS without a full BSD userspace",
+  "status": "prototype-specified",
+  "comparison_issue_ids": [
+    63,
+    64
+  ],
+  "selected_candidate": "rumprun-hw_virtio-ffs",
+  "ready_workload_contract": {
+    "workload_name": "bop-state-v1",
+    "ready_marker": "SMOLFIRE_READY",
+    "writable_state_disk": true,
+    "crash_recovery": true,
+    "filesystem_native_identity": true,
+    "operations": [
+      "create card bundle",
+      "atomic rename pending -> running",
+      "append logs",
+      "write artifacts",
+      "fsync at durability points",
+      "atomic rename running -> done|failed",
+      "crash at random points and recover",
+      "inspect/reconstruct prior state from filesystem-native identity"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "smolfire-one-elf",
+      "status": "measured",
+      "substrate": "FreeBSD SMOLFIRE one-ELF microVM",
+      "filesystem": "static mfs root",
+      "metrics": {
+        "artifact_bytes": null,
+        "resident_ram_bytes": null,
+        "boot_to_ready_ms": 511,
+        "cpu_overhead_pct": null,
+        "throughput_ops_per_sec": null,
+        "recovery_time_ms": null
+      },
+      "code_surface": "single PVH ELF plus embedded /rescue MFS root",
+      "licensing": {
+        "verdict": "allowed",
+        "allowed_families": [
+          "Apache-2.0",
+          "BSD-2-Clause",
+          "BSD-3-Clause"
+        ],
+        "disallowed_families": [
+          "GPL",
+          "LGPL",
+          "AGPL"
+        ]
+      },
+      "comparison_role": "baseline"
+    },
+    {
+      "id": "netbsd11-microvm-sibling",
+      "status": "planned",
+      "substrate": "NetBSD 11 MICROVM kernel + tiny immutable root + writable state disk",
+      "filesystem": "lfs or ffs+wapbl+fss",
+      "metrics": {
+        "artifact_bytes": null,
+        "resident_ram_bytes": null,
+        "boot_to_ready_ms": null,
+        "cpu_overhead_pct": null,
+        "throughput_ops_per_sec": null,
+        "recovery_time_ms": null
+      },
+      "code_surface": "kernel plus tiny ramdisk and one writable state disk",
+      "licensing": {
+        "verdict": "allowed",
+        "allowed_families": [
+          "BSD"
+        ],
+        "disallowed_families": [
+          "GPL",
+          "LGPL",
+          "AGPL"
+        ]
+      },
+      "comparison_role": "sibling"
+    },
+    {
+      "id": "rumprun-hw_virtio-ffs",
+      "status": "prototype-specified",
+      "substrate": "rumprun unikernel on hw_virtio with one virtio state disk",
+      "filesystem": "ffs",
+      "filesystem_alternative": "lfs via extra librumpfs_lfs linkage",
+      "metrics": {
+        "artifact_bytes": null,
+        "resident_ram_bytes": null,
+        "boot_to_ready_ms": null,
+        "cpu_overhead_pct": null,
+        "throughput_ops_per_sec": null,
+        "recovery_time_ms": null
+      },
+      "code_surface": "unikernel image plus a tiny worker; no conventional BSD userspace inside the guest",
+      "build": {
+        "upstream_repo": "https://github.com/rumpkernel/rumprun",
+        "target": "hw_virtio",
+        "state_disk_format": "raw",
+        "state_disk_size_bytes": 67108864,
+        "commands": [
+          "git clone https://github.com/rumpkernel/rumprun",
+          "cd rumprun && ./build-rr.sh hw_virtio",
+          "x86_64-rumprun-netbsd-gcc -O2 -o worker worker.c",
+          "rumprun-bake hw_virtio worker.bin worker",
+          "truncate -s 64M state.img",
+          "vnconfig vnd0 state.img && disklabel -I -r vnd0 && newfs /dev/rvnd0a && vnconfig -u vnd0"
+        ]
+      },
+      "workload": {
+        "ready_marker": "SMOLFIRE_READY",
+        "smoke_steps": [
+          "mount the virtio-backed FFS state disk read-write",
+          "run the BOP state workload",
+          "emit SMOLFIRE_READY on serial after the disk is mounted and the worker is ready"
+        ],
+        "identity_candidates": [
+          "ffs fsid",
+          "inode/generation pairs",
+          "directory entry lineage captured by rename ordering"
+        ]
+      },
+      "licensing": {
+        "verdict": "allowed",
+        "allowed_families": [
+          "BSD-2-Clause",
+          "BSD-style NetBSD components"
+        ],
+        "disallowed_families": [
+          "GPL",
+          "LGPL",
+          "AGPL"
+        ],
+        "notes": [
+          "rumprun is BSD-2-Clause",
+          "the prototype must avoid GPL/LGPL/AGPL helpers"
+        ]
+      },
+      "comparison_role": "lower-bound-prototype",
+      "why_selected": "stock rumprun hw_virtio already carries virtio block and rumpfs_ffs, so FFS is the smallest first prototype before custom LFS bake work"
+    }
+  ]
+}

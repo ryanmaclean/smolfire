@@ -3,7 +3,8 @@
 #
 # Uses the same one-ELF SMOLFIRE build as the release-oriented 15.x workflow,
 # but builds against FreeBSD main inside a main snapshot VM and requires both
-# VMM gates. This is a compatibility lane only: it does not publish artifacts.
+# VMM gates. This is a compatibility lane only: it does not publish release
+# assets, but it does upload CI artifacts for diagnosis.
 
 name: SMOLFIRE FreeBSD 16-CURRENT compatibility
 
@@ -11,6 +12,9 @@ on:
   schedule:
     - cron: '23 9 * * 1'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   WORK: /mnt/smolfire-ci
@@ -40,7 +44,7 @@ jobs:
           sudo mkdir -p "$WORK" && sudo chown "$(id -u)" "$WORK"
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils expect xz-utils genisoimage openssh-client
+            qemu-system-x86 qemu-utils expect xz-utils genisoimage openssh-client python3
           cd "$WORK"
           curl -fsSL -o fc.tgz \
             "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-x86_64.tgz"
@@ -107,6 +111,7 @@ jobs:
         run: |
           set -e
           cd "$WORK"
+          RUN_LOG="$WORK/build-smolfire-current.log"
           SSH="ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@127.0.0.1"
           $SSH 'env ASSUME_ALWAYS_YES=yes pkg update -q && env ASSUME_ALWAYS_YES=yes pkg install -y git'
@@ -115,7 +120,7 @@ jobs:
           $SSH 'cp /root/smolfire/sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/'
           BUILD_RC=0
           $SSH 'env SMOLFIRE_TSLOG=1 sh /root/smolfire/bin/build-smolfire.sh' \
-            2>&1 | tee build.log || BUILD_RC=$?
+            2>&1 | tee "$RUN_LOG" || BUILD_RC=$?
           scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -P "$SSH_PORT" root@127.0.0.1:/var/tmp/smolfire-build.log \
               "$WORK/smolfire-build-vm.log" || true
@@ -142,24 +147,39 @@ jobs:
 
       - name: Boot gate — Firecracker (required)
         id: firecracker
+        continue-on-error: true
         run: |
           set -e
+          RUN_HASH=$(printf '%s' "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" | sha256sum | cut -c1-6)
+          TAP_IF="tap${RUN_HASH}$(printf '%02d' "$((RANDOM % 100))")"
+          cleanup() {
+            [ -n "${HTTPD_PID:-}" ] && kill "$HTTPD_PID" 2>/dev/null || true
+            [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
+            rm -f "$WORK/firecracker.pid"
+            sudo ip link del "$TAP_IF" 2>/dev/null || true
+            rm -f "$WORK/firecracker.tap"
+          }
+          trap cleanup EXIT
           cd "$WORK"
-          sudo ip tuntap add tap0 mode tap user "$(id -un)"
-          sudo ip addr add 172.16.0.1/30 dev tap0
-          sudo ip link set tap0 up
+          sudo ip link del "$TAP_IF" 2>/dev/null || true
+          sudo ip tuntap add "$TAP_IF" mode tap user "$(id -un)"
+          sudo ip addr add 172.16.0.1/30 dev "$TAP_IF"
+          sudo ip link set "$TAP_IF" up
+          echo "$TAP_IF" > "$WORK/firecracker.tap"
           TOK="fc-${RANDOM}${RANDOM}"
+          TOKEN_PATH="token-${TOK}.txt"
           mkdir -p "$WORK/www"
-          printf '%s' "$TOK" > "$WORK/www/token.txt"
+          printf '%s' "$TOK" > "$WORK/www/$TOKEN_PATH"
           ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
-          echo "$!" > "$WORK/httpd.pid"
+          HTTPD_PID=$!
+          echo "$HTTPD_PID" > "$WORK/httpd.pid"
           sleep 1
-          curl -fsS 'http://172.16.0.1:8080/token.txt' >/dev/null || { echo 'ERROR: token server not answering'; exit 1; }
-          printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" > fc.json
+          curl -fsS "http://127.0.0.1:8080/$TOKEN_PATH" >/dev/null || { echo 'ERROR: token server not answering'; exit 1; }
+          printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/%s" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "%s" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$TOKEN_PATH" "$TAP_IF" > fc.json
           expect -c '
             set timeout 30
             set t0 [clock milliseconds]
-            spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK"'/fc.json
+            spawn sh -c "echo \$\$ > '"$WORK"'/firecracker.pid; exec '"$WORK"'/firecracker --no-api --config-file '"$WORK"'/fc.json"
             expect {
               "SMOLFIRE_NET_OK '"$TOK"'" { puts "\nFIRECRACKER_NET=pass (guest-initiated TCP, token verified)" }
               "SMOLFIRE_NET_FAIL"        { puts "\nFIRECRACKER_NET=fail (fetch failed in guest)"; exit 3 }
@@ -192,24 +212,32 @@ jobs:
 
       - name: Boot gate — QEMU microvm (required)
         id: qemu
+        continue-on-error: true
         run: |
           set -e
+          cleanup() {
+            [ -n "${HTTPD_PID:-}" ] && kill "$HTTPD_PID" 2>/dev/null || true
+            [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
+            rm -f "$WORK/qemu-microvm.pid"
+          }
+          trap cleanup EXIT
           cd "$WORK"
           TOK="qemu-${RANDOM}${RANDOM}"
+          TOKEN_PATH="token-${TOK}.txt"
           mkdir -p "$WORK/www"
-          printf '%s' "$TOK" > "$WORK/www/token.txt"
-          if ! curl -fsS 'http://10.0.2.2:8080/token.txt' >/dev/null 2>&1; then
-            pkill -f 'python3 -m http.server 8080 --bind 0.0.0.0' || true
-            ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
-            echo "$!" > "$WORK/httpd.pid"
-            sleep 1
-          fi
+          printf '%s' "$TOK" > "$WORK/www/$TOKEN_PATH"
+          ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
+          HTTPD_PID=$!
+          echo "$HTTPD_PID" > "$WORK/httpd.pid"
+          sleep 1
+          curl -fsS "http://127.0.0.1:8080/$TOKEN_PATH" >/dev/null || { echo 'ERROR: token server not answering'; exit 1; }
           timeout 60 expect -c '
             set timeout 30
             set t0 [clock milliseconds]
             spawn qemu-system-x86_64 -M microvm -accel kvm -cpu host -m 512M \
+              -pidfile '"$WORK"'/qemu-microvm.pid \
               -kernel '"$WORK"'/smolfire-kernel \
-              -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/token.txt" \
+              -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/'"$TOKEN_PATH"'" \
               -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
               -display none -serial mon:stdio
             expect {
@@ -248,6 +276,17 @@ jobs:
             printf '| QEMU microvm gate | %s |\n' "$QEMU_OUTCOME"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Fail on gate regressions
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          FIRECRACKER_OUTCOME: ${{ steps.firecracker.outcome }}
+          QEMU_OUTCOME: ${{ steps.qemu.outcome }}
+        run: |
+          [ "$BUILD_OUTCOME" = success ] || { echo "BUILD=fail"; exit 1; }
+          [ "$FIRECRACKER_OUTCOME" = success ] || { echo "FIRECRACKER=fail"; exit 1; }
+          [ "$QEMU_OUTCOME" = success ] || { echo "QEMU_MICROVM=fail"; exit 1; }
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -257,15 +296,13 @@ jobs:
           path: |
             /mnt/smolfire-ci/smolfire-kernel
             /mnt/smolfire-ci/smolfire-kernel-tslog
-            /mnt/smolfire-ci/build.log
+            /mnt/smolfire-ci/build-smolfire-current.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log
 
       - name: Teardown VM
         if: always()
         run: |
-          pkill -f 'firecracker --no-api' 2>/dev/null || true
-          pkill -f 'qemu-system-x86_64 -M microvm' 2>/dev/null || true
           [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
           [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
-          sudo ip link del tap0 2>/dev/null || true
+          [ -f "$WORK/firecracker.tap" ] && sudo ip link del "$(cat "$WORK/firecracker.tap")" 2>/dev/null || true

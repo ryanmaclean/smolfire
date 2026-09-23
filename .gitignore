@@ -1,32 +1,38 @@
 # Per spec §11 (secrets handling): ephemeral envelope files MUST NOT be tracked
 var/run/
 
-# Spool is an operational audit trail — contains IPs, instance IDs, credentials.
-# Do not track in public repos. Use var/run/spool-archive/ for long-term storage.
+# Operational spool and archives — may contain IPs, instance IDs, credentials,
+# or other site-specific data.
 var/mail/spool
 var/mail/spool.*
-
-# Spool lock files (future, when multi-coordinator is in scope)
 var/mail/*.lock
 
-# Per-task HALT envelopes — ephemeral FSM signaling per spec §11
+# Per-task/global HALT envelopes — ephemeral FSM signaling
 var/mail/HALT
 var/mail/HALT.*
 
-# Build artifacts (Phase I onward — qcow2/raw images are large + reproducible)
+# Harvested build artifacts and reports
+var/artifacts/
+*.size-report.txt
+
+# Build artifacts (large and reproducible)
 build/
 *.qcow2
 *.raw
 *.vmdk
 
+# Temporary VM/build images
+*.img
+*.iso
+
 # Claude Code agent worktrees and session data
 .claude/
+
+# Jujutsu metadata for colocated repositories
+.jj/
 
 # Editor / OS detritus
 .DS_Store
 *.swp
 *.swo
 *~
-
-# jj-internal: do not check the .jj/working-copy contents into git via colocated repo
-# (jj manages this on its own; this is a defense-in-depth comment)

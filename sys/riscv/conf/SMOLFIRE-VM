@@ -1,0 +1,120 @@
+# SMOLFIRE-VM — FreeBSD 15 riscv64 minimal QEMU-only kernel
+#
+# *** EXPERIMENTAL — UNTESTED. NO HARDWARE CLAIMS. ***
+# riscv64 is a FreeBSD Tier 2 platform (15.0 hardware notes); QEMU `virt`
+# is the primary well-supported target and the ONLY machine this kernel
+# targets (rv64gc baseline — no RVA23 requirement). This config has no CI
+# boot gate and has never been booted; treat every line as unverified
+# until a first build+boot. Background: docs/RESEARCH-2026-07.md §3.
+#
+# Target: headless QEMU virt VM, virtio block + net (mmio and pci
+# transports), UFS root, ns16550 UART console, no physical hardware.
+# QEMU: qemu-system-riscv64 -machine virt (OpenSBI + u-boot/EDK2 EFI)
+#
+# DO NOT add physical device support here. This kernel is for QEMU only.
+#
+# Format note — why this file is standalone: amd64 SMOLFIRE-VM does
+# `include MINIMAL` and arm64 does `include std.arm64/std.virt`, then both
+# trim with nodevice. The riscv tree in releng/15.0 has no MINIMAL or
+# std.virt layer — GENERIC is monolithic plus per-SoC std.* includes
+# (std.allwinner/cvitek/eswin/sifive/starfive). So instead of including a
+# base and stripping, this file lists only the QEMU-relevant subset of
+# sys/riscv/conf/GENERIC (releng/15.0). Everything GENERIC carries for
+# physical boards — SoC std.* includes, USB, CAM/SCSI/AHCI, SD/MMC, SPI,
+# I2C, GPIO, video/keyboard, xae/xdma — is simply never listed, and there
+# is no wifi/sound/bluetooth on riscv GENERIC to begin with.
+#
+# Auto-included by config(8) from sys/riscv/conf/DEFAULTS (real src tree):
+#   machine riscv riscv64; device mem; GEOM_PART_BSD/MBR/GPT; CC_CUBIC;
+#   INTRNG; NETLINK  — do not repeat them here.
+# Compiled unconditionally via sys/conf/files.riscv ("standard"):
+#   intc, PLIC, APLIC, timer, SBI. The CLINT itself is driven by the
+#   OpenSBI firmware (timer/IPI reach the kernel through SBI calls);
+#   FreeBSD has no in-kernel clint device and needs none on QEMU virt.
+
+cpu		RISCV
+ident		SMOLFIRE-VM
+
+# Scheduling / kernel basics (GENERIC subset)
+options 	SCHED_ULE		# ULE scheduler
+options 	PREEMPTION		# Enable kernel thread preemption
+options 	SMP			# Symmetric multiprocessing
+options 	KTRACE			# ktrace(1) support
+options 	STACK			# stack(9) support
+options 	SYSVSHM			# SYSV-style shared memory
+options 	SYSVMSG			# SYSV-style message queues
+options 	SYSVSEM			# SYSV-style semaphores
+options 	_KPOSIX_PRIORITY_SCHEDULING # POSIX P1003_1B real-time extensions
+options 	PRINTF_BUFR_SIZE=128	# Prevent printf output being interspersed
+options 	CAPABILITY_MODE		# Capsicum capability mode
+options 	CAPABILITIES		# Capsicum capabilities
+
+# Networking
+options 	INET			# InterNETworking
+options 	INET6			# IPv6 communications protocols
+options 	TCP_HHOOK		# hhook(9) framework for TCP
+
+# Filesystems — UFS root, plus what the release image layout needs
+options 	FFS			# Berkeley Fast Filesystem (UFS root)
+options 	SOFTUPDATES		# Enable FFS soft updates support
+options 	UFS_ACL			# Support for access control lists
+options 	UFS_DIRHASH		# Improve big-directory performance
+options 	MSDOSFS			# FAT — vmimage.subr fstab mounts the ESP
+					# at /boot/efi; without it mount -a fails
+					# and rc drops to single-user (same
+					# lesson as amd64, UR-BSD-VERIFY Finding 2)
+options 	TMPFS			# in-memory filesystem (GENERIC has it
+					# compiled in; module kept too for parity)
+options 	PSEUDOFS		# pseudo-filesystem framework —
+options 	PROCFS			# compiled in (unlike amd64/arm64 where the
+					# base layers ship it): the MODULES_OVERRIDE
+					# procfs.ko would lack its pseudofs dependency
+options 	GEOM_LABEL		# /dev/gpt/* label aliases used by the
+					# release image fstab (GPT scheme itself
+					# comes from DEFAULTS)
+
+# compat shims: keep COMPAT_FREEBSD12 onward (needed for pkg(8) ABI);
+# riscv support begins at FreeBSD 12, so nothing older exists to drop.
+options 	COMPAT_FREEBSD12
+options 	COMPAT_FREEBSD13
+options 	COMPAT_FREEBSD14
+
+# Device tree — QEMU virt describes hardware via FDT (ACPI is not the
+# riscv enumeration path on FreeBSD 15)
+options 	FDT
+
+# Serial console — QEMU virt exposes an ns16550-compatible UART
+device		uart			# Generic UART driver
+device		uart_ns8250		# ns8250/ns16550-type UART driver
+
+# VirtIO — the only storage/network path this kernel supports.
+# QEMU virt offers both transports; keep both (mmio slots + pci ECAM).
+device		virtio			# Generic VirtIO bus (required)
+device		virtio_pci		# VirtIO PCI transport
+device		virtio_mmio		# VirtIO MMIO transport
+device		virtio_blk		# VirtIO block device (vtbd — root disk)
+device		vtnet			# VirtIO network device
+device		virtio_random		# VirtIO entropy device
+device		pci			# PCI bus (ECAM on QEMU virt)
+
+# Pseudo devices
+device		loop			# Network loopback
+device		ether			# Ethernet support
+device		bpf			# Berkeley packet filter (dhclient needs it)
+device		md			# Memory "disks"
+device		firmware		# firmware(9) assist for modules
+
+# Reduce debug overhead in production image (GENERIC ships DEBUG=-g,
+# KDB, WITNESS-class checkers on -CURRENT; none of that here — same
+# trade as amd64/arm64 SMOLFIRE-VM)
+makeoptions	DEBUG=			# no debug symbols in kernel binary
+
+# ur-bsd: build only the modules the VM can actually load. Everything
+# QEMU virt needs (virtio, vtnet, uart) is compiled in above; the default
+# full module set adds hundreds of MiB for hardware this kernel can
+# never see. Same list as amd64/arm64 SMOLFIRE-VM.
+makeoptions	MODULES_OVERRIDE="tmpfs nullfs fdescfs procfs"
+
+# NOTE: no `device tpm` here (amd64/arm64 carry it): the TPM story on
+# QEMU riscv virt is unexplored and this target is experimental —
+# add it back deliberately once the base image boots.

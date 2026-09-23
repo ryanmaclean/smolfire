@@ -128,6 +128,53 @@ sudo nu bin/build-smolfire-vm.nu --arch amd64
 
 This sets `TARGET=amd64 TARGET_ARCH=amd64` for all make invocations.
 
+## riscv64 (experimental)
+
+> **EXPERIMENTAL — untested.** FreeBSD riscv64 is a **Tier 2** platform;
+> QEMU `virt` (plain rv64gc baseline) is the only supported-in-spirit
+> target. There is **no CI boot gate** for this arch yet (the hosted
+> workflow size-gates it only), it has never been built or booted here,
+> and **no real-hardware claims are made** — real-board support
+> (VisionFive 2, Star64, …) is partial/flaky upstream. Background:
+> `docs/RESEARCH-2026-07.md` §3.
+
+The pieces are `sys/riscv/conf/SMOLFIRE-VM` (standalone kernconf — the
+riscv tree has no MINIMAL/std.virt layer to include) and
+`release/tools/smolfire-qemu-riscv64.conf`. `bin/build-smolfire-vm.nu`
+accepts `--arch riscv64` (cross-build; it maps to `TARGET=riscv
+TARGET_ARCH=riscv64` and picks the riscv64 conf), and the hosted
+workflow's `arch=riscv64` dispatch choice goes through it — size gate
+only, no boot gate, and the whole leg is unexercised. The equivalent
+direct make invocation from a FreeBSD 15 host (kernconf and release
+conf installed into `/usr/src` as usual):
+
+```sh
+make -C /usr/src -j"$(sysctl -n hw.ncpu)" TARGET=riscv TARGET_ARCH=riscv64 buildworld
+make -C /usr/src TARGET=riscv TARGET_ARCH=riscv64 KERNCONF=SMOLFIRE-VM buildkernel
+make -C /usr/src/release cloudware-release \
+     TARGET=riscv TARGET_ARCH=riscv64 KERNCONF=SMOLFIRE-VM \
+     WITH_CLOUDWARE=yes CLOUDWARE=smolfire \
+     SMOLFIRECONF=/usr/src/release/tools/smolfire-qemu-riscv64.conf \
+     SMOLFIRE_FORMAT=qcow2 SMOLFIRE_FSLIST=ufs VMSIZE=2g
+```
+
+Boot under QEMU (`-machine virt` boots OpenSBI firmware, then an EFI
+loader — install the `u-boot-qemu-riscv64` port/package for `u-boot.bin`,
+or use an EDK2 riscv64 firmware build):
+
+```sh
+qemu-system-riscv64 -machine virt -cpu rv64 -smp 2 -m 512M \
+  -bios /usr/local/share/opensbi/lp64/generic/firmware/fw_jump.elf \
+  -kernel /usr/local/share/u-boot/u-boot-qemu-riscv64/u-boot.bin \
+  -drive file=smolfire.ufs.qcow2,format=qcow2,if=virtio \
+  -nic user,model=virtio-net-pci -display none -serial mon:stdio
+```
+
+Expect breakage on first run: the FIX-10 package list assumes the
+riscv64 pkgbase catalog carries the same names as amd64/aarch64
+(unverified), and the loader-console settings mirror arm64 (unverified).
+Record first-build findings in `docs/UR-BSD-VERIFY.md`.
+
 ## Testing the image
 
 After a successful build, run the acceptance suite:

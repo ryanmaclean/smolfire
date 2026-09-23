@@ -382,3 +382,76 @@ REVISED PLAN: a utilities file-cut is worth ~5–8 MiB raw (66.6 → ~59),
 not the projected 20–30 — diminishing returns; the full data is the
 round3-prep-data artifact. The next order of magnitude for tiny
 FreeBSD is SMOLFIRE (already shipped), not further full-image dieting.
+
+## Finding 5 — 15.1 pkgbase first-boot base auto-update: guard installed (2026-08-23)
+
+FreeBSD 15.1 pkgbase VM/cloud images auto-update base packages on first
+boot: "A firstboot package auto updater has been introduced for cloud
+images. On first boot, the base system packages are automatically
+updated to patch the system"
+(<https://www.freebsd.org/releases/15.1R/relnotes/>). We are on
+releng/15.0 (not yet affected), but the guard is installed NOW so a 15.1
+rebase cannot silently break image determinism or TPM PCR stability
+(issue #39 item 1; docs/RESEARCH-2026-07.md §2 flagged this).
+
+**Exact mechanism (verified against sources, not just relnotes):**
+
+- The updater is the rc.d script `firstboot_pkg_upgrade`, shipped by the
+  ports package `firstboot-pkg-upgrade` (`sysutils/firstboot-pkg-upgrade`,
+  `USE_RC_SUBR` → installs to `/usr/local/etc/rc.d/firstboot_pkg_upgrade`).
+  Source: `files/firstboot_pkg_upgrade.in` in freebsd-ports
+  (<https://github.com/freebsd/freebsd-ports/blob/main/sysutils/firstboot-pkg-upgrade/files/firstboot_pkg_upgrade.in>).
+- `KEYWORD: firstboot` — it runs only when the firstboot(7) `/firstboot`
+  sentinel exists; rcvar `firstboot_pkg_upgrade_enable` (default NO in
+  the script; cloud images set YES); repos limited via
+  `firstboot_pkg_upgrade_repos="FreeBSD-base"`. It runs
+  `pkg update` + `env AUTOCLEAN=ON IGNORE_OSVERSION=yes pkg upgrade -r
+  FreeBSD-base -y`, and on -BETA/-RC/-RELEASE touches
+  `/firstboot-reboot` so rc reboots the instance after updating.
+- Stock cloud confs (`release/tools/ec2-base.conf`, `ec2-small.conf`,
+  `azure.conf`, `gce.conf`, `basic-cloudinit.conf` on freebsd-src main)
+  enable it by adding `firstboot_pkg_upgrade` to `VM_RC_LIST` and
+  appending `firstboot_pkg_upgrade_repos="FreeBSD-base"` to rc.conf.
+  15.1 relnotes also note the related ports updater `firstboot_pkgs` is
+  now opt-in on EC2 small (`firstboot_pkgs_enable="YES"` required).
+
+**Guard applied (both `release/tools/smolfire-qemu.conf` and
+`release/tools/smolfire-qemu-aarch64.conf`, in `vm_extra_pre_umount`):**
+
+1. rc.conf gets explicit `firstboot_pkg_upgrade_enable="NO"` and
+   `firstboot_pkgs_enable="NO"` — **this is the load-bearing guard.**
+   These lines are appended after `vm_extra_enable_services` has already
+   written its YES lines (mk-vmimage.sh step order: enable_services →
+   pre_umount), so the NO wins by rc.conf last-write ordering.
+2. `/firstboot` and `/firstboot-reboot` sentinels removed — defensive
+   only: verified on releng/15.0 that `vmimage.subr` does
+   `touch ${DESTDIR}/firstboot` inside `vm_create_disk`, AFTER
+   `vm_extra_pre_umount` returns (same late-write class as the msdosfs
+   fstab line in Finding 2). The shipped image WILL contain /firstboot;
+   the knob, not the sentinel rm, is what disables the updater. This
+   also deliberately keeps other firstboot-keyword scripts (e.g.
+   growfs) working.
+3. `rm -f` of the rc.d script itself from both plausible homes
+   (`/usr/local/etc/rc.d/firstboot_pkg_upgrade`, plus `firstboot_pkgs`
+   and a hypothetical base `/etc/rc.d/firstboot_pkg_upgrade`),
+   `2>/dev/null || true` — today these paths don't exist in our images
+   (our `VM_RC_LIST="sshd"` and FIX-10 package list never install the
+   port), so this is belt+braces against a 15.1 vmimage.subr default.
+
+**Re-verify at 15.1 rebase time:**
+
+- Whether 15.1's `vmimage.subr` installs `firstboot-pkg-upgrade`
+  unconditionally (via `VM_EXTRA_PACKAGES` defaults or a new hook) or
+  only via the per-cloud confs — if a new default hook exists, confirm
+  our conf still suppresses it.
+- Whether the script moved from ports into base pkgbase packaging (the
+  relnotes wording "for cloud images" suggests ports; re-grep
+  `libexec/rc/rc.d` and `release/tools` on releng/15.1 — as of this
+  writing releng/15.1 raw fetches for a base copy 404).
+- Whether `vm_extra_enable_services` / `VM_RC_LIST` semantics changed,
+  which would invalidate the rc.conf ordering argument in (1).
+- Boot-gate check: serial log must NOT show `pkg update`/`pkg upgrade`
+  or a firstboot-triggered second reboot; `pkg info` package versions in
+  the booted guest must equal the build-time set (determinism check),
+  and TPM T1-T6 PCR values must be stable across two boots of the same
+  image.

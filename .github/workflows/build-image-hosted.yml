@@ -32,7 +32,7 @@ on:
       arch:
         description: "Target architecture"
         type: choice
-        options: [amd64, aarch64]
+        options: [amd64, aarch64, riscv64]
         default: amd64
       vmsize:
         description: "Image VMSIZE (sparse)"

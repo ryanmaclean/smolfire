@@ -194,11 +194,16 @@ export def main [
     # policy (tpm2_createak(1): "-C: The endorsement key object"), so its
     # parent MUST be a tpm2_createek EK: a generic tpm2_createprimary parent
     # makes createak fail with 0x99D "a policy check failed" (tpm2-tools#3475).
-    # ECC is kept to match the verifier's ECC quote path.
+    # Use the DEFAULT (RSA) EK template: the -G ecc EK template path fails on
+    # cert-less swtpm with 0x903 "out of memory for session contexts" in
+    # Esys_StartAuthSession + "Invalid EK authorization" (A5 runs 35908434059,
+    # 35909133534 — deterministic across flush/no-flush, so not stale T5
+    # sessions). EK alg does NOT constrain AK alg: the AK below stays ECC,
+    # so the verifier's ECC quote path (tpm2_checkquote over ak.pub) is
+    # untouched.
     run-tpm2 "guest_attest_createprimary" [
         "tpm2_createek"
         "-c" $primary_ctx
-        "-G" "ecc"
     ]
 
     # Step 2: Create Attestation Key under the primary key

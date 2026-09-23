@@ -188,6 +188,13 @@ jobs:
           # so terminal echo can never match FIRE_42 — only real sh output can.
           # Gate order: rc emits the net marker BEFORE SMOLFIRE_READY; the
           # token is per-run random, so a pass cannot be faked by echo.
+          cleanup_fc() {
+            if [ -f "$WORK/firecracker.pid" ]; then
+              kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
+              rm -f "$WORK/firecracker.pid"
+            fi
+          }
+          trap cleanup_fc EXIT
           EXPECT_RC=0
           expect -c '
             set timeout 30
@@ -226,7 +233,6 @@ jobs:
               timeout   { puts "\nVERDICT=fail (no READY within 30s)"; exit 1 }
               eof       { puts "\nVERDICT=fail (firecracker exited)"; exit 2 }
             }' 2>&1 | tee "$WORK/smolfire-gate.log" || EXPECT_RC=$?
-          [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
           {
             echo "### SMOLFIRE microVM size report"
             echo '```'
@@ -234,6 +240,7 @@ jobs:
               "$WORK/smolfire-build-vm.log" "$WORK/smolfire-gate.log" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          cleanup_fc
           [ "$EXPECT_RC" -eq 0 ] || exit "$EXPECT_RC"
 
       - name: Boot gate — QEMU microvm (informational)

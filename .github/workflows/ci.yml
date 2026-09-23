@@ -77,6 +77,9 @@ jobs:
       - name: sizereport parser tests
         run: nu tests/sizereport-test.nu
 
+      - name: pkgbase-watch parser tests (fixtures, offline)
+        run: nu tests/pkgbase-watch-test.nu
+
       - name: smolfire rootfs assembly test
         run: nu tests/smolfire-rootfs-test.nu
 

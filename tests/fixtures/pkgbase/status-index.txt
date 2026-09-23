@@ -1,0 +1,51 @@
+<div class="sectionbody">
+<div class="ulist">
+<ul>
+<li>
+<p><a href="report-2026-04-2026-06/">April, 2026 — June, 2026</a></p>
+</li>
+<li>
+<p><a href="report-2026-01-2026-03/">January, 2026 — March, 2026</a></p>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_2025">2025</h2>
+<div class="sectionbody">
+<div class="ulist">
+<ul>
+<li>
+<p><a href="report-2025-10-2025-12/">October, 2025 — December, 2025</a></p>
+</li>
+<li>
+<p><a href="report-2025-07-2025-09/">July, 2025 — September, 2025</a></p>
+</li>
+<li>
+<p><a href="report-2025-04-2025-06/">April, 2025 — June, 2025</a></p>
+</li>
+<li>
+<p><a href="report-2025-01-2025-03/">January, 2025 — March, 2025</a></p>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_2024">2024</h2>
+<div class="sectionbody">
+<div class="ulist">
+<ul>
+<li>
+<p><a href="report-2024-10-2024-12/">October, 2024 — December, 2024</a></p>
+</li>
+<li>
+<p><a href="report-2024-07-2024-09/">July, 2024 — September, 2024</a></p>
+</li>
+<li>
+<p><a href="report-2024-04-2024-06/">April, 2024 — June, 2024</a></p>
+</li>
+<li>
+<p><a href="report-2024-01-2024-03/">January, 2024 — March, 2024</a></p>
+</li>

@@ -1,0 +1,236 @@
+GENERIC_KERNCONF_SUFX_powerpc64=	64
+GENERIC_KERNCONF_SUFX_powerpc64le=	64LE
+GENERIC_KERNCONF?=	${GENERIC_KERNCONF_${TARGET_ARCH}:UGENERIC${GENERIC_KERNCONF_SUFX_${TARGET_ARCH}}}
+INSTKERNNAME?=	kernel
+
+KERNSRCDIR?=	${.CURDIR}/sys
+KRNLCONFDIR=	${KERNSRCDIR}/${TARGET}/conf
+KRNLOBJDIR=	${OBJTOP}${KERNSRCDIR:C,^${.CURDIR},,}
+KERNCONFDIR?=	${KRNLCONFDIR}
+
+.for _k in ${GENERIC_KERNCONF} MINIMAL${GENERIC_KERNCONF_SUFX_${TARGET_ARCH}} ${GENERIC_KERNCONF}-MMCCAM
+.if exists(${KERNCONFDIR}/${_k})
+PKG_KERNCONF+=	${_k}
+.for _dbg in NODEBUG DEBUG
+.if exists(${KERNCONFDIR}/${_k}-${_dbg})
+PKG_KERNCONF+= ${_k}-${_dbg}
+.endif
+.endfor
+.endif
+.endfor
+
+.if defined(PACKAGE_BUILDING)
+KERNCONF?=	${PKG_KERNCONF}
+.else
+KERNCONF?=	${GENERIC_KERNCONF}
+.endif
+
+BUILDKERNELS=
+INSTALLKERNEL=
+.for _kernel in ${KERNCONF}
+.if !defined(_MKSHOWCONFIG) && exists(${KERNCONFDIR}/${_kernel})
+BUILDKERNELS+=	${_kernel}
+.if empty(INSTALLKERNEL) && !defined(NO_INSTALLKERNEL)
+INSTALLKERNEL= ${_kernel}
+.endif
+.else
+.if make(buildkernel)
+.error Missing KERNCONF ${KERNCONFDIR}/${_kernel}
+.endif
+.endif
+#
+# Skip the check if DESTDIR is defined on the assumption the user knows what
+# they're doing.  This means the check can be disabled for the running system
+# using DESTDIR=/.
+#
+# People who want to disable this check permanently may set two variables in
+# /etc/make.conf, ALLOW_PKGBASE_INSTALLKERNEL and ALLOW_PKGBASE_INSTALLWORLD,
+# to disable these checks.  That doesn't stop this from breaking your system,
+# it just stops make from warning about it.
+#
+.if !make(distributeworld) && !defined(DESTDIR)
+
+. if !defined(ALLOW_PKGBASE_INSTALLKERNEL) && exists(${LOCALBASE}/sbin/pkg-static)
+# For installkernel, we check if this specific kernel was installed by pkg.
+# This means people can continue to use installkernel for non-packaged
+# kernels, which is useful for development.
+
+_installcheck_kernel: __installcheck_kernel_pkgbase
+__installcheck_kernel_pkgbase: .PHONY
+.  for _kernel in ${NO_INSTALLKERNEL:D:U${INSTKERNNAME}} \
+		${INSTALLEXTRAKERNELS:S/^/${INSTKERNNAME}./}
+	@if ${LOCALBASE}/sbin/pkg-static which /boot/${_kernel}/kernel \
+	    >/dev/null 2>&1; then \
+		echo >&2 "ERROR: The kernel at /boot/${_kernel} was installed from packages." ; \
+		echo >&2 "       A packaged kernel should never be updated using installkernel;" ; \
+		echo >&2 "       this will cause the package database to become out of sync with" ; \
+		echo >&2 "       the live system state.  Either uninstall the packaged kernel," ; \
+		echo >&2 "       or install this kernel to a different path using INSTKERNNAME." ; \
+		echo >&2 "" ; \
+		echo >&2 "       If you understand the risks and wish to proceed anyway, you may" ; \
+		echo >&2 "       set ALLOW_PKGBASE_INSTALLKERNEL=yes to override this safety check." ; \
+		echo >&2 "       After doing so, you should not use the pkg(8) utility until you" ; \
+		echo >&2 "       have resolved the inconsistency between the installed system and" ; \
+		echo >&2 "       the package database." ; \
+		false; \
+	fi
+.  endfor
+. endif	# !defined(ALLOW_PKGBASE_INSTALLKERNEL) && exists(pkg-static)
+PKG_REPO_SIGNING_KEY?=	# empty
+PKG_OUTPUT_DIR?=	${PKG_VERSION}
+PKG_ABI_FILE?=	${WSTAGEDIR}/usr/bin/uname
+.if make(create-*-packages*) || make(real-update-packages) || make(real-sign-packages)
+PKG_ABI!=	${PKG_CMD} -o ABI_FILE=${PKG_ABI_FILE} config ABI
+.endif
+
+
+PKGMAKEARGS+=	PKG_VERSION=${PKG_VERSION} \
+		NO_INSTALLEXTRAKERNELS=${NO_INSTALLEXTRAKERNELS}
+
+packages: .PHONY
+	${_+_}${MAKE} -C ${.CURDIR} ${PKGMAKEARGS} real-packages
+
+update-packages: .PHONY
+	${_+_}${MAKE} -C ${.CURDIR} ${PKGMAKEARGS} real-update-packages
+
+package-pkg: _pkgbootstrap _repodir .PHONY
+.if defined(INCLUDE_PKG_IN_PKGBASE_REPO)
+.if exists(${PORTSDIR})
+	rm -rf /tmp/ports.${TARGET} || :
+	env ${WMAKEENV} SRCDIR=${.CURDIR} PORTSDIR=${PORTSDIR} REVISION=${_REVISION} \
+		PKG_CMD=${PKG_CMD} PKG_VERSION=${PKG_VERSION} REPODIR=${REPODIR} \
+		WSTAGEDIR=${WSTAGEDIR} \
+		OSVERSION="${SRCRELDATE}" LOCALBASE=${LOCALBASE} \
+		sh ${.CURDIR}/release/scripts/make-pkg-package.sh
+.endif
+.endif
+
+real-packages:	stage-packages create-packages sign-packages .PHONY
+
+real-update-packages: stage-packages .PHONY
+	${_+_}${MAKE} -C ${.CURDIR} PKG_VERSION=${PKG_VERSION} create-packages
+		PATH="${TMPPATH}" ${MAKE} -f Makefile.inc1 \
+			DESTDIR=${WSTAGEDIR} \
+			PKG_VERSION=${PKG_VERSION} create-sets-packages
+
+create-packages-kernel:	_pkgbootstrap _repodir .PHONY
+	${_+_}@cd ${.CURDIR}; \
+		PATH="${TMPPATH}" ${MAKE} -f Makefile.inc1 \
+			DESTDIR=${KSTAGEDIR} \
+			PKG_VERSION=${PKG_VERSION} DISTDIR=kernel \
+			SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+			create-kernel-packages
+
+_default_flavor=	-default
+.if make(*package*) && exists(${KSTAGEDIR}/kernel.meta)
+. if ${MK_DEBUG_FILES} != "no"
+_debug=-dbg
+. endif
+
+create-dtb-package:	.PHONY
+	@if [ -f ${KSTAGEDIR}/${DISTDIR}/dtb.plist ]; then \
+		flua ${SRCDIR}/release/packages/generate-ucl.lua \
+		PKGNAME "dtb" \
+		PKGGENNAME "dtb" \
+		VERSION "${PKG_VERSION}" \
+		PKG_NAME_PREFIX "${PKG_NAME_PREFIX}" \
+		PKG_MAINTAINER "${PKG_MAINTAINER}" \
+		PKG_WWW "${PKG_WWW}" \
+		UCLFILES "${SRCDIR}/release/packages/ucl" \
+		${SRCDIR}/release/packages/template.ucl \
+		${KSTAGEDIR}/${DISTDIR}/dtb.ucl ; \
+	awk -F\" ' \
+		/name/ { printf("===> Creating %s-", $$2); next } \
+		/version/ {print $$2; next } ' \
+		${KSTAGEDIR}/${DISTDIR}/dtb.ucl ; \
+	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
+		-o OSVERSION="${SRCRELDATE}" \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
+		-M ${KSTAGEDIR}/${DISTDIR}/dtb.ucl \
+		-p ${KSTAGEDIR}/${DISTDIR}/dtb.plist \
+		-r ${KSTAGEDIR}/${DISTDIR} \
+		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR} ; \
+	fi
+
+create-kernel-packages:	.PHONY create-kernel-flavored-packages create-dtb-package
+create-kernel-flavored-packages:	.PHONY
+.ORDER: create-kernel-flavored-packages create-dtb-package
+
+. for flavor in "" ${_debug}
+create-kernel-flavored-packages: create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}
+create-kernel-packages-flavor${flavor:C,^""$,${_default_flavor},}: _pkgbootstrap .PHONY
+	@cd ${KSTAGEDIR}/${DISTDIR} ; \
+	${METALOG_SORT_CMD} ${KSTAGEDIR}/kernel.meta | \
+	awk -f ${SRCDIR}/release/scripts/mtree-to-plist.awk \
+		-v kernel=yes -v _kernconf=${INSTALLKERNEL} ; \
+	flua ${SRCDIR}/release/packages/generate-ucl.lua \
+		PKGNAME "kernel-${INSTALLKERNEL:tl}${flavor}" \
+		PKGGENNAME "kernel" \
+		VERSION "${PKG_VERSION}" \
+		KERNELDIR "kernel" \
+		KERNEL_NAME "${INSTALLKERNEL}" \
+		KERNEL_FLAVOR "${flavor}" \
+		PKG_NAME_PREFIX "${PKG_NAME_PREFIX}" \
+		PKG_MAINTAINER "${PKG_MAINTAINER}" \
+		PKG_WWW "${PKG_WWW}" \
+		UCLFILES "${SRCDIR}/release/packages/ucl" \
+		${SRCDIR}/release/packages/template.ucl \
+		 ${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.ucl ; \
+	awk -F\" ' \
+		/name/ { printf("===> Creating %s-", $$2); next } \
+		/version/ {print $$2; next } ' \
+		${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.ucl ; \
+	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
+		-o OSVERSION="${SRCRELDATE}" \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
+		-M ${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.ucl \
+		-p ${KSTAGEDIR}/${DISTDIR}/kernel.${INSTALLKERNEL}${flavor}.plist \
+		-r ${KSTAGEDIR}/${DISTDIR} \
+		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}
+. endfor
+.else
+create-kernel-packages: .PHONY
+
+.endif
+.if !empty(INSTALLEXTRAKERNELS)
+.for _kernel in ${INSTALLEXTRAKERNELS}
+.  if exists(${KSTAGEDIR}/kernel.${_kernel}.meta)
+.   if ${MK_DEBUG_FILES} != "no"
+_debug=-dbg
+.   endif
+.   for flavor in "" ${_debug}
+create-kernel-packages: create-kernel-packages-extra-flavor${flavor:C,^""$,${_default_flavor},}-${_kernel}
+create-kernel-packages-extra-flavor${flavor:C,^""$,${_default_flavor},}-${_kernel}: _pkgbootstrap .PHONY
+	@cd ${KSTAGEDIR}/kernel.${_kernel} ; \
+	${METALOG_SORT_CMD} ${KSTAGEDIR}/kernel.${_kernel}.meta | \
+	awk -f ${SRCDIR}/release/scripts/mtree-to-plist.awk \
+		-v kernel=yes -v _kernconf=${_kernel} ; \
+	flua ${SRCDIR}/release/packages/generate-ucl.lua \
+		PKGNAME "kernel-${_kernel:tl}${flavor}" \
+		PKGGENNAME "kernel" \
+		FORCEINCLUDE "kernel${flavor}" \
+		VERSION "${PKG_VERSION}" \
+		KERNEL_NAME "${_kernel:tl}" \
+		KERNEL_FLAVOR "${flavor}" \
+		KERNELDIR "kernel.${_kernel}" \
+		PKG_NAME_PREFIX "${PKG_NAME_PREFIX}" \
+		PKG_MAINTAINER "${PKG_MAINTAINER}" \
+		PKG_WWW "${PKG_WWW}" \
+		UCLFILES "${SRCDIR}/release/packages/ucl" \
+		${SRCDIR}/release/packages/template.ucl \
+		${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.ucl ; \
+	awk -F\" ' \
+		/name/ { printf("===> Creating %s-", $$2); next } \
+		/version/ {print $$2; next } ' \
+		${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.ucl ; \
+	${PKG_CMD} -o ABI=${PKG_ABI} -o ALLOW_BASE_SHLIBS=yes \
+		-o OSVERSION="${SRCRELDATE}" \
+		create -f ${PKG_FORMAT} ${PKG_CLEVEL} -T${PKG_CTHREADS} \
+		-M ${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.ucl \
+		-p ${KSTAGEDIR}/kernel.${_kernel}/kernel.${_kernel}${flavor}.plist \
+		-r ${KSTAGEDIR}/kernel.${_kernel} \
+		-o ${REPODIR}/${PKG_ABI}/${PKG_OUTPUT_DIR}
+.   endfor
+.  endif
+. endfor
+.endif

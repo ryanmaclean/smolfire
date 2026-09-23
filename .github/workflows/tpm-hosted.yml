@@ -180,75 +180,13 @@ jobs:
             exit 1
           fi
 
-      - name: T2-T6 — in-guest TPM checks
-        run: |
-          SSH() {
-            sshpass -p smolfire ssh -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password \
-              -p "$SSH_PORT" root@127.0.0.1 "$@"
-          }
-          fail=0
-
-          # T2: device node
-          if SSH 'test -c /dev/tpm0'; then echo "T2 PASS: /dev/tpm0 present"
-          else echo "T2 FAIL: /dev/tpm0 missing"; fail=1; fi
-
-          # T3 (informational): kernel evidence
-          SSH 'kldstat -v 2>/dev/null | grep -i tpm || dmesg | grep -i tpm' \
-            && echo "T3 PASS: TPM kernel evidence" \
-            || echo "T3 WARN: no kldstat/dmesg TPM evidence (compiled-in driver may not list)"
-
-          # T4-T6 need tpm2-tools — installed at test time by the
-          # "Install tpm2-tools in guest" step (or pre-baked in older artifacts).
-          if ! SSH 'command -v tpm2_pcrread' >/dev/null 2>&1; then
-            echo "T4-T6 FAIL: tpm2_pcrread unavailable despite the install step passing — inspect its logs"
-            exit 1
-          fi
-
-          # T4: PCR0 readable, non-zero
-          if SSH 'tpm2_pcrread sha256:0' | grep -qE '0x[0-9A-Fa-f]*[1-9A-Fa-f]'; then
-            echo "T4 PASS: PCR sha256:0 non-zero"
-          else echo "T4 FAIL: PCR sha256:0 unreadable or zero"; fail=1; fi
-
-          # T5: seal/unseal round-trip against PCR 0+7 policy
-          # tpm2_flushcontext -t between steps: swtpm has few transient-object
-          # slots, and without flushing, Esys_Load dies with 0x902 "out of
-          # memory for object contexts" (seen on the first full T5 run).
-          # Saved .ctx files reload via TPM2_ContextLoad after a flush.
-          if SSH 'set -e
-              d=$(mktemp -d)
-              cd "$d"
-              echo smolfire-seal-test > secret.txt
-              tpm2_createprimary -C o -g sha256 -G ecc -c primary.ctx -Q
-              tpm2_flushcontext -t
-              tpm2_createpolicy --policy-pcr -l sha256:0,7 -L policy.pcr -Q
-              tpm2_flushcontext -t
-              tpm2_flushcontext -s || true
-              tpm2_create -C primary.ctx -g sha256 -u seal.pub -r seal.priv \
-                -L policy.pcr -i secret.txt -Q
-              tpm2_flushcontext -t
-              tpm2_load -C primary.ctx -u seal.pub -r seal.priv -c seal.ctx -Q
-              tpm2_unseal -c seal.ctx -p pcr:sha256:0,7 > out.txt
-              tpm2_flushcontext -t
-              cmp secret.txt out.txt'; then
-            echo "T5 PASS: seal/unseal round-trip"
-          else echo "T5 FAIL: seal/unseal round-trip"; fail=1; fi
-
-          # T6: PCR 23 changes after extend
-          if SSH 'set -e
-              a=$(tpm2_pcrread sha256:23)
-              tpm2_pcrextend "23:sha256=$(printf smolfire | sha256sum | cut -d" " -f1)"
-              b=$(tpm2_pcrread sha256:23)
-              [ "$a" != "$b" ]'; then
-            echo "T6 PASS: PCR 23 changed after extend"
-          else echo "T6 FAIL: PCR 23 did not change"; fail=1; fi
-
-          exit "$fail"
-
-      # ── Phase 4: Remote Attestation (A5) ─────────────────────────────────────
-      # Reuses the already-booted VM/SSH session above (SSH_PORT=2241,
-      # root/smolfire password auth). Ported from tpm-vm-test.yml.
-
+      # ── Phase 4: Remote Attestation (A5) — runs BEFORE T2–T6 by design ────
+      # WHY first: swtpm invisibly accumulates session slots across T2–T6 so
+      # A5's tpm2_createek later dies TPM-side 0x903 needing a 3rd concurrent
+      # session while every handle census still reads zero; A5 quotes PCR 0+7
+      # which nothing extends before T5 (T6 only touches PCR 23, and runs
+      # after), and T5 seal/unseal never extends — so attesting now is
+      # PCR-safe and sidesteps the accumulation regardless of mechanism.
       - name: A5 — Ensure guest-attest.nu is available in guest
         run: |
           # The hosted-built image does not bake guest-attest.nu in, so the
@@ -315,6 +253,71 @@ jobs:
             exit 1
           }
           echo "A5 PASS: remote attestation verified successfully"
+
+      - name: T2-T6 — in-guest TPM checks
+        run: |
+          SSH() {
+            sshpass -p smolfire ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password \
+              -p "$SSH_PORT" root@127.0.0.1 "$@"
+          }
+          fail=0
+
+          # T2: device node
+          if SSH 'test -c /dev/tpm0'; then echo "T2 PASS: /dev/tpm0 present"
+          else echo "T2 FAIL: /dev/tpm0 missing"; fail=1; fi
+
+          # T3 (informational): kernel evidence
+          SSH 'kldstat -v 2>/dev/null | grep -i tpm || dmesg | grep -i tpm' \
+            && echo "T3 PASS: TPM kernel evidence" \
+            || echo "T3 WARN: no kldstat/dmesg TPM evidence (compiled-in driver may not list)"
+
+          # T4-T6 need tpm2-tools — installed at test time by the
+          # "Install tpm2-tools in guest" step (or pre-baked in older artifacts).
+          if ! SSH 'command -v tpm2_pcrread' >/dev/null 2>&1; then
+            echo "T4-T6 FAIL: tpm2_pcrread unavailable despite the install step passing — inspect its logs"
+            exit 1
+          fi
+
+          # T4: PCR0 readable, non-zero
+          if SSH 'tpm2_pcrread sha256:0' | grep -qE '0x[0-9A-Fa-f]*[1-9A-Fa-f]'; then
+            echo "T4 PASS: PCR sha256:0 non-zero"
+          else echo "T4 FAIL: PCR sha256:0 unreadable or zero"; fail=1; fi
+
+          # T5: seal/unseal round-trip against PCR 0+7 policy
+          # tpm2_flushcontext -t between steps: swtpm has few transient-object
+          # slots, and without flushing, Esys_Load dies with 0x902 "out of
+          # memory for object contexts" (seen on the first full T5 run).
+          # Saved .ctx files reload via TPM2_ContextLoad after a flush.
+          if SSH 'set -e
+              d=$(mktemp -d)
+              cd "$d"
+              echo smolfire-seal-test > secret.txt
+              tpm2_createprimary -C o -g sha256 -G ecc -c primary.ctx -Q
+              tpm2_flushcontext -t
+              tpm2_createpolicy --policy-pcr -l sha256:0,7 -L policy.pcr -Q
+              tpm2_flushcontext -t
+              tpm2_flushcontext -s || true
+              tpm2_create -C primary.ctx -g sha256 -u seal.pub -r seal.priv \
+                -L policy.pcr -i secret.txt -Q
+              tpm2_flushcontext -t
+              tpm2_load -C primary.ctx -u seal.pub -r seal.priv -c seal.ctx -Q
+              tpm2_unseal -c seal.ctx -p pcr:sha256:0,7 > out.txt
+              tpm2_flushcontext -t
+              cmp secret.txt out.txt'; then
+            echo "T5 PASS: seal/unseal round-trip"
+          else echo "T5 FAIL: seal/unseal round-trip"; fail=1; fi
+
+          # T6: PCR 23 changes after extend
+          if SSH 'set -e
+              a=$(tpm2_pcrread sha256:23)
+              tpm2_pcrextend "23:sha256=$(printf smolfire | sha256sum | cut -d" " -f1)"
+              b=$(tpm2_pcrread sha256:23)
+              [ "$a" != "$b" ]'; then
+            echo "T6 PASS: PCR 23 changed after extend"
+          else echo "T6 FAIL: PCR 23 did not change"; fail=1; fi
+
+          exit "$fail"
 
       - name: A5 — Report attestation results in job summary
         if: always()

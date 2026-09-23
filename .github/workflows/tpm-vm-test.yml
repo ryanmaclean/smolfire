@@ -157,24 +157,13 @@ jobs:
           tail -30 /tmp/smolfire-qemu-ci.log || true
           exit 1
 
-      - name: Run T1-T6 TPM acceptance suite
-        run: |
-          nu tests/bhyve-tpm-pcr-verify.nu \
-            --host 127.0.0.1 \
-            --port "$SSH_PORT" \
-            --password "" \
-            2>&1 | tee /tmp/smolfire-t1t6-ci.toml
-
-      - name: Report T1-T6 results in job summary
-        if: always()
-        run: |
-          echo "## TPM T1-T6 Results" >> "$GITHUB_STEP_SUMMARY"
-          echo '```toml' >> "$GITHUB_STEP_SUMMARY"
-          cat /tmp/smolfire-t1t6-ci.toml >> "$GITHUB_STEP_SUMMARY" || echo "(no results file)" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      # ── Phase 4: Remote Attestation (A5) ─────────────────────────────────────
-
+      # ── Phase 4: Remote Attestation (A5) — runs BEFORE T1–T6 by design ────
+      # WHY first: swtpm invisibly accumulates session slots across the suite
+      # so A5's tpm2_createek later dies TPM-side 0x903 needing a 3rd
+      # concurrent session while every handle census still reads zero; A5
+      # quotes PCR 0+7 which nothing extends before T5 (T6 only touches PCR
+      # 23, and runs after), and T5 seal/unseal never extends — so attesting
+      # now is PCR-safe and sidesteps the accumulation regardless of mechanism.
       - name: A5 — Ensure tpm2-tools is installed in guest
         run: |
           # D-02 retired: tpm2-tools is no longer baked into the image.
@@ -262,6 +251,22 @@ jobs:
             exit 1
           }
           echo "A5 PASS: remote attestation verified successfully"
+
+      - name: Run T1-T6 TPM acceptance suite
+        run: |
+          nu tests/bhyve-tpm-pcr-verify.nu \
+            --host 127.0.0.1 \
+            --port "$SSH_PORT" \
+            --password "" \
+            2>&1 | tee /tmp/smolfire-t1t6-ci.toml
+
+      - name: Report T1-T6 results in job summary
+        if: always()
+        run: |
+          echo "## TPM T1-T6 Results" >> "$GITHUB_STEP_SUMMARY"
+          echo '```toml' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/smolfire-t1t6-ci.toml >> "$GITHUB_STEP_SUMMARY" || echo "(no results file)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: A5 — Report attestation results in job summary
         if: always()

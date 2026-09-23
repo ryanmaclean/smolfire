@@ -226,7 +226,7 @@ print "  PASS"
 # ── Test 4: unsupported lifecycle edges fail fast ──────────────────────────────
 print "test 4: rejects unsupported lifecycle edges instead of inventing lineage state"
 
-let bad = (run-export [{
+let bad_doc = {
     schema_version: "v1"
     event_time: "2026-09-23T09:19:00Z"
     job: {
@@ -239,7 +239,17 @@ let bad = (run-export [{
         state_to: "running"
         attempt: 1
     }
-}])
+}
+
+let lib_err = (try {
+    project-record $bad_doc
+    null
+} catch {|err|
+    $err.msg
+})
+assert equal $lib_err "unsupported BOP lifecycle edge 'queued->running'" "library helper error"
+
+let bad = (run-export [$bad_doc])
 if $bad.exit_code == 0 { fail "unsupported lifecycle edge unexpectedly succeeded" }
 assert ($bad.stderr | str contains "unsupported BOP lifecycle edge 'queued->running'") "stderr names the unsupported edge"
 

@@ -6,7 +6,7 @@ tags: [freebsd, qcow2, tpm2-tools, vm-image, smolbsd, build]
 
 requires:
   - phase: 03-tpm-2-0-measured-boot
-    provides: "03-01: SMOLBSD kernel config with device tpm + smolbsd-qemu.conf with VM_EXTRA_PACKAGES=tpm2-tools deployed to <kvm-host> freebsd-src"
+    provides: "03-01: SMOLBSD kernel config with device tpm + smolfire-qemu.conf with VM_EXTRA_PACKAGES=tpm2-tools deployed to <kvm-host> freebsd-src"
 
 provides:
   - "smolbsd-amd64-tpm.qcow2 at /home/studio/smolbsd-ci/ on <kvm-host> — FreeBSD 15.1 amd64 image with KERNCONF=SMOLBSD (device tpm compiled in) and tpm2-tools installed"
@@ -35,13 +35,13 @@ key-files:
     - "/home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2.sha256 (<kvm-host>)"
     - "/home/studio/smolbsd-ci/BUILD-INFO.txt (<kvm-host>)"
   modified:
-    - "release/tools/smolbsd-qemu.conf — added chflags noschg before chown/chmod on var/empty"
+    - "release/tools/smolfire-qemu.conf — added chflags noschg before chown/chmod on var/empty"
 
 key-decisions:
   - "PATH B chosen: qemu-x86_64-static absent on <kvm-host> (confirmed in PREFLIGHT-NOTES), used FreeBSD 15.1-STABLE boot VM with 20GB scratch disk"
   - "SMOLBSD cloudware target requires explicit SMOLBSD_FORMAT=qcow2 SMOLBSD_FSLIST=ufs make vars (not a known cloudware type in Makefile.vm)"
   - "Image actual-size is 712 MiB, exceeding the 512 MiB plan limit — accepted deviation because tpm2-tools + 12 deps require ~200 MiB and the primary goal (T2-T6 tests) needs tpm2-tools pre-baked"
-  - "VMSIZE=4g used (as set in the patched smolbsd-qemu.conf on <kvm-host> from plan-01), not 2g as stated in plan interfaces section"
+  - "VMSIZE=4g used (as set in the patched smolfire-qemu.conf on <kvm-host> from plan-01), not 2g as stated in plan interfaces section"
 
 patterns-established:
   - "FreeBSD cloudware build with custom CLOUDWARE name: must define SMOLBSD_FORMAT and SMOLBSD_FSLIST on make command line"
@@ -65,7 +65,7 @@ completed: 2026-06-05
 - **Started:** 2026-06-05T05:36:02Z
 - **Completed:** 2026-06-05T07:12:00Z
 - **Tasks:** 3 (Task 1 build, Task 1b checkpoint auto-approved, Task 2 SHA256, Task 3 checkpoint auto-approved)
-- **Files modified:** 1 (release/tools/smolbsd-qemu.conf)
+- **Files modified:** 1 (release/tools/smolfire-qemu.conf)
 
 ## Accomplishments
 - smolBSD amd64 qcow2 image produced at /home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2 on <kvm-host> (712 MiB actual, 4.53 GiB virtual)
@@ -84,7 +84,7 @@ completed: 2026-06-05
 **Plan metadata:** (docs commit follows)
 
 ## Files Created/Modified
-- `release/tools/smolbsd-qemu.conf` — Added `chflags noschg` before chown/chmod on var/empty to fix schg-flag failure during cloudware build
+- `release/tools/smolfire-qemu.conf` — Added `chflags noschg` before chown/chmod on var/empty to fix schg-flag failure during cloudware build
 
 ## Decisions Made
 - PATH B used: qemu-x86_64-static absent on <kvm-host>, booted stock FreeBSD 15.1-STABLE VM with 20GB scratch disk
@@ -95,11 +95,11 @@ completed: 2026-06-05
 
 ### Auto-fixed Issues
 
-**1. [Rule 1 - Bug] smolbsd-qemu.conf vm_extra_pre_umount: chmod on var/empty fails with EPERM**
+**1. [Rule 1 - Bug] smolfire-qemu.conf vm_extra_pre_umount: chmod on var/empty fails with EPERM**
 - **Found during:** Task 1 (cloudware-release build, vm_extra_pre_umount stage)
 - **Issue:** FreeBSD installworld sets the system-immutable (`schg`) flag on `var/empty`. The `chmod 0755` call in `vm_extra_pre_umount` fails with Operation not permitted, causing `mk-vmimage.sh` (which runs with `set -e`) to abort before creating the disk image.
 - **Fix:** Added `chflags noschg "${DESTDIR}/var/empty" 2>/dev/null || true` before the existing `chown`/`chmod` lines.
-- **Files modified:** `release/tools/smolbsd-qemu.conf`
+- **Files modified:** `release/tools/smolfire-qemu.conf`
 - **Verification:** Build ran to completion, qcow2 artifact created.
 - **Committed in:** `8e21e4a` (Task 1 commit)
 

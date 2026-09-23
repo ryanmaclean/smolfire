@@ -33,9 +33,9 @@
         "bin/coord-run.sh",
         "tests/coord-tick-test.nu"
       ],
-      "passes": false,
-      "status": "blocked",
-      "evidence": "coord-tick-test.nu tests 7/15/16/16b/16c pass (HALT file -> halted; retry resume clears halted task; abort resume keeps task halted; retry resume clears per-task halt without global HALT; retry-as-role clears per-task halt); sh tests/run-all.sh -> \"results: 10 passed, 2 skipped, 0 failed\". NOT passing: a halt->auto-un-halt bug via X-Resume-Tag was reproduced on origin/main (cf9dda6e): the coordinator's own [HALT] message carries X-Resume-Tag: resume-<task>, and on the next tick process-resume-actions treats it as an operator resume (default action retry), deleting HALT.<task> and clearing halted_tasks with no operator input. Per-task isolation therefore does not hold past one tick; tracked as a follow-up (fix + two-tick regression test). None of tests 7/15/16/16b/16c exercises a second tick without an operator resume message."
+      "passes": true,
+      "status": "passing",
+      "evidence": "coord-tick-test 7/15/16/16b/16c/18 pass: HALT file -> halted; retry resume clears halted task; abort resume keeps task halted; retry resume clears per-task halt without global HALT; retry-as-role clears per-task halt; HALT message with X-Resume-Tag does NOT auto-resume on next tick (bug fixed in process-resume-actions: skip messages with Subject: [HALT])."
     },
     {
       "id": "S-003",

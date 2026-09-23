@@ -138,8 +138,8 @@ both. No Linux-rescue trampoline needed (per
 | `plans/tinyos/PHASE-1-FORGE-TINY-BASELINE-AARCH64.md` | new sibling | Per-arch tail: kernel config under `sys/arm64/conf/SMOLBSD`, qemu-system-aarch64 launch, EDK2 aarch64 firmware, dtb handling |
 | `plans/tinyos/PHASE-1-FORGE-TINY-BASELINE-AMD64.md` | rename of current plan's §§4-8 tail | Per-arch tail; existing kernel-config delta + qemu-system-x86_64 launch live here |
 | `plans/tinyos/PHASE-1-COMMON.md` (or §§1-3 left in BASELINE) | new (or in-place §§1-3) | Mission, package set, build-tool decision — arch-independent |
-| `release/tools/smolbsd-qemu-aarch64.conf` | new | aarch64 sibling to the existing `smolbsd-qemu.conf` (renamed `smolbsd-qemu-amd64.conf`) |
-| `release/tools/smolbsd-qemu-amd64.conf` | rename of `smolbsd-qemu.conf` | Per-arch release config |
+| `release/tools/smolfire-qemu-aarch64.conf` | new | aarch64 sibling to the existing `smolfire-qemu.conf` (renamed `smolfire-qemu-amd64.conf`) |
+| `release/tools/smolfire-qemu-amd64.conf` | rename of `smolfire-qemu.conf` | Per-arch release config |
 | `sys/arm64/conf/SMOLBSD` | new | aarch64 kernel config delta (parallel structure to amd64 SMOLBSD, but `nodevice` list differs — strip Pi/Apple/Raspberry physical drivers, keep `virtio*` + `vtnet`) |
 | (existing) `sys/amd64/conf/SMOLBSD` | unchanged | Already specified in current plan §4.3 |
 | `tests/time-to-ready-aarch64.exp` | new | qemu-system-aarch64 + HVF + edk2-aarch64 launch line |
@@ -151,7 +151,7 @@ both. No Linux-rescue trampoline needed (per
   (the device list to strip is similar — drop Pi-specific physical
   drivers like `bcm2835_*`, keep virtio set; smaller delta than amd64
   because arm64/conf/GENERIC is already leaner).
-- aarch64 release config sibling (smolbsd-qemu-aarch64.conf): **15 min**
+- aarch64 release config sibling (smolfire-qemu-aarch64.conf): **15 min**
   (only the EFI firmware path + `vtnet` defaults differ).
 - aarch64 qemu launch lines + HVF accel + EDK2 aarch64 firmware path
   for §8 tests: **30 min**.

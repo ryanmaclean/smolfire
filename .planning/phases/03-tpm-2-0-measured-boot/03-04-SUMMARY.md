@@ -157,14 +157,14 @@ completed: 2026-06-05
 
 **8. [Rule 1 - Bug] FreeBSD 15.1 STABLE GENERIC sshd has PasswordAuthentication disabled**
 - **Found during:** Task 2 (SSH connections to guest after test run)
-- **Issue:** FreeBSD 15.1-STABLE default sshd_config has `PasswordAuthentication no`; smolbsd-qemu.conf appends `PasswordAuthentication yes` to sshd_config but the default line earlier in the file overrides it. Connections fail with "Not allowed at this time"
+- **Issue:** FreeBSD 15.1-STABLE default sshd_config has `PasswordAuthentication no`; smolfire-qemu.conf appends `PasswordAuthentication yes` to sshd_config but the default line earlier in the file overrides it. Connections fail with "Not allowed at this time"
 - **Fix:** Added `PasswordAuthentication yes` and `PermitRootLogin yes` via serial console, restarted sshd (runtime fix on running guest — will need permanent fix in image rebuild for next plan)
 - **Files modified:** /etc/ssh/sshd_config in running guest (runtime only)
 
 ---
 
 **Total deviations:** 8 auto-fixed (Rules 1/2/3: 3 bugs, 2 missing compat, 2 blocking, 1 bug)
-**Impact on plan:** All fixes required for correct operation. The SMOLBSD kernel FFS bug (deviation 3) is the most significant — it affects all future image boots and requires a kernel rebuild. The SMOLBSD config fix (sys/amd64/conf/SMOLBSD) is committed for the next build. The sshd_config fix needs to be incorporated into smolbsd-qemu.conf for the next image build.
+**Impact on plan:** All fixes required for correct operation. The SMOLBSD kernel FFS bug (deviation 3) is the most significant — it affects all future image boots and requires a kernel rebuild. The SMOLBSD config fix (sys/amd64/conf/SMOLBSD) is committed for the next build. The sshd_config fix needs to be incorporated into smolfire-qemu.conf for the next image build.
 
 ## Issues Encountered
 
@@ -178,7 +178,7 @@ The smolBSD image currently runs the FreeBSD 15.1-STABLE GENERIC kernel rather t
 - FFS + GEOM_PART_GPT work correctly ✓
 - tpm2-tools 5.6_2 installed ✓
 
-The `PasswordAuthentication yes` fix in sshd_config is a runtime-only fix; the permanent fix requires updating smolbsd-qemu.conf to use `sed -i` to replace the default `no` line rather than appending.
+The `PasswordAuthentication yes` fix in sshd_config is a runtime-only fix; the permanent fix requires updating smolfire-qemu.conf to use `sed -i` to replace the default `no` line rather than appending.
 
 ## Next Phase Readiness
 

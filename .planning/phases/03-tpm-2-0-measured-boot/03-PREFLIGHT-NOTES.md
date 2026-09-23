@@ -45,9 +45,9 @@ device tpm              # TPM 2.0 (CRB + FIFO interfaces)
 
 Status: PRESENT — contains "device tpm", KERNCONF=SMOLBSD will compile in TPM support.
 
-#### smolbsd-qemu.conf
+#### smolfire-qemu.conf
 
-Path: `/home/studio/bsd-build/src/freebsd-src/release/tools/smolbsd-qemu.conf`
+Path: `/home/studio/bsd-build/src/freebsd-src/release/tools/smolfire-qemu.conf`
 
 Verification output:
 ```
@@ -64,6 +64,6 @@ tpm2-tools into chroot during image build.
 | qemu-x86_64-static | ABSENT — native build only, no QEMUSTATIC needed for amd64 |
 | /home/studio/smolbsd-ci | CREATED |
 | freebsd-src/sys/amd64/conf/SMOLBSD | PRESENT (device tpm) |
-| freebsd-src/release/tools/smolbsd-qemu.conf | PRESENT (VM_EXTRA_PACKAGES=tpm2-tools) |
+| freebsd-src/release/tools/smolfire-qemu.conf | PRESENT (VM_EXTRA_PACKAGES=tpm2-tools) |
 
 Wave 2 can proceed with native amd64 build. No cross-architecture emulation needed.

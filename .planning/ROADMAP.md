@@ -21,7 +21,7 @@ Minimal FreeBSD 15.0-RELEASE amd64 + aarch64 QEMU VM images.
 - Crash recovery ≤ 60 s
 
 **Key files:** `sys/amd64/conf/SMOLBSD`, `sys/arm64/conf/SMOLBSD`,
-`release/tools/smolbsd-qemu.conf`, `release/tools/smolbsd-qemu-aarch64.conf`
+`release/tools/smolfire-qemu.conf`, `release/tools/smolfire-qemu-aarch64.conf`
 
 ---
 
@@ -62,7 +62,7 @@ backed by swtpm on <kvm-host> (Ryzen 9 7950X, KVM) before any hardware dependenc
 **Plans:** 7/7 plans complete
 
 Plans:
-- [x] 03-01-PLAN.md — Add VM_EXTRA_PACKAGES=tpm2-tools to smolbsd-qemu.conf; copy SMOLBSD configs to <kvm-host> freebsd-src
+- [x] 03-01-PLAN.md — Add VM_EXTRA_PACKAGES=tpm2-tools to smolfire-qemu.conf; copy SMOLBSD configs to <kvm-host> freebsd-src
 - [x] 03-02-PLAN.md — Create tpm-vm-test.yml skeleton; install Nushell v0.112.2 on <kvm-host>
 - [x] 03-03-PLAN.md — Build smolBSD amd64 image on <kvm-host> (make vm-image KERNCONF=SMOLBSD); write SHA256 manifest
 - [x] 03-04-PLAN.md — Run bhyve-tpm-pcr-verify.nu T1/T2/T3/T4/T6 against live smolBSD guest
@@ -73,7 +73,7 @@ Plans:
 **Key files:** `bin/swtpm-setup.nu`, `bin/bhyve-smolbsd.nu`, `bin/qemu-smolbsd.nu`,
 `tests/tpm-attest.exp`, `tests/tpm-seal-test.nu`, `tests/bhyve-tpm-pcr-verify.nu`,
 `.github/workflows/tpm-vm-test.yml`, `.github/workflows/build-image.yml`,
-`plans/tinyos/PHASE-3-TPM.md`, `release/tools/smolbsd-qemu.conf`
+`plans/tinyos/PHASE-3-TPM.md`, `release/tools/smolfire-qemu.conf`
 
 ---
 

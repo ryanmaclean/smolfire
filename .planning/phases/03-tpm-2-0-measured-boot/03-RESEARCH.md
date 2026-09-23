@@ -19,7 +19,7 @@ running `make release` inside it. <kvm-host> already has:
 - The full FreeBSD source tree
 
 Steps: boot FreeBSD QEMU VM on <kvm-host> → clone/copy smolBSD repo inside →
-`cp release/tools/smolbsd-qemu.conf` into src → run `make release KERNCONF=SMOLBSD
+`cp release/tools/smolfire-qemu.conf` into src → run `make release KERNCONF=SMOLBSD
 WITH_PKGBASE=yes VMFORMATS=qcow2 VMSIZE=2g` → scp artifact back to host.
 
 `bin/copy-configs-to-freebsd.sh` already implements config copy. Use
@@ -27,12 +27,12 @@ WITH_PKGBASE=yes VMFORMATS=qcow2 VMSIZE=2g` → scp artifact back to host.
 
 **D-02: tpm2-tools Inclusion in Image**
 Add `tpm2-tools` to the release configuration via `VM_RC_LIST` extension and
-add to the `vm_extra_install_packages` hook in `release/tools/smolbsd-qemu.conf`.
+add to the `vm_extra_install_packages` hook in `release/tools/smolfire-qemu.conf`.
 This avoids any `pkg install` at test time.
 
 Pre-bake approach: image ships with `tpm2-tools` already installed.
 
-Also add to smolbsd-qemu.conf:
+Also add to smolfire-qemu.conf:
 - `sshd_keygen_enable="NO"` in rc.conf (already added via fix-freebsd-vm.py pattern)
 - Explicit `HostKey` list to prevent XMSS blocking (already in qemu.conf)
 - `ifconfig_vtnet0="DHCP"` for pkg bootstrap during build (not needed for test)
@@ -64,7 +64,7 @@ Update `tpm-vm-test.yml` to:
 
 **D-05: fix-freebsd-vm.py Not Needed for Real Image**
 The console-socket fixer is only needed for the stock FreeBSD UFS image.
-The smolBSD image already has all fixes baked in via `smolbsd-qemu.conf`.
+The smolBSD image already has all fixes baked in via `smolfire-qemu.conf`.
 For the smolBSD image CI path: poll SSH directly, no console fix step needed.
 
 ### Claude's Discretion
@@ -93,7 +93,7 @@ tested. T1 (swtpm socket) is already green in CI.
 
 The core engineering work is split into two parts: (1) build pipeline —
 install smolBSD configs into the FreeBSD source tree on <kvm-host> and trigger
-`make vm-image` with `CLOUDWARE_CONF=smolbsd-qemu.conf`; and (2) CI wiring —
+`make vm-image` with `CLOUDWARE_CONF=smolfire-qemu.conf`; and (2) CI wiring —
 update `tpm-vm-test.yml` to reference the new image path and drive the
 existing T2–T6 scripts instead of the stock FreeBSD workaround.
 
@@ -103,12 +103,12 @@ environment (`bmake`, cross-tools, `postworld` stage) is all present under
 `/home/studio/bsd-build/`. The `make vm-image` (CLOUDWARE) path needs
 `bsdtar`, `mdconfig`/`makefs`, and `chroot` with `qemu-user-static` — a
 pattern already proven in `run-freebsd-mini-pipeline.sh`. The SMOLBSD kernel
-config and `smolbsd-qemu.conf` are NOT yet copied into the live freebsd-src
+config and `smolfire-qemu.conf` are NOT yet copied into the live freebsd-src
 tree; that copy step is Wave 1 work.
 
 **Primary recommendation:** Copy SMOLBSD configs into freebsd-src, adapt the
 existing `run-release-once.sh` pipeline to use `KERNCONF=SMOLBSD` and
-`CLOUDWARE_CONF=smolbsd-qemu.conf`, add `VM_EXTRA_PACKAGES=tpm2-tools` to the
+`CLOUDWARE_CONF=smolfire-qemu.conf`, add `VM_EXTRA_PACKAGES=tpm2-tools` to the
 conf (or use the chroot pkg path), then trigger the existing `build-image.yml`
 CI workflow.
 
@@ -147,7 +147,7 @@ CI workflow.
 
 ### Recommended Project Structure (no changes to existing layout)
 ```
-release/tools/smolbsd-qemu.conf    # add VM_EXTRA_PACKAGES=tpm2-tools
+release/tools/smolfire-qemu.conf    # add VM_EXTRA_PACKAGES=tpm2-tools
 sys/amd64/conf/SMOLBSD             # already has "device tpm"
 bin/build-smolbsd.nu               # existing build driver
 bin/qemu-smolbsd.nu                # existing QEMU launcher --tpm
@@ -161,12 +161,12 @@ tests/tpm-attest.exp               # existing T2+T3 expect script
 ```
 
 ### Pattern 1: CLOUDWARE Release Build with VM_EXTRA_PACKAGES
-**What:** Set `VM_EXTRA_PACKAGES="tpm2-tools"` in `smolbsd-qemu.conf` and use the
+**What:** Set `VM_EXTRA_PACKAGES="tpm2-tools"` in `smolfire-qemu.conf` and use the
 FreeBSD release `Makefile.vm` target. The `vmimage.subr` `vm_extra_install_packages`
 function handles pkg install inside a chroot with `qemu-user-static` as the emulator.
 **When to use:** Any time tpm2-tools must be baked into the image.
 
-`smolbsd-qemu.conf` addition:
+`smolfire-qemu.conf` addition:
 ```sh
 # Bake tpm2-tools into the image so T2-T6 tests need no network at test time
 export VM_EXTRA_PACKAGES="tpm2-tools"
@@ -255,7 +255,7 @@ references stock FreeBSD image and `fix-freebsd-vm.py`.
 
 **smolBSD configs not yet in freebsd-src (verified on <kvm-host> live):**
 - `sys/amd64/conf/SMOLBSD` — absent from `/home/studio/bsd-build/src/freebsd-src/`
-- `release/tools/smolbsd-qemu.conf` — absent from `/home/studio/bsd-build/src/freebsd-src/`
+- `release/tools/smolfire-qemu.conf` — absent from `/home/studio/bsd-build/src/freebsd-src/`
 
 Both must be copied in as Wave 1 tasks before any build can proceed.
 
@@ -334,7 +334,7 @@ in docs/VM-TESTING.md, valid for OVMF.fd at `/usr/share/qemu/OVMF.fd` on <kvm-ho
 ### Pitfall 5: tpmctl(8) Absent in smolBSD Image
 **What goes wrong:** `tpm-attest.exp` check 2 runs `tpmctl -G`. The smolBSD
 image strips many base utilities. If `tpmctl` is not in the image, T3 fails.
-**Why it happens:** `smolbsd-qemu.conf` strips packages via `vm_extra_filter_base_packages`;
+**Why it happens:** `smolfire-qemu.conf` strips packages via `vm_extra_filter_base_packages`;
 `tpmctl` ships as `FreeBSD-tpm-tools` pkgbase component.
 **How to avoid:** The `tpm-attest.exp` check 2 already has a fallback:
 `tpmctl -G 2>/dev/null && echo TPM_CAP_OK || tpm2_getcap -c properties-fixed 2>/dev/null && echo TPM_CAP_OK`. 
@@ -359,9 +359,9 @@ with `qemu-img info --output=json <image> | jq '."actual-size"'` after build.
 
 ## Code Examples
 
-### Adding tpm2-tools to smolbsd-qemu.conf
+### Adding tpm2-tools to smolfire-qemu.conf
 ```sh
-# Source: release/tools/smolbsd-qemu.conf + Makefile.vm VM_EXTRA_PACKAGES pattern
+# Source: release/tools/smolfire-qemu.conf + Makefile.vm VM_EXTRA_PACKAGES pattern
 # Add before vm_extra_pre_umount or as a separate function:
 export VM_EXTRA_PACKAGES="tpm2-tools"
 ```
@@ -442,7 +442,7 @@ tpm2_unseal -T device:/dev/tpm0 -c /tmp/seal.ctx --auth pcr:sha256:0,7
 | tpm-attest.exp via nmdm console | bhyve-tpm-pcr-verify.nu via SSH | Already implemented | More robust; works on both Linux and FreeBSD test runners |
 
 **Deprecated/outdated:**
-- `fix-freebsd-vm.py` for smolBSD image path: not needed; baked into `smolbsd-qemu.conf`
+- `fix-freebsd-vm.py` for smolBSD image path: not needed; baked into `smolfire-qemu.conf`
 - bhyve backend for T2–T6 on <kvm-host>: <kvm-host> is Linux; bhyve requires FreeBSD; QEMU is the correct backend here
 
 ---
@@ -518,7 +518,7 @@ No `.planning/config.json` found — treating `nyquist_validation` as enabled.
 
 ### Secondary (MEDIUM confidence)
 - `.github/workflows/ci.yml` — Nushell install pattern (download from GitHub releases, version 0.112.2)
-- `release/tools/smolbsd-qemu.conf` — current state; no `VM_EXTRA_PACKAGES` line yet
+- `release/tools/smolfire-qemu.conf` — current state; no `VM_EXTRA_PACKAGES` line yet
 - `sys/amd64/conf/SMOLBSD` — confirmed `device tpm` on line 147
 
 ### Tertiary (LOW confidence)

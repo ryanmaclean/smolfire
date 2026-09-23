@@ -7,7 +7,7 @@ re_verification:
   previous_status: gaps_found
   previous_score: 6/7
   gaps_closed:
-    - "smolbsd-qemu.conf exports VM_EXTRA_PACKAGES containing tpm2-tools (restored in f6be262)"
+    - "smolfire-qemu.conf exports VM_EXTRA_PACKAGES containing tpm2-tools (restored in f6be262)"
   gaps_remaining: []
   regressions: []
 human_verification:
@@ -34,7 +34,7 @@ human_verification:
 
 | #  | Truth                                                                       | Status     | Evidence                                                                                                          |
 |----|-----------------------------------------------------------------------------|------------|-------------------------------------------------------------------------------------------------------------------|
-| 1  | smolbsd-qemu.conf exports VM_EXTRA_PACKAGES containing tpm2-tools           | VERIFIED  | Line 16: `export VM_EXTRA_PACKAGES="tpm2-tools"` present in HEAD (commit f6be262). Gap closed.                   |
+| 1  | smolfire-qemu.conf exports VM_EXTRA_PACKAGES containing tpm2-tools           | VERIFIED  | Line 16: `export VM_EXTRA_PACKAGES="tpm2-tools"` present in HEAD (commit f6be262). Gap closed.                   |
 | 2  | SMOLBSD kernel config has `device tpm` compiled in                          | VERIFIED  | sys/amd64/conf/SMOLBSD line 155: `device tpm  # TPM 2.0 (CRB + FIFO interfaces)`                               |
 | 3  | SMOLBSD kernel config has options FFS + GEOM_PART_GPT                       | VERIFIED  | sys/amd64/conf/SMOLBSD lines 149-150: `options FFS` and `options GEOM_PART_GPT`. Commit d49693d.               |
 | 4  | T1-T6 acceptance suite all pass on <kvm-host> QEMU+swtpm                       | VERIFIED  | 03-T1T6-RESULTS.toml: total=6 pass=6 fail=0 verdict=pass. PCR0=B6A903D...5727 (non-zero).                       |
@@ -50,7 +50,7 @@ human_verification:
 
 | Artifact                                       | Expected                                              | Status      | Details                                                                                       |
 |------------------------------------------------|-------------------------------------------------------|-------------|-----------------------------------------------------------------------------------------------|
-| `release/tools/smolbsd-qemu.conf`              | Exports VM_EXTRA_PACKAGES=tpm2-tools                  | VERIFIED   | Line 16: `export VM_EXTRA_PACKAGES="tpm2-tools"` with 2-line comment block. Restored f6be262.|
+| `release/tools/smolfire-qemu.conf`              | Exports VM_EXTRA_PACKAGES=tpm2-tools                  | VERIFIED   | Line 16: `export VM_EXTRA_PACKAGES="tpm2-tools"` with 2-line comment block. Restored f6be262.|
 | `sys/amd64/conf/SMOLBSD`                       | Kernel config with device tpm + FFS + GEOM_PART_GPT   | VERIFIED   | All three options confirmed present (lines 149, 150, 155).                                   |
 | `.github/workflows/tpm-vm-test.yml`            | Full T1-T6 suite wired to <kvm-host> runner              | VERIFIED   | 128-line workflow: swtpm reset, QEMU launch, SSH gate, bhyve-tpm-pcr-verify.nu, cleanup.     |
 | `.github/workflows/build-image.yml`            | CI workflow for rebuilding smolBSD TPM image          | VERIFIED   | 183-line workflow; OUTPUT_IMAGE references /home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2. |
@@ -65,8 +65,8 @@ human_verification:
 
 | From                                  | To                                           | Via                                  | Status   | Details                                                                                    |
 |---------------------------------------|----------------------------------------------|--------------------------------------|----------|--------------------------------------------------------------------------------------------|
-| `release/tools/smolbsd-qemu.conf`     | FreeBSD make vm-image pkg chroot             | VM_EXTRA_PACKAGES export             | VERIFIED | Export present at line 16; tpm2-tools will be installed into image at build time.         |
-| `build-image.yml`                     | `release/tools/smolbsd-qemu.conf`            | `grep "VM_EXTRA_PACKAGES"` guard     | VERIFIED | Guard at lines 73-76 will succeed; export is present in current HEAD.                     |
+| `release/tools/smolfire-qemu.conf`     | FreeBSD make vm-image pkg chroot             | VM_EXTRA_PACKAGES export             | VERIFIED | Export present at line 16; tpm2-tools will be installed into image at build time.         |
+| `build-image.yml`                     | `release/tools/smolfire-qemu.conf`            | `grep "VM_EXTRA_PACKAGES"` guard     | VERIFIED | Guard at lines 73-76 will succeed; export is present in current HEAD.                     |
 | `tpm-vm-test.yml`                     | `bin/swtpm-setup.nu`                         | `nu bin/swtpm-setup.nu --action reset` | VERIFIED | Wired correctly; swtpm-setup.nu handles both FreeBSD and Linux binary paths.            |
 | `tpm-vm-test.yml`                     | `bin/qemu-smolbsd.nu`                        | `nu bin/qemu-smolbsd.nu --tpm`       | VERIFIED | Wired correctly; qemu-smolbsd.nu builds correct amd64 TPM flags.                          |
 | `tpm-vm-test.yml`                     | `tests/bhyve-tpm-pcr-verify.nu`              | `nu tests/bhyve-tpm-pcr-verify.nu`   | VERIFIED | Wired correctly; --password "" enables key auth path.                                     |
@@ -77,7 +77,7 @@ human_verification:
 
 ## Re-verification Focus: Gap Closure
 
-**Previous gap:** `release/tools/smolbsd-qemu.conf` was missing `export VM_EXTRA_PACKAGES="tpm2-tools"` — dropped when older commits were rebased/merged into the Phase 3 branch.
+**Previous gap:** `release/tools/smolfire-qemu.conf` was missing `export VM_EXTRA_PACKAGES="tpm2-tools"` — dropped when older commits were rebased/merged into the Phase 3 branch.
 
 **Fix applied:** Commit `f6be262` restored the export. Current HEAD content:
 
@@ -124,7 +124,7 @@ No blockers. No TODOs, stubs, or empty returns in any critical path file. The T3
 
 | Behavior                                             | Result                                | Status    |
 |------------------------------------------------------|---------------------------------------|-----------|
-| smolbsd-qemu.conf exports VM_EXTRA_PACKAGES          | Line 16 matches (f6be262)             | PASS     |
+| smolfire-qemu.conf exports VM_EXTRA_PACKAGES          | Line 16 matches (f6be262)             | PASS     |
 | SMOLBSD has device tpm                               | Line 155 matches                      | PASS     |
 | SMOLBSD has options FFS                              | Line 149 matches                      | PASS     |
 | build-image.yml OUTPUT_IMAGE references smolBSD path | Line 33: /home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2 | PASS |

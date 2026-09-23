@@ -30,7 +30,7 @@ Updated: 2026-06-05
 | Deliverable | Status |
 |-------------|--------|
 | `device tpm` in all SMOLBSD kernel configs | ✅ done |
-| `smolbsd-qemu.conf`: `VM_EXTRA_PACKAGES=tpm2-tools` | ✅ done |
+| `smolfire-qemu.conf`: `VM_EXTRA_PACKAGES=tpm2-tools` | ✅ done |
 | SMOLBSD configs on <kvm-host> freebsd-src | ✅ done |
 | Nushell 0.112.2 on <kvm-host> runner | ✅ done |
 | smolBSD amd64 qcow2 image with tpm2-tools pre-baked | ✅ done — `/home/studio/smolbsd-ci/smolbsd-amd64-tpm.qcow2` (712 MiB) |

@@ -370,6 +370,15 @@ def process-resume-actions [state: record, root: string, spool: string, event_pr
         let resume_tag = $msg.headers | get "X-Resume-Tag"? | default ""
         if $resume_tag == "" { continue }
 
+        let subject = $msg.headers | get "Subject"? | default ""
+        if ($subject | str starts-with "[HALT]") {
+            # Skip coordinator HALT messages as resume actions, but mark as seen
+            if $id != "" {
+                $next_state = ($next_state | update seen_ids ($next_state.seen_ids | append $id))
+            }
+            continue
+        }
+
         let matched = $next_state.halted_tasks | where {|t| $"resume-($t)" == $resume_tag }
         if (($matched | length) == 0) { continue }
 

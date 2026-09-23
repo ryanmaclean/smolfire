@@ -71,7 +71,7 @@ and never contacts fleet hosts.
 
 | Source | Check |
 |---|---|
-| `https://www.freebsd.org/status/` | Newest `--reports N` quarterly reports (default 2). Each `<h3>` entry whose title or body mentions `pkgbase`, `pkgbasify` or `pkgdist` is a hit. A hit that also mentions custom kernels, `KERNCONF`, kernel packages or `FreeBSD-kernel-` is marked `kernel_related`. |
+| `https://www.freebsd.org/status/` | Newest `--reports N` quarterly reports (default 2). Each `<h3>` entry whose title or body mentions `pkgbase`, `pkgbasify` or `pkgdist` is a hit. In-page cross-reference links (`<a href="#…">`, e.g. the FreeBSD Foundation entry's list of sponsored projects) are ignored, so each project is reported once, by its own entry. A hit that also mentions custom kernels, `KERNCONF`, kernel packages or `FreeBSD-kernel-` is marked `kernel_related`. |
 | `ports/…/ports-mgmt/pkg/Makefile` | `DISTVERSION` → `pkg_version` and `pkg_ge_2_7`. |
 | `src/…/Makefile.inc1` | A `KERNCONF`-named kernel package, extra-kernel packages, a standalone kernel-package target, `PKG_ABI` tied to the staged world, the pkgbase `installkernel` guard, and the default `PKG_KERNCONF`. |
 | `src/…/release/Makefile` | Whether release builds a local pkgbase repo via `make packages`. |
@@ -119,7 +119,7 @@ code 2 and fills in `errors`.
   "reports_checked": ["2026Q2", "2026Q1"],
   "verdict": "keep-source-built",
   "verdict_reasons": ["custom_kernel_pkgbase.status == knob; no status-report entry mentions custom/kernel packages"],
-  "provenance": {"tool": "bin/pkgbase-watch.nu", "tool_version": "1.0.0", "mode": "network",
+  "provenance": {"tool": "bin/pkgbase-watch.nu", "tool_version": "1.0.1", "mode": "network",
                  "sources": [{"url": "…", "ok": true, "sha256": "…", "bytes": 29805, "fixture": null}]},
   "errors": []
 }

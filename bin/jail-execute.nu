@@ -243,13 +243,17 @@ export def exec-argv [backend: string, name: string, cmd: string, remaining: int
     }
 }
 
-# Privilege prefix for root-only steps. uid 0 → none; else mdo(1) if present.
+# Privilege prefix for root-only steps. uid 0 → none; else `mdo -i` if present.
+# `-i` switches only the user IDs to root and keeps the caller's groups, so the
+# minimal mac_do(4) rule `uid=N>uid=0` authorizes it. Plain `mdo` implies
+# `-u root`, which also switches to root's login groups (wheel, operator) and
+# is refused with EPERM under that rule (verified on FreeBSD 15.0-RELEASE-p5).
 # Returns {prefix: list<string>, error: string}.
 export def priv-prefix [uid: int, has_mdo: bool] {
     if $uid == 0 {
         {prefix: [], error: ""}
     } else if $has_mdo {
-        {prefix: ["mdo"], error: ""}
+        {prefix: ["mdo" "-i"], error: ""}
     } else {
         {prefix: [], error: $"jail executor needs root: run as root, or load mac_do\(4\) and allow this uid \(($uid)\) to reach root, e.g. security.mac.do.rules=\"uid=($uid)>uid=0\", with mdo\(1\) at /usr/bin/mdo"}
     }

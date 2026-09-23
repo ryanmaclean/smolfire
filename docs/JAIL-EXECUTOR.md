@@ -150,7 +150,7 @@ Podman's `vfs` storage driver avoids ZFS.
 |---|---|
 | Nushell | `pkg install nushell` (MIT) |
 | rctl | `kern.racct.enable=1` in `/boot/loader.conf`, then **reboot**. It's a tunable and can't be set at runtime |
-| Root hop for a non-root coordinator | `mac_do_load="YES"` in loader.conf (or `kldload mac_do`), plus `security.mac.do.rules="uid=<coord-uid>>uid=0"` in `/etc/sysctl.conf`. `mdo` must be at `/usr/bin/mdo`. Alternatively, run the coordinator as root on a dedicated VM |
+| Root hop for a non-root coordinator | `mac_do_load="YES"` in loader.conf (or `kldload mac_do`), plus `security.mac.do.rules="uid=<coord-uid>>uid=0"` in `/etc/sysctl.conf`. The executor runs `mdo -i`, which changes only the user IDs and keeps the caller's groups, so this rule is enough. Plain `mdo` (implied `-u root`, which also takes root's groups) is refused with `setcred(): Operation not permitted` under it. `mdo` must be at `/usr/bin/mdo`. Alternatively, run the coordinator as root on a dedicated VM |
 | Base dir (`--base`) | A FreeBSD 15 userland, for example `bsdinstall jail /usr/local/smolfire/base-15.0` or an extracted `base.txz`. Keep it read-only and owned by root |
 | ZFS base (`--zfs-snapshot`) | `zfs create -p zroot/smolfire/base`, populate it, then `zfs snapshot zroot/smolfire/base@clean` |
 | Jail root | `mkdir -p /var/smolfire/jails` (root-owned) |

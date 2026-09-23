@@ -70,7 +70,7 @@ exit 0
         rctl:   $"#!/bin/sh\n($log)\nexit 0\n"
         zfs:    $"#!/bin/sh\n($log)\nexit 0\n"
         umount: $"#!/bin/sh\n($log)\nexit 0\n"
-        mdo:    $"#!/bin/sh\n($log)\nexec \"$@\"\n"
+        mdo:    $"#!/bin/sh\n($log)\n[ \"$1\" = -i ] && shift\nexec \"$@\"\n"
     }
     for kv in ($stubs | transpose name body) {
         if $no_mdo and $kv.name == "mdo" { continue }
@@ -219,7 +219,7 @@ do {
 print "test 8: privilege hop is mdo(1) only"
 do {
     assert equal (priv-prefix 0 false).prefix [] "root needs no hop"
-    assert equal (priv-prefix 1001 true).prefix ["mdo"] "mac_do hop"
+    assert equal (priv-prefix 1001 true).prefix ["mdo" "-i"] "mac_do hop (uid only, keep groups)"
     let r = priv-prefix 1001 false
     assert ($r.error | str contains "mac_do") "explains mac_do"
     assert ($r.error | str contains "uid=1001>uid=0") "gives the rule"
@@ -301,7 +301,7 @@ do {
 
     let log = mock-log $tmp
     let name = "sf_task_0042_ab12cd"
-    assert ((lines-starting $log "mdo mkdir") | is-not-empty) "dir via mdo"
+    assert ((lines-starting $log "mdo -i mkdir") | is-not-empty) "dir via mdo"
     assert equal (lines-starting $log "jail -c -f" | length) 1 "one create"
     assert ((lines-starting $log "jail -c -f") | first | str ends-with $name) "create by name"
     assert equal (lines-starting $log "rctl -a" | length) 3 "three rctl rules"
@@ -310,7 +310,7 @@ do {
     assert ((lines-starting $log "timeout -k 5") | is-not-empty) "timeout(1) wraps exec"
     assert equal (lines-starting $log "jail -r" | length) 1 "removed"
     assert equal (lines-starting $log $"rctl -r jail:($name)" | length) 1 "limits removed"
-    assert ((lines-starting $log "mdo rmdir") | is-not-empty) "rmdir, not rm -rf"
+    assert ((lines-starting $log "mdo -i rmdir") | is-not-empty) "rmdir, not rm -rf"
     # order: create < exec < remove
     let idx = {|p| $log | enumerate | where {|e| $e.item | str starts-with $p} | first | get index }
     assert ((do $idx "jail -c") < (do $idx "jexec")) "create before exec"

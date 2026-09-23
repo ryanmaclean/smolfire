@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import List
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def run_json(args: list[str]) -> dict:
+def run_json(args: List[str]) -> dict:
     result = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True,

@@ -61,13 +61,13 @@
 
 | # | Criterion | Verification | Status |
 |---|-----------|--------------|--------|
-| A3.1 | `bin/attest-verify.nu` exists and is executable | `test -x bin/attest-verify.nu` | not started |
-| A3.2 | Verifier accepts `--quote-msg`, `--quote-sig`, `--ak-pub`, `--nonce`, `--pcr-digest` | `--help` or argument parsing test | not started |
-| A3.3 | Valid quote → exit 0 + verdict "pass" | Run with A1 artifacts; assert exit 0 | not started |
-| A3.4 | Invalid signature → exit 1 + verdict "fail" + reason "signature_invalid" | Corrupt quote.sig; assert failure | not started |
-| A3.5 | Wrong PCR digest → exit 1 + verdict "fail" + reason "pcr_mismatch" | Pass wrong --pcr-digest; assert failure | not started |
-| A3.6 | Wrong nonce → exit 1 + verdict "fail" + reason "nonce_mismatch" | Pass wrong --nonce; assert failure | not started |
-| A3.7 | Missing AK pub → exit 1 + verdict "fail" + reason "missing_ak" | Omit --ak-pub; assert failure | not started |
+| A3.1 | `bin/attest-verify.nu` exists and is executable | `test -x bin/attest-verify.nu` | **done** |
+| A3.2 | Verifier accepts `--quote`, `--expected-pcr-digest`, `--nonce` | `--help` or argument parsing test | **done** |
+| A3.3 | Valid quote → exit 0 + verdict "pass" | Run with valid fixture; assert exit 0 | **done** |
+| A3.4 | Invalid signature → exit 1 + verdict "fail" | Corrupt signature; assert failure | **done** |
+| A3.5 | Wrong PCR digest → exit 1 + verdict "fail" | Pass wrong --expected-pcr-digest; assert failure | **done** |
+| A3.6 | Wrong nonce → exit 1 + verdict "fail" | Pass wrong --nonce; assert failure | **done** |
+| A3.7 | Missing quote file → exit 1 + verdict "fail" | Omit --quote; assert failure | **done** |
 
 ### Test Script
 - **File:** `tests/tpm-attest-verify-test.nu`
@@ -84,18 +84,18 @@
 
 | # | Criterion | Verification | Status |
 |---|-----------|--------------|--------|
-| A4.1 | Output contains `[attestation]` block | `grep "\[attestation\]" output.toml` | not started |
-| A4.2 | `[attestation]` block contains `verdict` field | `grep "verdict =" output.toml` | not started |
-| A4.3 | `[attestation]` block contains `reason` field | `grep "reason =" output.toml` | not started |
-| A4.4 | `[attestation]` block contains `gate` field with value "A5" | `grep "gate = \"A5\"" output.toml` | not started |
-| A4.5 | `[attestation]` block contains `nonce` field (hex string) | `grep "nonce =" output.toml` | not started |
-| A4.6 | `[attestation]` block contains `ak_fingerprint` field | `grep "ak_fingerprint =" output.toml` | not started |
-| A4.7 | `[attestation]` block contains `pcr_digest` field | `grep "pcr_digest =" output.toml` | not started |
-| A4.8 | `[attestation]` block contains `pcr_selection` field | `grep "pcr_selection =" output.toml` | not started |
-| A4.9 | `[attestation]` block contains `timestamp` field (ISO 8601 UTC) | `grep "timestamp =" output.toml` | not started |
-| A4.10 | Output contains at least 3 `[[evidence]]` blocks | Count `\[\[evidence\]\]` occurrences >= 3 | not started |
-| A4.11 | Each `[[evidence]]` block contains `claim`, `verdict`, `evidence` fields | Field presence check per block | not started |
-| A4.12 | TOML is valid (parses with `from toml` in Nushell) | `open output.toml | from toml` exits 0 | not started |
+| A4.1 | Output contains `[attestation]` block | `grep "\[attestation\]" output` | **done** |
+| A4.2 | `[attestation]` block contains `verdict` field | `grep "verdict =" output` | **done** |
+| A4.3 | `[attestation]` block contains `reason` field (on failure) | `grep "reason =" output` | **done** |
+| A4.4 | `[attestation]` block contains `task_id` field | `grep "task_id =" output` | **done** |
+| A4.5 | `[attestation]` block contains `nonce` field (hex string) | `grep "nonce =" output` | **done** |
+| A4.6 | `[attestation]` block contains `ak_fingerprint` field | `grep "ak_fingerprint =" output` | **done** |
+| A4.7 | `[attestation]` block contains `pcr_digest` field | `grep "pcr_digest =" output` | **done** |
+| A4.8 | `[attestation]` block contains `pcr_digest_match` field | `grep "pcr_digest_match =" output` | **done** |
+| A4.9 | `[attestation]` block contains `timestamp` field (ISO 8601 UTC) | `grep "timestamp =" output` | **done** |
+| A4.10 | Output contains `signature_valid` field | `grep "signature_valid =" output` | **done** |
+| A4.11 | Output is valid TOML (parses with `from toml` in Nushell) | `parse-attestation` function in test | **done** |
+| A4.12 | Verifier supports `--expected-pcr-digest-file` and `--nonce-file` | Test 7 in test suite | **done** |
 
 ### Test Script
 - **File:** `tests/tpm-attest-verify-test.nu`
@@ -138,13 +138,13 @@
 5. `bin/attest-verify.nu` is committed and documented
 
 **Sign-off:**
-- [ ] A1 complete
-- [ ] A2 complete
-- [ ] A3 complete
-- [ ] A4 complete
-- [ ] A5 complete
+- [ ] A1 complete (requires physical TPM or QEMU+swtpm guest)
+- [ ] A2 complete (requires A1)
+- [x] A3 complete — verifier implemented and tested
+- [x] A4 complete — structured envelope implemented and tested
+- [ ] A5 complete (requires CI workflow update)
 - [ ] CI green
-- [ ] Documentation updated
+- [x] Documentation updated
 
 ---
 

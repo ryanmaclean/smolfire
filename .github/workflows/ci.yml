@@ -55,6 +55,13 @@ jobs:
       - name: coord-tick integration tests
         run: nu tests/coord-tick-test.nu
 
+      # coord-dispatch-test.nu: billed-subprocess guard coverage for
+      # dispatch-claude / find-claude (no other test in this suite reaches
+      # bin/coord-dispatch.nu's claude-CLI path — only dispatch-vm is
+      # exercised, by coord-vm-e2e-tests.nu).
+      - name: coord-dispatch billed-subprocess guard tests
+        run: nu tests/coord-dispatch-test.nu
+
       - name: spawn-subagent integration tests
         working-directory: .
         run: nu tests/spawn-subagent-test.nu

@@ -15,6 +15,14 @@
 
 use ../bin/mbox-parse.nu [parse-mbox, msg-id]
 
+# Drop every PATH directory that contains an executable named after a known
+# billed-agent CLI (binary-existence check, not a directory-name string
+# match — see tests/spawn-subagent-test.nu for why that's the wrong check).
+def strip-agent-bins [path: list<string>] {
+    let agent_bins = [claude codex opencode ollama]
+    $path | where {|dir| $agent_bins | all {|bin| not ($dir | path join $bin | path exists) } }
+}
+
 # ── Prerequisite checks ────────────────────────────────────────────────────────
 
 # Return a skip record if a prerequisite is absent, null otherwise.
@@ -86,13 +94,26 @@ def count-from-lines [spool_path: string] {
 # Run coord-tick once and return the state record regardless of exit code.
 # Absorbs any error from the subprocess (including job-spawn propagation when
 # the claude CLI is absent from coord-dispatch.nu).
+#
+# Billed-subprocess guard: this e2e suite drives real dispatch transitions
+# against a real VM, but must never trigger a real `claude`/codex spawn.
+# SMOLFIRE_SPAWN_SUBAGENT is left unset (spawn-subagent's default-off gate)
+# and PATH is hardened by stripping any directory that resolves a real
+# claude/codex/opencode/ollama binary, as defense-in-depth. nu itself is
+# invoked by absolute path so stripping PATH can't take out the interpreter
+# running the child.
 def safe-tick-and-read-state [root: string, spool_abs: string, state_abs: string] {
     let spool_rel = $spool_abs | str replace $"($root)/" ""
     let state_rel = $state_abs | str replace $"($root)/" ""
+    let nu_bin = $nu.current-exe
+    let hermetic_path = strip-agent-bins $env.PATH
     # The inner nu process is captured via complete; any further Nushell job error
     # is absorbed by the outer try.
     let _ignored = try {
-        ^nu --no-config-file bin/coord-tick.nu --root $root --spool $spool_rel --state-file $state_rel --max-ticks 8 | complete
+        with-env {PATH: $hermetic_path} {
+            hide-env -i SMOLFIRE_SPAWN_SUBAGENT
+            (^$nu_bin --no-config-file bin/coord-tick.nu --root $root --spool $spool_rel --state-file $state_rel --max-ticks 8) | complete
+        }
     } catch {
         null  # absorb — we read state file below regardless
     }
@@ -103,6 +124,9 @@ def safe-tick-and-read-state [root: string, spool_abs: string, state_abs: string
 
 # Run coord-tick once with explicit absolute spool + state paths.
 # Returns the complete record from `| complete`.
+#
+# Billed-subprocess guard: same hermetic-PATH + default-off-spawn treatment
+# as safe-tick-and-read-state above.
 def run-tick [root: string, spool_abs: string, state_abs: string, max_ticks: int = 10] {
     # coord-tick resolves spool and state-file relative to --root.
     # We pass them as absolute paths; coord-tick path-joins root+rel so we
@@ -112,8 +136,13 @@ def run-tick [root: string, spool_abs: string, state_abs: string, max_ticks: int
     # which we derived from the absolute paths.
     let spool_rel = $spool_abs | str replace $"($root)/" ""
     let state_rel = $state_abs | str replace $"($root)/" ""
+    let nu_bin = $nu.current-exe
+    let hermetic_path = strip-agent-bins $env.PATH
 
-    ^nu --no-config-file bin/coord-tick.nu --root $root --spool $spool_rel --state-file $state_rel --max-ticks $max_ticks | complete
+    with-env {PATH: $hermetic_path} {
+        hide-env -i SMOLFIRE_SPAWN_SUBAGENT
+        (^$nu_bin --no-config-file bin/coord-tick.nu --root $root --spool $spool_rel --state-file $state_rel --max-ticks $max_ticks) | complete
+    }
 }
 
 # ── Individual test cases ─────────────────────────────────────────────────────

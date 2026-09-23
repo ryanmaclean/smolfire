@@ -85,6 +85,16 @@ microVM-per-agent pattern.
   kernconfs must stay source-built (pkg-unregister workaround). Watch
   pkgdist/pkgbasify (2026Q1 report; pkg ≥ 2.7 improves conversion).
   <https://forums.freebsd.org/threads/freebsd-15-now-kernel-is-a-package-how-to-install-my-compiled-kernel-as-a-package.101585/>
+- **Update 2026-09-22 — now an automated watch.** Verdict still
+  `keep-source-built`; status is `knob`. A `KERNCONF` passed to
+  `make packages` yields `FreeBSD-kernel-<conf>`, and our cloudware-release
+  pipeline already relies on that. There is still no standalone
+  kernel-package target, the Handbook does not document it, and the official
+  repos ship only GENERIC-family kernels. pkg 2.7 landed on 2026-04-13
+  (ports are at 2.8.4); it changes conversion only. The 2026Q2 report has no
+  custom-kernel news, and 2026Q3 is not out yet. Details, citations and the
+  quarterly `bin/pkgbase-watch.nu` check are in
+  [PKGBASE-WATCH.md](PKGBASE-WATCH.md).
 
 ### FreeBSD 15.1 (2026-06-16) — one trap for us
 
@@ -205,3 +215,6 @@ Tracked in the "Research follow-ups (2026-07)" GitHub issue:
 5. **pkgbase kernel watch** — adopt pkgbase-native custom kernel
    packaging when pkgdist/pkgbasify supports it; drop the source-built
    kernel workaround.
+   → Automated: `.github/workflows/pkgbase-watch.yml` runs quarterly and
+   comments on #39 only when the verdict becomes `reevaluate`
+   ([PKGBASE-WATCH.md](PKGBASE-WATCH.md)).

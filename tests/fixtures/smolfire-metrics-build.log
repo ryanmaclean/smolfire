@@ -1,0 +1,14 @@
+==> rootfs: static /rescue crunchgen userland (16M)
+SMOLFIRE_METRIC rescue.bytes=15728640
+==> makefs (UFS image with free-space headroom)
+SMOLFIRE_METRIC mfs.bytes=17301504
+==> smolfire kernel: 37M (rootfs embedded)
+SMOLFIRE_METRIC kernel.bytes=38797312
+SMOLFIRE_METRIC kernel.text.bytes=22118400
+SMOLFIRE_METRIC kernel.data.bytes=3145728
+SMOLFIRE_METRIC kernel.bss.bytes=2097152
+SMOLFIRE_SECTION .text=22118400
+SMOLFIRE_SECTION .rodata=7340032
+SMOLFIRE_SECTION .data=3145728
+SMOLFIRE_SECTION .bss=2097152
+

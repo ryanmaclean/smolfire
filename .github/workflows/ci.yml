@@ -86,6 +86,9 @@ jobs:
       - name: sizereport parser tests
         run: nu tests/sizereport-test.nu
 
+      - name: SMOLFIRE microVM metrics parser tests
+        run: nu tests/smolfire-metrics-test.nu
+
       - name: pkgbase-watch parser tests (fixtures, offline)
         run: nu tests/pkgbase-watch-test.nu
 

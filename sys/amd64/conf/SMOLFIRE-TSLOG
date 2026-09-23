@@ -1,0 +1,26 @@
+# SMOLFIRE-TSLOG — measurement-only variant of SMOLFIRE with TSLOG boot
+# tracing (docs/BOOT-TIME-ROADMAP.md §3). NEVER ships: TSLOG adds a
+# timestamp record on every SYSINIT, device attach, DELAY and sleep, so
+# its wall clock is not the release wall clock. smolfire.yml builds it only
+# when dispatched with tslog=true, alongside the release SMOLFIRE ELF.
+#
+# The dump is taken post-boot by the TSLOG rc variant (bin/build-smolfire.sh,
+# SMOLFIRE_TSLOG=1): `sysctl -b debug.tslog` (kernel ENTER/EXIT/EVENT
+# records) and `sysctl -n debug.tslog_user` (per-pid fork/exec/exit TSC),
+# printed to serial AFTER SMOLFIRE_READY so the dump is outside the
+# measured window. bin/tslog-phases.nu turns it into the phase table.
+#
+# Option names per sys/conf/options (releng/15.0): TSLOG, TSLOGSIZE,
+# TSLOG_PAGEZERO. (The roadmap's draft "TSLOG_PAGES" does not exist.)
+# TSLOGSIZE is a record count (default 262144, ~10 MiB BSS); a SMOLFIRE
+# boot logs a few thousand records, so the default has >10x headroom —
+# stated explicitly so an overflow is a conscious change. tslog-phases.nu
+# fails loud when "EXIT start_init" is missing (the overflow symptom).
+#
+# SPDX-License-Identifier: Apache-2.0
+
+include SMOLFIRE
+ident SMOLFIRE-TSLOG
+
+options 	TSLOG
+options 	TSLOGSIZE=262144

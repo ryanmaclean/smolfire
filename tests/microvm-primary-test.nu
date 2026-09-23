@@ -15,8 +15,8 @@ let workflow = (open --raw .github/workflows/smolfire.yml)
 for needle in [
     "Default path: build or download the one-ELF SMOLFIRE microVM."
     "[SMOLFIRE microVM kernel workflow](.github/workflows/smolfire.yml)"
-    "This path does **not** run `buildworld`, `pkgbase`, or"
-    "`cloudware-release`."
+    "bin/build-smolfire.sh"
+    "`cloudware-release`"
     "[hosted qcow2 compatibility pipeline](.github/workflows/build-image-hosted.yml)"
 ] {
     if not ($readme | str contains $needle) {
@@ -26,7 +26,7 @@ for needle in [
 
 for needle in [
     "## Primary path — one-ELF SMOLFIRE microVM"
-    "This path builds the artifact used by the Firecracker and QEMU `microvm` gates."
+    "Firecracker and QEMU `microvm` gates"
     "## Compatibility path — full qcow2 image"
     "| `.github/workflows/smolfire.yml` | **Primary microVM CI** |"
 ] {

@@ -27,6 +27,9 @@
 
 name: Build smolfire qcow2 compatibility image
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:

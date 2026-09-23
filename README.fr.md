@@ -1,11 +1,15 @@
-# smolBSD
+# smolfire
+
+> Anciennement « smolBSD » — renommé pour éviter toute confusion avec le
+> projet NetBSD sans lien [NetBSDfr/smolBSD](https://github.com/NetBSDfr/smolBSD).
+> Voir la section « Name » de [README.md](README.md).
 
 Une image FreeBSD minimale pour les déploiements embarqués et en périphérie de
 réseau, coordonnée par un système de boîtes aux lettres selon le modèle acteur.
 
-## Qu'est-ce que smolBSD ?
+## Qu'est-ce que smolfire ?
 
-smolBSD est un projet visant à construire la machine virtuelle FreeBSD la plus
+smolfire est un projet visant à construire la machine virtuelle FreeBSD la plus
 légère possible qui démarre sans intervention jusqu'à l'invite de connexion en
 30 secondes ou moins. L'image cible tient dans 512 Mio sur disque (objectif
 aspirationnel : artefact qcow2 inférieur à 128 Mio) et n'inclut que les paquets

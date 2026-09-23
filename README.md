@@ -2,24 +2,18 @@
 
 [![CI](https://github.com/ryanmaclean/smolfire/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanmaclean/smolfire/actions/workflows/ci.yml)
 
-> **Formerly "smolBSD".** That name belongs to
-> [NetBSDfr/smolBSD](https://github.com/NetBSDfr/smolBSD) by Emile "iMil"
-> Heitor — the NetBSD micro-VM builder (smolbsd.org, FOSDEM 2025/2026) that
-> inspired this project and predates it. This project is **not affiliated**
-> with it; we adopted the name of our microVM flagship, **SMOLFIRE**,
-> project-wide. Kernconfs: `SMOLFIRE` (microVM one-ELF), `SMOLFIRE-VM`
-> (full VM, formerly `SMOLBSD`), `SMOLFIRE-PI5`/`SMOLFIRE-RK3588` (boards).
-> Guest login is now `root`/`smolfire`; images ≤ 0.4.0 still use the old
-> `smolbsd` password. History (rename phases): issue #41.
+## Name
 
-> **Renaming in progress — formerly "smolBSD".** That name belongs to
+> **Renamed from smolBSD** (repo renamed August 2026; rename completed
+> September 2026). This project is now **smolfire**, to avoid confusion
+> with the unrelated, NetBSD-based upstream
 > [NetBSDfr/smolBSD](https://github.com/NetBSDfr/smolBSD) by Emile "iMil"
-> Heitor — the NetBSD micro-VM builder (smolbsd.org, FOSDEM 2025/2026) that
-> inspired this project and predates it. This project is **not affiliated**
-> with it; we're adopting the name of our microVM flagship, **SMOLFIRE**,
-> project-wide. Internal identifiers (`bin/smolbsd.nu`, `@smolbsd.local`
-> spool addressing, `SMOLBSD` kernconfs) are renamed in a tracked second
-> phase — see the rename tracking issue.
+> Heitor (smolbsd.org) — a NetBSD micro-VM builder that predates this project
+> and is worth evaluating in its own right for throwaway VMs. This project is
+> **not affiliated** with it. Kernconfs: `SMOLFIRE` (microVM one-ELF),
+> `SMOLFIRE-VM` (full VM, formerly `SMOLBSD`), `SMOLFIRE-PI5`/`SMOLFIRE-RK3588`
+> (boards). Guest login is `root`/`smolfire`; images ≤ 0.4.0 still use the old
+> `smolbsd` password. Rename history: issue #41.
 
 ## What it is
 

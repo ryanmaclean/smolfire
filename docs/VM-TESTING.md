@@ -1,6 +1,6 @@
-# VM Testing — smolBSD bhyve + swtpm Test Suite
+# VM Testing — smolfire bhyve + swtpm Test Suite
 
-Operator guide for running the Phase-III TPM test suite against a smolBSD image
+Operator guide for running the Phase-III TPM test suite against a smolfire image
 inside bhyve on a FreeBSD 15 host.
 
 ---
@@ -58,7 +58,7 @@ pkg install security/swtpm sysutils/bhyve-firmware emulators/qemu-utils \
 | `emulators/qemu-utils` | `qemu-img` (convert + check) | Apache-2.0 |
 | `lang/expect` | `expect` interpreter for serial console scripts | BSD-derived |
 
-**Guest image must include** (baked into the smolBSD build):
+**Guest image must include** (baked into the smolfire build):
 
 ```sh
 pkg install security/tpm2-tools   # tpm2_pcrread, tpm2_create, tpm2_seal, tpm2_unseal
@@ -112,7 +112,7 @@ cu -l /dev/nmdm0B
 | T2 tpm0-present | Guest kernel enumerates `/dev/tpm0` via `tpm(4)` driver | dmesg / `test -c /dev/tpm0` exits 0 |
 | T3 manufacturer-info | `tpmctl -G` returns TPM 2.0 manufacturer string | output contains `TPM 2` |
 | T4 pcr-read | `tpm2_pcrread sha256:0` exits 0; PCR 0 is non-zero and stable | two consecutive reads return identical non-zero value |
-| T5 seal-unseal | Seal secret under PCR 0+7 policy; unseal returns exact secret | unseal stdout == `smolbsd-phase-iii-secret` |
+| T5 seal-unseal | Seal secret under PCR 0+7 policy; unseal returns exact secret | unseal stdout == `smolfire-seal-test` |
 | T6 pcr-extend | `tpm2_pcrextend` changes PCR 0 value (proves accumulation) | before/after PCR 0 values differ |
 
 All six must pass for Phase III acceptance.
@@ -134,7 +134,7 @@ All six must pass for Phase III acceptance.
 
 ```sh
 # T1 — swtpm socket: run on HOST after swtpm-setup.nu start
-test -S /var/run/smolbsd-tpm/swtpm.sock && echo T1:pass || echo T1:fail
+test -S /var/run/smolfire-tpm/swtpm.sock && echo T1:pass || echo T1:fail
 
 # T2 — /dev/tpm0: run in GUEST via serial or SSH
 ssh root@<guest-ip> 'test -c /dev/tpm0 && echo T2:pass || echo T2:fail'
@@ -164,7 +164,7 @@ Every `bin/*.nu` script emits structured TOML log-step blocks separated by
 
 ```sh
 # Capture all log output from a test run
-nu bin/run-vm-tests.nu --image smolbsd.raw --tpm | tee run.toml
+nu bin/run-vm-tests.nu --image smolfire.raw --tpm | tee run.toml
 
 # Extract only pass/fail verdicts
 nu -c "open run.toml | lines | where ($it | str contains 'verdict') | print"
@@ -210,7 +210,7 @@ swtpm socket did not appear within 3s
 Check that `swtpm_setup` initialized the state directory first:
 
 ```sh
-swtpm_setup --tpm2 --tpmstate /var/run/smolbsd-tpm --overwrite
+swtpm_setup --tpm2 --tpmstate /var/run/smolfire-tpm --overwrite
 nu bin/swtpm-setup.nu --action status
 # If still failing, inspect syslog: grep swtpm /var/log/messages
 ```
@@ -236,11 +236,11 @@ dmesg | grep -i tpm
 # Expected: tpm0: <TPM 2.0> on pci0
 ```
 
-If absent, the smolBSD kernel config is missing `device tpm` or the VM was
+If absent, the smolfire kernel config is missing `device tpm` or the VM was
 launched without `--tpm`. Confirm the bhyve command line includes:
 
 ```
--s 5,tpm,type=swtpm,path=/var/run/smolbsd-tpm/swtpm.sock
+-s 5,tpm,type=swtpm,path=/var/run/smolfire-tpm/swtpm.sock
 ```
 
 Or for QEMU amd64, confirm the command includes:
@@ -293,8 +293,8 @@ swtpm --version
 
 ```sh
 # Start swtpm
-sudo swtpm socket --tpmstate dir=/tmp/smolbsd-tpm --tpm2 \
-  --ctrl type=unixio,path=/tmp/smolbsd-tpm/swtpm.sock --daemon
+sudo swtpm socket --tpmstate dir=/tmp/smolfire-tpm --tpm2 \
+  --ctrl type=unixio,path=/tmp/smolfire-tpm/swtpm.sock --daemon
 
 # Launch FreeBSD VM with TPM
 sudo qemu-system-x86_64 \
@@ -303,7 +303,7 @@ sudo qemu-system-x86_64 \
   -m 512M -smp 2 \
   -drive file=<image>.qcow2,format=qcow2,if=virtio \
   -nic user,model=virtio-net-pci,hostfwd=tcp::2241-:22 \
-  -chardev socket,path=/tmp/smolbsd-tpm/swtpm.sock,id=chrtpm \
+  -chardev socket,path=/tmp/smolfire-tpm/swtpm.sock,id=chrtpm \
   -tpmdev emulator,id=tpm0,chardev=chrtpm \
   -device tpm-tis,tpmdev=tpm0 \
   -nographic -monitor none
@@ -320,6 +320,6 @@ tpm2_pcrread sha256:0
 
 **Key notes:**
 - Standard FreeBSD UFS VM image generates XMSS host keys on first boot, blocking sshd for hours.
-  Fix: `rm -f /etc/ssh/ssh_host_xmss_key*` before sshd starts (smolBSD conf already does this).
+  Fix: `rm -f /etc/ssh/ssh_host_xmss_key*` before sshd starts (smolfire conf already does this).
 - `tpm-tis` device works on amd64 QEMU; `tpm-tis-device` (aarch64) generates ControlArea=0 in ACPI.
-- `kldload tpm` is required in GENERIC kernel; smolBSD kernel configs already include `device tpm`.
+- `kldload tpm` is required in GENERIC kernel; smolfire kernel configs already include `device tpm`.

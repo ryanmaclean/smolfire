@@ -1,11 +1,15 @@
-# smolBSD
+# smolfire
+
+> 旧称「smolBSD」。無関係の NetBSD ベースのプロジェクト
+> [NetBSDfr/smolBSD](https://github.com/NetBSDfr/smolBSD) との混同を避けるため改名しました。
+> 詳細は [README.md](README.md) の「Name」セクションを参照してください。
 
 組み込みおよびエッジデプロイ向けの最小限のFreeBSDイメージ。
 アクターモデルのメールボックスシステムで協調動作します。
 
-## smolBSD とは
+## smolfire とは
 
-smolBSDは、30秒以内にログインプロンプトまで無人起動する、最小かつ安定した
+smolfireは、30秒以内にログインプロンプトまで無人起動する、最小かつ安定した
 FreeBSD仮想マシンを構築するプロジェクトです。対象イメージはディスク上で512 MiB
 以内に収まり（目標値：qcow2アーティファクト128 MiB未満）、`sh`、`vi`/`ed`、
 `rc.d`、`pkg` の実行に必要なパッケージのみを含みます。

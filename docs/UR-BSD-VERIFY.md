@@ -479,3 +479,39 @@ rebase cannot silently break image determinism or TPM PCR stability
   the booted guest must equal the build-time set (determinism check),
   and TPM T1-T6 PCR values must be stable across two boots of the same
   image.
+
+## Post-rename revalidation — both heavyweight pipelines GREEN (2026-09-23)
+
+The smolBSD → smolfire rename (issue #41) touched kernconfs, release
+confs, build scripts, and workflow wiring, but per-push CI only
+parse-checks those — no image or kernel had been *built* under the new
+names. Temporary push triggers proved both pipelines end-to-end, then
+were retired (trigger-retirement commits note the run IDs):
+
+- **Kernel leg** (`smolfire.yml`, run 35834636692): GREEN, ~17 min.
+  SMOLFIRE kernconf builds; Firecracker net gate (TAP + token fetch +
+  HOST_PING) and QEMU microvm cross-check both PASS.
+- **Full image** (`build-image-hosted.yml`, run 35834636637): GREEN,
+  3h34m wall. `buildworld` + `buildkernel KERNCONF=SMOLFIRE-VM` +
+  `cloudware-release` (CLOUDWARE=smolfire → SMOLFIRECONF) inside the
+  nested FreeBSD 15 VM. Verified from the run itself, not assumed:
+  - kernel ident in the boot banner: `15.0-RELEASE-p13
+    releng/15.0-af58d0db156a SMOLFIRE-VM amd64`
+  - guest hostname `smolfire` ("Setting hostname: smolfire." +
+    `FreeBSD/amd64 (smolfire) (ttyu0)` login banner) — the renamed
+    conf's identity settings took effect in the shipped image
+  - size gate PASS: raw_bytes=69861376 (66.6 MiB),
+    compressed_bytes=27918336 (26.6 MiB) — byte-identical class to the
+    July diet-round-2 baseline (66.6/26.6), i.e. **no size regression
+    from the rename**; "Enforce size gate" step skipped is the pass
+    path (`if: steps.size.outcome == 'failure'`)
+  - KVM boot gate PASS: TIME_TO_LOGIN=8s, VERDICT=pass (July baseline
+    9s)
+  - artifact `smolfire-amd64` uploaded (qcow2 + build.log +
+    smolfire-build-vm.log + serial.log)
+
+Assumption retired: "the renamed heavyweight pipeline still works" was
+unverified between the rename merge and this run; it is now a verified
+finding for the amd64 leg. The aarch64/riscv64 legs remain cross-built
++ size-gate-only (see runner capability map above) and were not
+re-exercised.

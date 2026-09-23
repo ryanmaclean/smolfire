@@ -20,6 +20,22 @@
 # already guarantees the stub shadows any real `claude` on PATH regardless
 # of ordering, and was never implicated in the flake — see verification
 # notes below.)
+# Billed-subprocess guard: spawn-subagent is opt-in (SMOLFIRE_SPAWN_SUBAGENT
+# must be "1") and OFF by default — see bin/coord-tick.nu. Tests 1 and 2
+# below deliberately opt in with a harmless stub `claude` on PATH so they can
+# still exercise the real spawn code path. Test 3 is the tripwire: it proves
+# that with the guard left at its default (unset), coord-tick never resolves
+# or executes a real `claude`/`codex` binary even when one is first on PATH.
+
+# Drop every PATH directory that contains an executable named after a known
+# billed-agent CLI. A naive `str contains "claude"` match on the directory
+# NAME (the bug this guard replaces) leaves real install dirs such as
+# /opt/homebrew/bin or ~/.local/bin untouched, since their names don't
+# contain "claude" even though the binary lives inside them.
+def strip-agent-bins [path: list<string>] {
+    let agent_bins = [claude codex opencode ollama]
+    $path | where {|dir| $agent_bins | all {|bin| not ($dir | path join $bin | path exists) } }
+}
 
 def "assert equal" [left: any, right: any, msg: string = ""] {
     if $left != $right {
@@ -89,8 +105,9 @@ exit 0
         let msg = make-msg "coordinator@smolfire.local" "builder@smolfire.local" "<req.spawn.001@host>" $body
         write-spool $spool_abs $msg
 
-        # Run tick with the stub dir prepended to PATH.
-        with-env { PATH: ($env.PATH | prepend $stub_dir) } {
+        # Run tick with the stub dir prepended to PATH. SMOLFIRE_SPAWN_SUBAGENT=1
+        # is required to opt into the (stubbed, harmless) spawn.
+        with-env { PATH: ($env.PATH | prepend $stub_dir), SMOLFIRE_SPAWN_SUBAGENT: "1" } {
             ^nu bin/coord-tick.nu --state-file $state_rel --spool $spool_rel --root $tmp | ignore
         }
 
@@ -152,15 +169,23 @@ do {
         let spool_abs = [$tmp, $spool_rel] | path join
 
         # PATH must keep `nu` reachable (for the spawned coord-tick.nu interpreter)
-        # but must NOT contain `claude`. Build it by filtering claude out of the
-        # current PATH and prepending an empty stub dir so we can be sure.
+        # but must NOT resolve a `claude` binary. Filtering by directory-NAME
+        # substring (the previous, buggy approach: `not ($p | str contains
+        # "claude")`) leaves real install dirs like /opt/homebrew/bin untouched
+        # since their PATH entry doesn't contain the string "claude" even though
+        # a claude binary lives inside — so on any host with claude installed
+        # this precondition always failed and the test silently skipped itself
+        # without ever exercising the "missing CLI" code path. strip-agent-bins
+        # checks actual binary existence per directory instead.
         let empty_dir = [$tmp, "no-claude-bin"] | path join
         mkdir $empty_dir
-        let filtered = (
-            $env.PATH
-            | where {|p| not ($p | str contains "claude")}
-        )
-        let safe_path = ($filtered | prepend $empty_dir)
+        # `nu` itself must stay reachable: strip-agent-bins can remove the
+        # directory containing `nu` (e.g. /opt/homebrew/bin also holds
+        # claude/codex/ollama on macOS dev hosts). Shadow it back via symlink.
+        let nu_dir = [$tmp, "nu-bin"] | path join
+        mkdir $nu_dir
+        ^ln -sf (which nu | first | get path) ([$nu_dir, "nu"] | path join)
+        let safe_path = (strip-agent-bins $env.PATH | prepend $empty_dir | prepend $nu_dir)
 
         let body = "task_id = \"t-no-claude\""
         let msg = make-msg "coordinator@smolfire.local" "builder@smolfire.local" "<req.no-claude.001@host>" $body
@@ -179,9 +204,11 @@ do {
             return
         }
 
+        # Opt in to spawning so we reach the CLI-resolution check rather than the
+        # (also correct, but different) disabled-by-default short-circuit.
         let log_file = [$tmp, "tick.log"] | path join
         let exit_code = try {
-            with-env { PATH: $safe_path } {
+            with-env { PATH: $safe_path, SMOLFIRE_SPAWN_SUBAGENT: "1" } {
                 ^nu bin/coord-tick.nu --state-file $state_rel --spool $spool_rel --root $tmp out> $log_file
             }
             0
@@ -192,6 +219,49 @@ do {
         assert ($log_text | str contains "subagent_spawn_skipped") "missing subagent_spawn_skipped event in log"
         assert ($log_text | str contains "claude CLI not installed") "missing 'claude CLI not installed' reason in log"
     }
+}
+
+print "test: spawn disabled by default is a billed-subprocess tripwire — a real claude/codex binary is never executed even when first on PATH"
+do {
+    let tmp = make-temp-dir
+    let state_rel = "var/run/coord-state.toml"
+    let spool_rel = "var/mail/spool"
+    let spool_abs = [$tmp, $spool_rel] | path join
+
+    # Stub `claude` AND `codex` that would prove they ran by writing a marker
+    # and exiting 99 — a distinctive, never-legitimate exit code. If the
+    # billed-subprocess guard regresses (e.g. the SMOLFIRE_SPAWN_SUBAGENT
+    # check is removed or bypassed), one of these gets exec'd and this test
+    # catches it even though nothing here strips PATH.
+    let stub_dir = [$tmp, "stub-bin"] | path join
+    let marker   = [$tmp, "billed-subprocess-marker.txt"] | path join
+    mkdir $stub_dir
+    for bin in [claude codex] {
+        let stub_path = [$stub_dir, $bin] | path join
+        $"#!/bin/sh\necho \"($bin) EXECUTED\" >> ($marker)\nexit 99\n" | save --force $stub_path
+        ^chmod +x $stub_path
+    }
+
+    let body = "task_id = \"t-tripwire\"\ncommand = \"echo hello\""
+    let msg = make-msg "coordinator@smolfire.local" "builder@smolfire.local" "<req.tripwire.001@host>" $body
+    write-spool $spool_abs $msg
+
+    # Deliberately do NOT set SMOLFIRE_SPAWN_SUBAGENT — the default-off gate
+    # is the thing under test. The stub dir is prepended so it would be the
+    # FIRST match if coord-tick ever fell back to resolving off PATH.
+    let log_file = [$tmp, "tick.log"] | path join
+    with-env { PATH: ($env.PATH | prepend $stub_dir) } {
+        ^nu bin/coord-tick.nu --state-file $state_rel --spool $spool_rel --root $tmp out> $log_file
+    }
+
+    if ($marker | path exists) {
+        error make {msg: $"billed-subprocess guard regressed: ($marker) was created — a stub CLI was executed with spawning left at its default \(disabled\) setting"}
+    }
+    let log_text = open --raw $log_file
+    assert ($log_text | str contains "subagent_spawn_skipped")
+    assert ($log_text | str contains "disabled by default")
+
+    ^rm -rf $tmp
 }
 
 print "all tests passed"

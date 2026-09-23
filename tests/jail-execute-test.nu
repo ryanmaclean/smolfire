@@ -576,11 +576,14 @@ do {
 print "test 25: Network capability is gated by §17 like any tool"
 do {
     let tmp = make-temp-dir
-    let spool = [$tmp "var" "mail" "spool"] | path join
-    mkdir ($spool | path dirname)
-    make-msg "coordinator@smolfire.local" "reviewer@smolfire.local" "<req.net.001@host>" "task_id = \"t-net\"\nagent_type = \"reviewer\"\ntools_required = [\"Network\"]" | save --force $spool
-    let out = ^nu bin/coord-tick.nu --state-file var/run/coord-state.toml --spool var/mail/spool --root $tmp | complete
-    assert ($out.stdout | str contains "dispatch_capability_mismatch") "reviewer lacks Network"
+    # This currently stops at dispatch_capability_mismatch before ever
+    # reaching spawn-subagent, but a regression in the §17 capability gate
+    # would otherwise fall through to a real, billed subagent spawn. Route
+    # through coord-tick-run (stub `claude` on PATH, never the real CLI)
+    # instead of a raw coord-tick.nu invocation with the inherited PATH, so
+    # this stays safe even if that gate regresses.
+    let r = coord-tick-run $tmp "task_id = \"t-net\"\nagent_type = \"reviewer\"\ntools_required = [\"Network\"]" {}
+    assert ($r.out | str contains "dispatch_capability_mismatch") "reviewer lacks Network"
     ^rm -rf $tmp
 }
 

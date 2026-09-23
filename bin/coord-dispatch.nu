@@ -11,7 +11,17 @@
 #   anything else       → dispatch-claude (spawns claude CLI)
 
 # Find the claude CLI binary.
+#
+# SMOLFIRE_SUBAGENT_CMD, when set, overrides resolution entirely — it is
+# used verbatim (after an existence check) instead of the hard-coded
+# absolute-path probe below. This lets tests point find-claude at a stub
+# deterministically, since PATH stripping alone cannot intercept these
+# hard-coded paths (see docs/UR-BSD.md and tests/coord-dispatch-test.nu).
 def find-claude [] {
+    let override = $env | get SMOLFIRE_SUBAGENT_CMD? | default ""
+    if $override != "" {
+        return (if ($override | path exists) { $override } else { null })
+    }
     let candidates = [
         "/opt/homebrew/bin/claude"
         "/usr/local/bin/claude"
@@ -25,6 +35,14 @@ def find-claude [] {
 
 # Dispatch a task to a claude CLI subagent.
 # Returns {launched: bool, pid: int, log_path: string}
+#
+# Billed-subprocess guard: same opt-in kill switch as bin/coord-tick.nu's
+# spawn-subagent — spawning a real, billed subagent is OFF by default and
+# requires SMOLFIRE_SPAWN_SUBAGENT=1. This is defense-in-depth: no test in
+# this repo currently exercises dispatch-claude (only dispatch-vm is
+# covered by tests/coord-vm-e2e-tests.nu), but without this gate any future
+# test that reaches this function on a host with a real claude CLI installed
+# would launch and bill a real subagent via `job spawn`.
 def dispatch-claude [
     task_id:   string
     role:      string
@@ -32,6 +50,9 @@ def dispatch-claude [
     spool:     string
     log_dir:   string = "var/run/dispatch-logs"
 ] {
+    if (($env | get SMOLFIRE_SPAWN_SUBAGENT? | default "") != "1") {
+        return {launched: false, pid: 0, log_path: "", error: "subagent spawning disabled by default (set SMOLFIRE_SPAWN_SUBAGENT=1 to enable)"}
+    }
     let claude = find-claude
     if $claude == null {
         return {launched: false, pid: 0, log_path: "", error: "claude CLI not found"}

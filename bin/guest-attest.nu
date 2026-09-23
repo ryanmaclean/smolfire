@@ -255,16 +255,21 @@ export def main [
         "-u" $ak_pub
     ]
 
-    # Step 2b: Flush the EK transient context to free an object slot before
-    # quote (swtpm exhausts slots with EK + AK both loaded → 0x902 "out of
-    # memory for object contexts"). Best-effort: logs, never fails the run.
-    # Safe: createak was the last EK consumer; the EK persistent handle and
-    # ak.ctx/ak.pub files are retained, and quote loads only the AK context.
+    # Step 2b: Flush ALL transient objects to free object slots before quote
+    # (swtpm exhausts slots with EK + AK both loaded → 0x902 "out of memory
+    # for object contexts"). Must be `-t`: the file-targeted flush
+    # (`tpm2_flushcontext /tmp/primary.ctx`) no-ops because `createek -c`
+    # writes a persistent-handle context ("neither a session nor a
+    # transient"), so the EK transient stays resident and quote still dies
+    # 0x902 (run 35913668262). Best-effort: logs, never fails the run.
+    # Safe: `tpm2_quote -c ak.ctx` reloads the AK from its context files
+    # (standard flow), so at quote time exactly 1 transient (AK) is resident;
+    # the EK transient + any other leftovers are gone.
     try {
-        let fr = run-external "tpm2_flushcontext" $primary_ctx | complete
-        log-step "guest_attest_flush_ek" {primary_ctx: $primary_ctx, exit_code: $fr.exit_code, stderr: ($fr.stderr | str trim)}
+        let fr = run-external "tpm2_flushcontext" "-t" | complete
+        log-step "guest_attest_flush_ek" {exit_code: $fr.exit_code, stderr: ($fr.stderr | str trim)}
     } catch {|err|
-        log-step "guest_attest_flush_ek" {primary_ctx: $primary_ctx, exit_code: -1, stderr: $err.msg}
+        log-step "guest_attest_flush_ek" {exit_code: -1, stderr: $err.msg}
     }
 
     # Step 3: Read PCR values to compute external digest

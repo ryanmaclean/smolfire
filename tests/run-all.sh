@@ -3,9 +3,11 @@ set -e
 PASS=0
 FAIL=0
 SKIP=0
+PYTHON3=""
 PY_OK=""
 if command -v python3 >/dev/null 2>&1; then
-    if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    PYTHON3=$(command -v python3)
+    if "$PYTHON3" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
         PY_OK=1
     fi
 fi
@@ -21,7 +23,7 @@ for f in tests/*-test.nu tests/*-test.py tests/coord-fsm-tests.nu; do
                 SKIP=$((SKIP + 1))
                 continue
             fi
-            output=$(python3 "$f" 2>&1)
+            output=$("$PYTHON3" "$f" 2>&1)
             ;;
         *)    output=$(nu "$f" 2>&1) ;;
     esac || { echo "FAILED"; FAIL=$((FAIL + 1)); continue; }

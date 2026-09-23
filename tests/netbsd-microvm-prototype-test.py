@@ -121,6 +121,44 @@ def test_dry_run_and_parse_log() -> None:
             if acceptance[key] is not True:
                 fail(f"acceptance flag {key} was not satisfied")
 
+        incomplete = tmp / "incomplete.log"
+        incomplete.write_text(
+            "\n".join(
+                [
+                    "[   1.0000000] NetBSD 11.0 (MICROVM)",
+                    "SMOLFIRE_NETBSD_READY",
+                    "SMOLFIRE_NETBSD_STATE_OK dev=ld0a mount=/state fs=lfs mode=rw",
+                    "TIME_TO_READY=41ms",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        negative = run_json(
+            [
+                "--kernel",
+                str(kernel),
+                "--rootfs",
+                str(rootfs),
+                "--state-image",
+                str(state),
+                "--state-fs",
+                "lfs",
+                "--accel",
+                "tcg",
+                "--parse-log",
+                str(incomplete),
+            ]
+        )
+        neg_result = negative["result"]
+        if neg_result["workload"] is not None:
+            fail("incomplete log should not parse a workload marker")
+        neg_acceptance = neg_result["acceptance"]
+        if neg_acceptance["runs_common_filesystem_state_workload"] is not False:
+            fail("missing workload marker should fail workload acceptance")
+        if neg_acceptance["reports_artifact_size_boot_time_ram_and_fs_metrics"] is not False:
+            fail("missing workload marker should fail metrics acceptance")
+
 
 if __name__ == "__main__":
     test_dry_run_and_parse_log()

@@ -38,6 +38,7 @@ conf=''; prev=''
 for a in \"$@\"; do [ \"$prev\" = '-f' ] && conf=\"$a\"; prev=\"$a\"; done
 case \"$1\" in
   -c) [ -n \"$conf\" ] && cp \"$conf\" \"$MOCK_DIR/last.conf\"
+      [ -f \"${conf%/*}/resolv.conf\" ] && cp \"${conf%/*}/resolv.conf\" \"$MOCK_DIR/last.resolv.conf\"
       [ \"${MOCK_JAIL_CREATE_FAIL:-0}\" = 1 ] && { echo 'jail: mock create failure' >&2; exit 1; } ;;
   -r) [ \"${MOCK_JAIL_REMOVE_FAIL:-0}\" = 1 ] && { echo 'jail: mock remove failure' >&2; exit 1; } ;;
 esac
@@ -70,7 +71,8 @@ exit 0
         rctl:   $"#!/bin/sh\n($log)\nexit 0\n"
         zfs:    $"#!/bin/sh\n($log)\nexit 0\n"
         umount: $"#!/bin/sh\n($log)\nexit 0\n"
-        mdo:    $"#!/bin/sh\n($log)\nexec \"$@\"\n"
+        install: $"#!/bin/sh\n($log)\nexit 0\n"
+        mdo:    $"#!/bin/sh\n($log)\n[ \"$1\" = -i ] && shift\nexec \"$@\"\n"
     }
     for kv in ($stubs | transpose name body) {
         if $no_mdo and $kv.name == "mdo" { continue }
@@ -198,11 +200,21 @@ do {
     let z = render-jail-conf "sf_z_1" "/j/sf_z_1" --backend zfs
     assert (not ($z | str contains "nullfs")) "zfs clone needs no nullfs"
     assert ($z | str contains "tmpfs /j/sf_z_1/tmp") "zfs still gets tmpfs"
+
+    assert (not ($net | str contains "resolv.conf")) "no DNS unless a resolv.conf is passed"
+    let dns = render-jail-conf "sf_n_2" "/j/sf_n_2" --base "/b" --network --resolv-conf "/tmp/c/resolv.conf"
+    assert ($dns | str contains 'mount += "/tmp/c/resolv.conf /j/sf_n_2/etc/resolv.conf nullfs ro 0 0";') "resolv.conf file mount, read-only"
+    let lines = $dns | lines
+    let at = {|p| $lines | enumerate | where {|e| $e.item | str contains $p} | first | get index }
+    assert ((do $at "/b /j/sf_n_2 nullfs") < (do $at "etc/resolv.conf")) "file mount after the base mount"
+    let zdns = render-jail-conf "sf_z_2" "/j/sf_z_2" --backend zfs --network --resolv-conf "/tmp/c/resolv.conf"
+    assert (not ($zdns | str contains "resolv.conf")) "zfs copies resolv.conf instead of mounting it"
 }
 
 print "test 7: rctl rules, podman/OCI args, exec argv"
 do {
-    assert equal (rctl-rules "sf_a" "512m" 256 100) ["jail:sf_a:memoryuse:deny=512m" "jail:sf_a:maxproc:deny=256" "jail:sf_a:pcpu:deny=100"]
+    assert equal (rctl-rules "sf_a" "512m" 256 100) ["jail:sf_a:memoryuse:deny=512m" "jail:sf_a:vmemoryuse:deny=512m" "jail:sf_a:maxproc:deny=256" "jail:sf_a:pcpu:deny=100"]
+    assert ("jail:sf_a:vmemoryuse:deny=2g" in (rctl-rules "sf_a" "512m" 256 100 --vmemory "2g")) "vmemory override"
     let pa = podman-run-args "sf_a" "img:1" 240
     assert (($pa | take 2) == ["podman" "run"]) "podman run"
     let i = $pa | enumerate | where item == "--network" | get index | first
@@ -219,7 +231,7 @@ do {
 print "test 8: privilege hop is mdo(1) only"
 do {
     assert equal (priv-prefix 0 false).prefix [] "root needs no hop"
-    assert equal (priv-prefix 1001 true).prefix ["mdo"] "mac_do hop"
+    assert equal (priv-prefix 1001 true).prefix ["mdo" "-i"] "mac_do hop (uid only, keep groups)"
     let r = priv-prefix 1001 false
     assert ($r.error | str contains "mac_do") "explains mac_do"
     assert ($r.error | str contains "uid=1001>uid=0") "gives the rule"
@@ -241,6 +253,7 @@ print "test 10: reply envelope parses and targets the dispatch Message-ID"
 do {
     let res = result-record "fail" 2 [{cmd: "echo \"hi\"", stdout: "hi", stderr: "", exit_code: 0} {cmd: "false", stdout: "", stderr: "", exit_code: 1}] "boom"
     let env_txt = reply-envelope "t-rep" "<coord.1.r1.x@smolfire.local>" $res --now "20260101000000"
+    assert ($env_txt | str ends-with "\n\n") "reply ends with a blank line (strict mbox)"
     let msgs = parse-mbox $env_txt
     assert equal ($msgs | length) 1
     let m = $msgs | first
@@ -301,16 +314,17 @@ do {
 
     let log = mock-log $tmp
     let name = "sf_task_0042_ab12cd"
-    assert ((lines-starting $log "mdo mkdir") | is-not-empty) "dir via mdo"
+    assert ((lines-starting $log "mdo -i mkdir") | is-not-empty) "dir via mdo"
     assert equal (lines-starting $log "jail -c -f" | length) 1 "one create"
     assert ((lines-starting $log "jail -c -f") | first | str ends-with $name) "create by name"
-    assert equal (lines-starting $log "rctl -a" | length) 3 "three rctl rules"
+    assert equal (lines-starting $log "rctl -a" | length) 4 "four rctl rules"
+    assert equal (lines-starting $log $"rctl -a jail:($name):vmemoryuse:deny=512m" | length) 1 "address-space cap alongside memoryuse"
     assert ((lines-starting $log "rctl -a") | all {|l| $l | str contains $"jail:($name):"}) "rules scoped to jail"
     assert equal (lines-starting $log "jexec" | length) 2 "two execs"
     assert ((lines-starting $log "timeout -k 5") | is-not-empty) "timeout(1) wraps exec"
     assert equal (lines-starting $log "jail -r" | length) 1 "removed"
     assert equal (lines-starting $log $"rctl -r jail:($name)" | length) 1 "limits removed"
-    assert ((lines-starting $log "mdo rmdir") | is-not-empty) "rmdir, not rm -rf"
+    assert ((lines-starting $log "mdo -i rmdir") | is-not-empty) "rmdir, not rm -rf"
     # order: create < exec < remove
     let idx = {|p| $log | enumerate | where {|e| $e.item | str starts-with $p} | first | get index }
     assert ((do $idx "jail -c") < (do $idx "jexec")) "create before exec"
@@ -321,6 +335,8 @@ do {
     assert ($conf | str contains 'ip4 = "disable";') "no network"
     assert ($conf | str contains 'mac.do = "disable";') "mdo hop → mac.do disabled in jail"
     assert ($conf | str contains "nullfs ro") "read-only base"
+    assert (not ($conf | str contains "resolv.conf")) "no DNS without Network"
+    assert (not ([$tmp "last.resolv.conf"] | path join | path exists)) "no resolv.conf snapshot without Network"
     ^rm -rf $tmp
 }
 
@@ -334,7 +350,9 @@ do {
     }
     assert equal $r.verdict "fail"
     assert equal ($r.outputs | get exit_code) [1 0] "later commands still run after a non-timeout failure (vm parity)"
-    assert ((open --raw ([$tmp "last.conf"] | path join)) | str contains 'ip4 = "inherit";')
+    let conf = open --raw ([$tmp "last.conf"] | path join)
+    assert ($conf | str contains 'ip4 = "inherit";')
+    assert (not ($conf | str contains "resolv.conf")) "no placeholder in the base → warn, no mount"
     assert equal (lines-starting (mock-log $tmp) "jail -r" | length) 1
     ^rm -rf $tmp
 }
@@ -443,6 +461,7 @@ do {
     assert ($clone | str ends-with "zroot/smolfire/base@clean zroot/smolfire/sf_t_zfs_000008") "clone target"
     assert equal (lines-starting $log "zfs destroy -f zroot/smolfire/sf_t_zfs_000008" | length) 1 "ephemeral dataset destroyed"
     assert (not ((open --raw ([$tmp "last.conf"] | path join)) | str contains "nullfs"))
+    assert equal (lines-starting $log "install" | length) 0 "no resolv.conf without Network"
     ^rm -rf $tmp
 }
 
@@ -575,11 +594,87 @@ do {
     assert equal $out.exit_code 2
     let msgs = parse-mbox (open --raw $spool)
     assert equal ($msgs | length) 2 "reply appended"
+    assert ((open --raw $spool) | str contains "\n\nFrom jail-agent@smolfire.local ") "blank line before the reply's From line"
     let reply = $msgs | last
     assert equal ($reply.headers | get "In-Reply-To") "<coord.1.r1.d@smolfire.local>"
     assert equal (extract-toml $reply | get verdict) "fail"
     assert (($reply.headers | get "X-Jail-Error") | str contains "requires a FreeBSD host")
     ^rm -rf $tmp
+}
+
+print "test 27: mbox append separator"
+do {
+    assert equal (mbox-append-prefix "") "" "empty spool"
+    assert equal (mbox-append-prefix "body\n\n") "" "already separated"
+    assert equal (mbox-append-prefix "body\n") "\n" "one newline → add the blank line"
+    assert equal (mbox-append-prefix "body") "\n\n" "no trailing newline"
+    let res = result-record "pass" 0 [{cmd: "true", stdout: "", stderr: "", exit_code: 0}]
+    let first = make-msg "coordinator@smolfire.local" "builder@smolfire.local" "<req.1@host>" "task_id = \"t\""
+    let spool = $first + (mbox-append-prefix $first) + (reply-envelope "t" "<coord.1@smolfire.local>" $res)
+    assert ($spool | str contains "\n\nFrom jail-agent@smolfire.local ") "strict mbox"
+    assert equal (parse-mbox $spool | length) 2
+}
+
+print "test 28: resolv.conf plan (Network DNS)"
+do {
+    let tmp = make-temp-dir
+    let src = [$tmp "host-resolv.conf"] | path join
+    "nameserver 192.0.2.53\n" | save --force $src
+    let empty = [$tmp "empty-resolv.conf"] | path join
+    "" | save --force $empty
+    let base = [$tmp "base"] | path join
+    mkdir ([$base "etc"] | path join)
+    assert ((resolv-plan nullfs $base $src).error | str contains "placeholder") "nullfs needs a placeholder"
+    "" | save --force ([$base "etc" "resolv.conf"] | path join)
+    assert equal (resolv-plan nullfs $base $src).error "" "placeholder present"
+    assert equal (resolv-plan zfs "" $src).error "" "zfs clone is writable"
+    assert ((resolv-plan nullfs $base ([$tmp "nope"] | path join)).error | str contains "not found") "missing source"
+    assert ((resolv-plan nullfs $base $empty).error | str contains "empty") "empty source"
+    assert ((resolv-plan podman "" $src).error | str contains "podman") "podman handles its own"
+    let lbase = [$tmp "lbase"] | path join
+    mkdir ([$lbase "etc"] | path join)
+    ^ln -s /etc/hosts ([$lbase "etc" "resolv.conf"] | path join)
+    assert ((resolv-plan nullfs $lbase $src).error | str contains "placeholder") "symlinked placeholder refused"
+    ^rm -rf $tmp
+}
+
+print "test 29: Network task gets a resolv.conf snapshot; nullfs mounts it, zfs installs it"
+do {
+    if $is_root { print "  (skipped as root)"; return }
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let src = [$tmp "host-resolv.conf"] | path join
+    "nameserver 192.0.2.53\n" | save --force $src
+    let base = [$tmp "base"] | path join
+    mkdir ([$base "etc"] | path join)
+    "" | save --force ([$base "etc" "resolv.conf"] | path join)
+    let r = with-stubs $tmp $bin {} {
+        run-jail-task "t-dns" ["echo x"] --base $base --network --resolv-conf $src --jail-root (jr $tmp) --salt "00000a" --os freebsd
+    }
+    assert equal $r.verdict "pass" $"verdict: ($r | to nuon)"
+    let conf = open --raw ([$tmp "last.conf"] | path join)
+    let path = [(jr $tmp) "sf_t_dns_00000a"] | path join
+    assert ($conf | str contains $"/resolv.conf ($path)/etc/resolv.conf nullfs ro 0 0") $"resolv mount: ($conf)"
+    assert equal (open --raw ([$tmp "last.resolv.conf"] | path join)) "nameserver 192.0.2.53\n" "snapshot of the host file"
+    ^rm -rf $tmp
+
+    let tmp2 = make-temp-dir
+    let bin2 = make-stubs $tmp2
+    let src2 = [$tmp2 "host-resolv.conf"] | path join
+    "nameserver 192.0.2.53\n" | save --force $src2
+    let r2 = with-stubs $tmp2 $bin2 {} {
+        run-jail-task "t-zdns" ["echo z"] --zfs-snapshot "zroot/smolfire/base@clean" --network --resolv-conf $src2 --jail-root (jr $tmp2) --salt "00000b" --os freebsd
+    }
+    assert equal $r2.verdict "pass"
+    let log2 = mock-log $tmp2
+    let inst = lines-starting $log2 "install -m 0644"
+    assert equal ($inst | length) 1 "one install into the clone"
+    assert ($inst | first | str ends-with $"(jr $tmp2)/sf_t_zdns_00000b/etc/resolv.conf") "target is the clone's /etc"
+    let idx = {|p| $log2 | enumerate | where {|e| $e.item | str starts-with $p} | first | get index }
+    assert ((do $idx "zfs clone") < (do $idx "install")) "after the clone"
+    assert ((do $idx "install") < (do $idx "jail -c")) "before the jail starts"
+    assert (not ((open --raw ([$tmp2 "last.conf"] | path join)) | str contains "resolv.conf")) "no mount for zfs"
+    ^rm -rf $tmp2
 }
 
 print "all tests passed"

@@ -13,9 +13,9 @@ def fail [msg: string] {
     exit 1
 }
 
-# inode of a path — GNU stat on Linux, BSD stat on macOS (CI runs both).
+# inode of a path — BSD stat on macOS/FreeBSD, GNU stat on Linux (CI runs both).
 def inode [path: string] {
-    if $nu.os-info.name == "macos" {
+    if $nu.os-info.name in ["macos" "freebsd"] {
         ^stat -f %i $path | str trim
     } else {
         ^stat -c %i $path | str trim

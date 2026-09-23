@@ -12,7 +12,7 @@ the default: `vm` stays the executor unless you opt in.
 |---|---|
 | `bin/jail-execute.nu` | Executor. Sibling of `bin/vm-execute.nu` with the same contract |
 | `bin/coord-tick.nu` | Picks the executor per request (`resolve-executor`) and spawns `jail-execute.nu dispatch` for `jail` |
-| `tests/jail-execute-test.nu` | 26 host-independent tests that stub the FreeBSD tools on `PATH`. `tests/run-all.sh` picks it up automatically |
+| `tests/jail-execute-test.nu` | 29 host-independent tests that stub the FreeBSD tools on `PATH`. `tests/run-all.sh` picks it up automatically |
 
 ## 1. Contract
 
@@ -35,7 +35,8 @@ nu bin/jail-execute.nu run task-0042 "make -C /tmp/src" --zfs-snapshot zroot/smo
 nu bin/jail-execute.nu run task-0042 "uname -a" --image ghcr.io/freebsd/freebsd-runtime:15.0
 ```
 
-Flags: `--network`, `--timeout` (seconds), `--memory 512m`, `--maxproc 256`,
+Flags: `--network`, `--timeout` (seconds), `--memory 512m`,
+`--vmemory <size>` (defaults to `--memory`), `--maxproc 256`,
 `--pcpu 100`, `--tmpfs-size 1g`, `--jail-root /var/smolfire/jails`,
 `--require-limits`.
 
@@ -60,20 +61,43 @@ Flags: `--network`, `--timeout` (seconds), `--memory 512m`, `--maxproc 256`,
   `"Network"` is a coordinator capability, not a Claude tool. §17 gates it
   like any other tool: only `general-purpose`, `ops` and `builder` have it.
   `WebFetch` and `WebSearch` do **not** open the jail's network.
+- **DNS only with network:** a `"Network"` task gets a snapshot of the host's
+  `/etc/resolv.conf`, copied into the private config directory when the task
+  starts. For `--base` it is nullfs-mounted read-only over the base's
+  `/etc/resolv.conf`, which must exist as an empty regular file (see §3,
+  because base.txz ships none). For `--zfs-snapshot` it is written into the
+  clone with `install(1)`. A task without `"Network"` gets no resolv.conf
+  from the executor. If DNS can't be provided (no placeholder, or the host
+  file is missing or empty), the task still runs with TCP only and the
+  executor logs `jail_dns_unavailable` with the reason. Podman manages
+  `/etc/resolv.conf` itself.
 - **Hardening:** every jail.conf block sets `persist`, `enforce_statfs = 2`,
   `securelevel = 3`, `children.max = 0`, `devfs_ruleset = 4`,
   `allow.noraw_sockets`, `allow.nomount`, `allow.noset_hostname` and
   `allow.nochflags`. When `mac_do(4)` is loaded it also sets
   `mac.do = "disable"`, so the host's mdo rules don't carry into the jail.
 - **Resource limits:** when `kern.racct.enable=1`, rctl(8) adds
-  `jail:<name>:memoryuse`, `maxproc` and `pcpu` deny rules and removes them
-  on exit. Without racct the executor warns and runs unlimited.
-  `--require-limits` refuses instead.
+  `jail:<name>:memoryuse`, `vmemoryuse`, `maxproc` and `pcpu` deny rules and
+  removes them on exit. `memoryuse` is resident memory and the pager enforces
+  it lazily, so on its own it is not a hard cap: on the FreeBSD 15.0 test
+  host (no swap), a 200 MB `dd` buffer succeeded under `memoryuse:deny=64m`.
+  `vmemoryuse` (address space) is refused at allocation time, so that is the
+  rule that makes the memory cap real. It defaults to the `--memory` value.
+  Raise it with `--vmemory` if a toolchain reserves much more address space
+  than it touches. `pcpu` throttling is approximate: a busy loop at
+  `pcpu=20` averaged about 36% of one CPU. Without racct the executor warns
+  and runs unlimited. `--require-limits` refuses instead.
 - **Timeout:** one wall-clock deadline covers the whole task, setup included.
   The deadline is clamped to 1–270 s so a result can reach the coordinator
   before its 300 s no-reply timeout. Each command runs under
   `timeout -k 5 <remaining>`. Exit 124 or 137 counts as a timeout and stops
   the task. Once the budget runs out, the remaining commands are skipped.
+  **A command that leaves a background process behind is reported as a
+  timeout.** FreeBSD's `timeout(1)` acts as a reaper and waits for every
+  descendant (unless `--foreground`, which the executor doesn't use). So
+  `daemon -f sleep 600; echo spawned` prints `spawned` and then exits `124`
+  at the deadline. This is bounded and safe, and `jail -r` kills the orphan,
+  but the task fails. Commands must not leave background processes running.
 - **Teardown always runs,** in this order: `jail -r`, `rctl -r`, then
   `zfs destroy` or `rmdir`, then removal of the private jail.conf directory.
   If `jail -r` fails, the executor force-unmounts `dev`, `tmp` and the base.
@@ -150,8 +174,9 @@ Podman's `vfs` storage driver avoids ZFS.
 |---|---|
 | Nushell | `pkg install nushell` (MIT) |
 | rctl | `kern.racct.enable=1` in `/boot/loader.conf`, then **reboot**. It's a tunable and can't be set at runtime |
-| Root hop for a non-root coordinator | `mac_do_load="YES"` in loader.conf (or `kldload mac_do`), plus `security.mac.do.rules="uid=<coord-uid>>uid=0"` in `/etc/sysctl.conf`. `mdo` must be at `/usr/bin/mdo`. Alternatively, run the coordinator as root on a dedicated VM |
+| Root hop for a non-root coordinator | `mac_do_load="YES"` in loader.conf (or `kldload mac_do`), plus `security.mac.do.rules="uid=<coord-uid>>uid=0"` in `/etc/sysctl.conf`. The executor runs `mdo -i`, which changes only the user IDs and keeps the caller's groups, so this rule is enough. Plain `mdo` (implied `-u root`, which also takes root's groups) is refused with `setcred(): Operation not permitted` under it. `mdo` must be at `/usr/bin/mdo`. Alternatively, run the coordinator as root on a dedicated VM |
 | Base dir (`--base`) | A FreeBSD 15 userland, for example `bsdinstall jail /usr/local/smolfire/base-15.0` or an extracted `base.txz`. Keep it read-only and owned by root |
+| DNS for `"Network"` tasks (`--base`) | `touch <base>/etc/resolv.conf`, which creates an **empty** regular file (not a symlink) for the per-task nullfs file mount. Keep it empty so tasks without network see no resolver config |
 | ZFS base (`--zfs-snapshot`) | `zfs create -p zroot/smolfire/base`, populate it, then `zfs snapshot zroot/smolfire/base@clean` |
 | Jail root | `mkdir -p /var/smolfire/jails` (root-owned) |
 | OCI (`--image`) | `pkg install podman-suite` (Podman, Buildah and Skopeo are **Apache-2.0**; `ocijail` is **BSD-2-Clause**). Follow its pkg-message, which covers the ZFS storage driver and fdescfs. Check licences at install time with `pkg query '%n %L' podman buildah ocijail` |
@@ -179,8 +204,10 @@ replacement for the microVM boundary.
 
 ## 5. Not covered yet
 
-- **Never run on a real FreeBSD host.** Every jail, rctl, mdo, zfs and podman
-  interaction has only been checked against logging stubs (see §6).
+- **Partly verified on a real host.** §6 items 1–5, 8 and 9 passed on
+  FreeBSD 15.0-RELEASE-p5 (amd64, 2026-09-23). The ZFS clone backend (item 6)
+  and podman/ocijail (item 7) have still only been checked against logging
+  stubs.
 - **No LLM inside the jail.** The `jail` executor runs the request's shell
   `command` or `commands.run` directly. The roadmap experiment, "run one
   build *subagent* in a jail", would also need Claude Code (Node) in the base
@@ -209,8 +236,9 @@ Run these on the FreeBSD build VM, once, before trusting the executor:
 1. `jail -c -f <rendered conf>` accepts every parameter on 15.x:
    `securelevel`, `allow.no*`, `mac.do`, `mount += nullfs/tmpfs`, and the
    ordering of `mount.devfs` over a read-only nullfs base.
-2. `rctl -a jail:<name>:...` applies to the named jail. `rctl -h jail:<name>`
-   shows usage, and `rctl -r` clears it.
+2. `rctl -a jail:<name>:...` applies to the named jail. `rctl -u jail:<name>`
+   shows usage (`-h` only makes the numbers human-readable, as in
+   `rctl -hu`), and `rctl -r` clears it.
 3. `mdo` with the `uid=N>uid=0` rule works, and `mac.do = "disable"` stops mdo
    inside the jail.
 4. `timeout -k 5 N` through `mdo` kills a hung `jexec`, and `jail -r` reaps
@@ -225,8 +253,24 @@ Run these on the FreeBSD build VM, once, before trusting the executor:
 9. The roadmap comparison: wall time of a jail run against a SMOLFIRE boot
    for the same command list.
 
+Results on FreeBSD 15.0-RELEASE-p5 (amd64 KVM guest, 2 vCPU, 4 GiB, no swap,
+nu 0.115.1, 2026-09-23):
+
+| # | Result | Notes |
+|---|---|---|
+| 1 | PARTIAL | Read-only base, tmpfs cap enforced, `securelevel=3`, network gated; the new resolv.conf path has not been rerun on the host |
+| 2 | PARTIAL | maxproc enforced and prior memoryuse checks passed; the new `vmemoryuse` rule has not been rerun on the host |
+| 3 | PASS after fix | The executor now uses `mdo -i`. `mac.do=disable` blocks mdo inside the jail |
+| 4 | PASS | Hung and TERM-ignoring commands are killed. A leftover background process causes exit 124 (see §1) |
+| 5 | PASS | No jails, mounts, directories or rctl rules are left behind |
+| 6 | SKIP | No ZFS pool (and OpenZFS is CDDL) |
+| 7 | SKIP | podman's package closure pulls GPL/LGPL packages |
+| 8 | PASS | coord-tick → jail → reply harvested, `verdict pass` |
+| 9 | PASS (jail) | About 0.19 s per jail task end to end, against 51 s for a QEMU TCG boot to `login:` (no VMX on the host) |
+
 The host-independent part is covered by `nu tests/jail-execute-test.nu`:
 argument parsing, jail.conf and podman rendering, name derivation, timeout
-math, record parity with `vm-execute.nu`, reply-envelope parsing, refusal on
-non-FreeBSD hosts, teardown on every failure path, and executor selection
+math, record parity with `vm-execute.nu`, reply-envelope parsing and
+strict-mbox appending, resolv.conf handling for `"Network"` tasks, refusal
+on non-FreeBSD hosts, teardown on every failure path, and executor selection
 in coord-tick.

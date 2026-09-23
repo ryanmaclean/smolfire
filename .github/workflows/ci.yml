@@ -97,6 +97,9 @@ jobs:
       - name: spool-compact tests
         run: nu tests/spool-compact-test.nu
 
+      - name: OpenLineage exporter tests
+        run: nu tests/openlineage-export-test.nu
+
       # run-tests.nu --suite unit: runs mbox-parse unit tests + all FSM integration
       # tests (coord-fsm-tests.nu) without the VM e2e suite (no qcow2 in CI).
       - name: run-tests unit suite (mbox-parse + FSM)

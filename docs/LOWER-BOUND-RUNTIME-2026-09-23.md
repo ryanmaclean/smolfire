@@ -1,6 +1,16 @@
 # smolFire lower-bound runtime and lineage architecture — 2026-09-23
 
 > Tracking umbrella: smolFire #78
+>
+> Canonical Datadog notebook payload: `docs/datadog/smolfire-lower-bound-runtime-notebook.json`
+>
+> Render/publish with: `nu bin/render-datadog-notebook.nu` / `nu bin/publish-datadog-notebook.nu`
+>
+> Tracking issue: [smolfire#76](https://github.com/ryanmaclean/smolfire/issues/76)
+>
+> Datadog notebook URL: _pending publish_
+>
+> Datadog notebook ID: _pending publish_
 
 ## Goal
 

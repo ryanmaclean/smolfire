@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: smolBSD TPM campaign
-status: Phase 4 A1-A5 complete — pending CI runner verification
-stopped_at: Phase 4 execution complete — all A1-A5 gates implemented, tests green, CI workflow updated
+status: Phase 4 complete — A1-A5 green in CI (PR #59 merged)
+stopped_at: Phase 4 done — attestation verdict PASS + T1-T6 green in CI (run 35915762015), PR #59 merged to main
 last_updated: "2026-09-23"
 progress:
   total_phases: 4
@@ -23,7 +23,7 @@ Updated: 2026-09-23
 | 1 | Minimal FreeBSD 15 amd64 + aarch64 QEMU VM images | ✅ complete |
 | 2 | Physical board configs (Pi5, RK3588), bhyve harness, coord FSM | ✅ complete |
 | 3 | TPM 2.0 measured boot — QEMU+swtpm, T1–T6 all pass | ✅ complete |
-| 4 | Remote attestation — TPM quote + verifier (hardware-free) | ✅ A1-A5 implemented, pending CI runner |
+| 4 | Remote attestation — TPM quote + verifier (hardware-free) | ✅ complete — A1-A5 green in CI (run 35915762015) |
 
 ## Phase 3 deliverables (all done)
 

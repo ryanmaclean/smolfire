@@ -1,7 +1,7 @@
 # NetBSD 11 MICROVM sibling prototype
 
-`/home/runner/work/smolfire/smolfire/bin/netbsd-microvm-prototype.py` is a
-host-side prototype for the issue "Prototype a NetBSD 11 MICROVM sibling for
+`bin/netbsd-microvm-prototype.py` is a host-side prototype for the issue
+"Prototype a NetBSD 11 MICROVM sibling for
 SMOLFIRE". It does **not** vendor NetBSD, smolBSD, or third-party build logic.
 Instead, it gives this repository a small, BSD/MIT/Apache-only way to launch a
 caller-supplied NetBSD 11 `MICROVM` kernel under QEMU `microvm`, attach:
@@ -31,7 +31,7 @@ The host-side report maps those markers to the issue acceptance criteria:
 ## Example
 
 ```sh
-python3 /home/runner/work/smolfire/smolfire/bin/netbsd-microvm-prototype.py \
+python3 bin/netbsd-microvm-prototype.py \
   --kernel /path/to/netbsd-MICROVM \
   --rootfs /path/to/rootfs.fs \
   --state-image /path/to/state-lfs.img \

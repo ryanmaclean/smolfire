@@ -1,4 +1,4 @@
-# smolBSD CI/CD — TPM VM Test Pipeline
+# smolfire CI/CD — TPM VM Test Pipeline
 
 This document describes the CI/CD infrastructure for reproducible TPM integration
 tests on a self-hosted runner.
@@ -27,7 +27,7 @@ known-good value established during manual validation.
 ### 1. Get a registration token
 
 Go to:
-**GitHub → ryanmaclean/smolBSD → Settings → Actions → Runners → New self-hosted runner**
+**GitHub → ryanmaclean/smolfire → Settings → Actions → Runners → New self-hosted runner**
 
 Copy the token shown in the "Configure" step (it is valid for ~1 hour).
 
@@ -40,7 +40,7 @@ ssh studio@<kvm-host-ip>
 ### 3. Run the setup script
 
 ```sh
-cd ~/smolBSD   # or wherever the repo is cloned
+cd ~/smolfire   # or wherever the repo is cloned
 GITHUB_RUNNER_TOKEN=<token> sh bin/setup-runner.sh
 ```
 
@@ -66,7 +66,7 @@ systemctl status 'actions.runner.ryanmaclean-smolBSD.*'
 ```
 
 The runner should appear as **Idle** at:
-https://github.com/ryanmaclean/smolBSD/settings/actions/runners
+https://github.com/ryanmaclean/smolfire/settings/actions/runners
 
 ---
 
@@ -125,13 +125,13 @@ In the GitHub UI:
 Via CLI (`gh`):
 
 ```sh
-gh workflow run tpm-vm-test.yml --repo ryanmaclean/smolBSD
+gh workflow run tpm-vm-test.yml --repo ryanmaclean/smolfire
 ```
 
 Watch live:
 
 ```sh
-gh run watch --repo ryanmaclean/smolBSD
+gh run watch --repo ryanmaclean/smolfire
 ```
 
 ---

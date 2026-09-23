@@ -64,7 +64,7 @@
 #    FreeBSD arm64 uart driver binds via FDT 'rockchip,rk3588-uart' compat.
 #
 # Build host: the aarch64 builder (FreeBSD 15 aarch64); native arm64 build.
-# See: release/tools/smolbsd-rk3588.conf, plans/tinyos/PHASE-2-PHYSICAL-BOOT.md
+# See: release/tools/smolfire-rk3588.conf, plans/tinyos/PHASE-2-PHYSICAL-BOOT.md
 #
 # Maintainer: planner@smolbsd.local
 

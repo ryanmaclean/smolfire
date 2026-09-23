@@ -35,7 +35,7 @@ ifconfig tap0 create 2>/dev/null; ifconfig tap0 up
 # session rides on, and the gate needs no guest networking. (Later, for guest
 # DHCP: ifconfig bridge0 create && ifconfig bridge0 addm tap0 addm <phys-nic> up)
 
-git clone <repo-url> ~/smolBSD && cd ~/smolBSD
+git clone <repo-url> ~/smolfire && cd ~/smolfire
 git checkout <branch-or-tag-under-test>   # e.g. main, or the PR branch being validated
 nu bin/setup-hooks.nu        # pre-push spool guard (CLAUDE.md §9)
 ```
@@ -43,21 +43,21 @@ nu bin/setup-hooks.nu        # pre-push spool guard (CLAUDE.md §9)
 ## 1. Transfer the image
 
 ```sh
-scp FreeBSD-15-amd64-smolbsd.qcow2 root@<bhyve-host>:/root/   # host address is internal — see private inventory
+scp FreeBSD-15-amd64-smolfire.qcow2 root@<bhyve-host>:/root/   # host address is internal — see private inventory
 ```
 
 ## 2. Convert qcow2 → raw (bhyve needs raw)
 
 ```sh
-cd ~/smolBSD
-nu bin/prep-bhyve-image.nu --input /root/FreeBSD-15-amd64-smolbsd.qcow2 --verify
-# Output: /root/FreeBSD-15-amd64-smolbsd.raw
+cd ~/smolfire
+nu bin/prep-bhyve-image.nu --input /root/FreeBSD-15-amd64-smolfire.qcow2 --verify
+# Output: /root/FreeBSD-15-amd64-smolfire.raw
 ```
 
 ## 3. Sanity dry-run
 
 ```sh
-nu bin/bhyve-smolfire-vm.nu --image /root/FreeBSD-15-amd64-smolbsd.raw --dry-run
+nu bin/bhyve-smolfire-vm.nu --image /root/FreeBSD-15-amd64-smolfire.raw --dry-run
 # Expect a bhyve command with: virtio-blk,<img>  virtio-net,tap0
 #   com1,/dev/nmdm0A  bootrom,BHYVE_UEFI.fd  -m 512M -c 2
 ```
@@ -65,13 +65,13 @@ nu bin/bhyve-smolfire-vm.nu --image /root/FreeBSD-15-amd64-smolbsd.raw --dry-run
 ## 4. Boot gate (orchestrator, recommended)
 
 ```sh
-cd ~/smolBSD && mkdir -p /tmp/smolbsd-results
+cd ~/smolfire && mkdir -p /tmp/smolfire-results
 nu bin/run-vm-tests.nu \
-  --image /root/FreeBSD-15-amd64-smolbsd.raw \
+  --image /root/FreeBSD-15-amd64-smolfire.raw \
   --backend bhyve --arch amd64 \
-  --vm-name smolbsd-test \
+  --vm-name smolfire-test \
   --skip '["memory", "artifact-size", "crash-recovery"]' \
-  --results-file /tmp/smolbsd-results/run-$(date -u +%Y%m%dT%H%M%SZ).toml
+  --results-file /tmp/smolfire-results/run-$(date -u +%Y%m%dT%H%M%SZ).toml
 ```
 
 Why the skips:
@@ -103,13 +103,13 @@ a strict ≤30 s claim, read the printed `TIME_TO_LOGIN` yourself.
 
 ```sh
 # Terminal B FIRST (nmdm does not buffer — attach before or within ~2 s of launch):
-cd ~/smolBSD && SMOLFIRE_CONSOLE=/dev/nmdm0B expect tests/time-to-ready-bhyve.exp
+cd ~/smolfire && SMOLFIRE_CONSOLE=/dev/nmdm0B expect tests/time-to-ready-bhyve.exp
 
 # Terminal A:
-cd ~/smolBSD && nu bin/bhyve-smolfire-vm.nu --image /root/FreeBSD-15-amd64-smolbsd.raw --name smolbsd
+cd ~/smolfire && nu bin/bhyve-smolfire-vm.nu --image /root/FreeBSD-15-amd64-smolfire.raw --name smolfire
 
 # Cleanup if wedged:
-bhyvectl --destroy --vm=smolbsd 2>/dev/null
+bhyvectl --destroy --vm=smolfire 2>/dev/null
 ```
 
 ## 5. Gate policy — 3 consecutive clean runs
@@ -119,7 +119,7 @@ would launch the qemu backend). Repeat step 4 three times with fresh
 timestamped `--results-file` values, then evaluate:
 
 ```sh
-nu bin/ci-gate.nu --results-dir /tmp/smolbsd-results
+nu bin/ci-gate.nu --results-dir /tmp/smolfire-results
 # exit 0 = gate open (3 consecutive passes), 2 = closed
 ```
 

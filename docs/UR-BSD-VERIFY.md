@@ -515,3 +515,58 @@ unverified between the rename merge and this run; it is now a verified
 finding for the amd64 leg. The aarch64/riscv64 legs remain cross-built
 + size-gate-only (see runner capability map above) and were not
 re-exercised.
+
+## Same-ISA TCG aarch64 boot: MEASURED — fast; stall is stock firstboot, not TCG (2026-09-24)
+
+Design + adversarial review: backlog panel (dynamic workflow
+wf_126b3fff-e69). Probe: `.github/workflows/aarch64-tcg-probe.yml`
+(TEMPORARY, retired after these results) driving
+`bin/ci/aarch64-boot-probe.sh` (staged-marker classifier; verdict
+contract unit-tested in `tests/aarch64-boot-probe-test.nu`).
+
+- **Run 35940101688** (probe attempt 1): both legs
+  `inconclusive-eof` in <1s — Ubuntu ships the virtio NIC's PXE ROM
+  (`efi-virtio.rom`) in `ipxe-qemu`, dropped by
+  `--no-install-recommends`. Fixed without a new package:
+  `-device virtio-net-pci,...,romfile=` (EFI disk boot never needs a
+  PXE ROM). Same missing ROM fired inside the pauth cpu preflight via
+  the virt machine's implicit default NIC and masqueraded as "cpu
+  property rejected" — preflight now passes `-nic none`. Platform
+  lesson: on Ubuntu ARM runners, any `-machine virt` invocation
+  without an explicit NIC config can die on the missing ROM.
+- **Run 35942080669** (probe attempt 2, stock 15.0-RELEASE arm64
+  BASIC-CLOUDINIT under qemu 8.2.2, AAVMF pflash, budget 1200s/leg):
+  both cpu legs `inconclusive-timeout LAST_MARKER=rc` — but the
+  marker timeline retires the "same-ISA TCG unmeasured" caveat in the
+  Runner capability map above:
+
+  | marker | -cpu max,pauth-impdef=on | -cpu neoverse-n1 |
+  |---|---|---|
+  | uefi (BdsDxe) | 6s | 6s |
+  | EFI loader | 6s | 6s |
+  | kernel banner | 7s | 6s |
+  | rc (Setting hostname) | 22s | 20s |
+
+  **Same-ISA TCG reaches early rc in ~20s** — KVM-class, two orders
+  of magnitude better than the >480s CROSS-ISA figure (which stays
+  true for x64 hosts only). The 1200s exhaustion is entirely the
+  STOCK image's firstboot machinery, visible in the serial: cloud-init,
+  growfs, and `freebsd-update` fetching metadata + "Inspecting
+  system" (a full installed-world hash walk, glacial under TCG and
+  still running at budget). The smolfire image ships none of that
+  (Finding-5 guards; no cloud-init). Entropy is a non-issue on this
+  path: `random: registering fast source VirtIO Entropy Adapter` on
+  both legs and no max-vs-neoverse delta (the HVF RDRAND lesson does
+  not transfer — GENERIC's virtio_random covers it; note SMOLFIRE-VM
+  excludes the module via MODULES_OVERRIDE, so the smolfire-image
+  number may differ — the soft-gate run measures it).
+
+**Consequence:** the aarch64 boot soft-gate (`aarch64-boot-softgate`
+job in build-image-hosted.yml, 900s budget, verdict semantics +
+recalibration rule documented in-file) is viable on ubuntu-24.04-arm.
+The stock number is a GENERIC upper bound and does NOT set the gate
+budget; the first `arch=aarch64` dispatch of the image pipeline
+produces the authoritative smolfire number — and is also the
+first-ever end-to-end run of the scripted aarch64 image leg, so a red
+build job there is triaged from smolfire-build-vm.log before any gate
+conclusion is drawn.

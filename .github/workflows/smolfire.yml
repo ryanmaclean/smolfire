@@ -21,6 +21,8 @@ permissions:
 # (Round-2 push trigger retired after run #9 went GREEN: TIME_TO_READY=
 # 511ms, NET_GATE token-TCP pass + HOST_PING pass over TAP, microvm SLIRP
 # net pass at 569ms, de-debugged kernel, isxen() pv.c patch active.)
+# (Post-rename revalidation: run 35834636692 GREEN 2026-09-23 — the
+# renamed kernel pipeline builds and passes both VMM gates.)
 on:
   pull_request:
     paths:

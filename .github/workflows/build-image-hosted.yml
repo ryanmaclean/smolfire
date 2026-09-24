@@ -16,9 +16,14 @@
 # Legs:
 #   amd64   — full: build + size gate + KVM boot gate.
 #   aarch64 — cross-built from the same amd64 FreeBSD VM (TARGET/TARGET_ARCH
-#             handled by bin/build-smolfire-vm.nu base_make_args). Size gate only:
-#             an aarch64 boot gate needs HVF/bhyve ARM hardware; TCG on x64
-#             is >480s (see docs/PHASE-1-RESULTS.md) and would always fail.
+#             handled by bin/build-smolfire-vm.nu base_make_args). Size gate
+#             + same-ISA TCG boot SOFT-gate (aarch64-boot-softgate job below,
+#             runs-on ubuntu-24.04-arm). No hosted runner hardware-accelerates
+#             an aarch64 guest (ledger: Runner capability map); the >480s
+#             TCG figure (docs/PHASE-1-RESULTS.md) was CROSS-ISA on an x64
+#             host and does not apply to the ARM runner. Soft-gate verdict
+#             semantics + recalibration exit condition: see the job comment.
+#   riscv64 — size gate only (experimental; docs/BUILDING.md).
 #
 # Timing: buildworld -j4 inside a KVM guest is ~2.5-4 h; job timeout is set
 # just under the 6 h hosted-runner ceiling. If this proves too tight, the
@@ -30,7 +35,30 @@ name: Build smolfire qcow2 compatibility image
 permissions:
   contents: read
 
+# (Post-rename revalidation: run 35834636637 GREEN 2026-09-23 — SMOLFIRE-VM
+# kernel ident, hostname smolfire, 66.6 MiB raw / 26.6 MiB compressed,
+# size + KVM boot gates PASS, 8s to login. Temp push trigger retired.)
 on:
+  # (aarch64 leg validated end-to-end: run 35947103487 GREEN 2026-09-24 —
+  # 28-min build with the 4088910 trim-knob set minus WITHOUT_INSTALLLIB,
+  # 63.1 MiB raw / 24.9 MiB compressed, size gate PASS, TCG soft-gate
+  # VERDICT=pass TIME_TO_LOGIN=31s attempt 1. Arch fallbacks reverted to
+  # amd64.)
+  #
+  # TEMPORARY push trigger, still armed (dispatch 403s for this session's
+  # token): next push validates the trim-knob set on the amd64 leg (its
+  # first amd64 build — the aarch64 run above is the only build-validation
+  # the knobs have) and then the round-3 utilities cut. Remove after those
+  # runs are green/triaged, citing run IDs.
+  push:
+    branches: ['claude/ur-bsd-26-qnmjho']
+    # build script + release confs included so triage fixes and the
+    # utilities-cut land re-fire without dummy edits
+    paths:
+      - '.github/workflows/build-image-hosted.yml'
+      - 'bin/build-smolfire-vm.nu'
+      - 'release/tools/smolfire-qemu.conf'
+      - 'release/tools/smolfire-qemu-aarch64.conf'
   workflow_dispatch:
     inputs:
       arch:
@@ -325,8 +353,9 @@ jobs:
         run: |
           set -e
           cd "$WORK"
-          # aarch64 is skipped: TCG on x64 is >480s (PHASE-1); the ARM boot
-          # gate runs on HVF/bhyve hardware per docs/BHYVE-GATE-AMD64.md.
+          # aarch64 is skipped HERE because this job is x64 (cross-ISA TCG
+          # is the >480s PHASE-1 case); its boot check is the same-ISA TCG
+          # soft-gate job (aarch64-boot-softgate) on ubuntu-24.04-arm.
           expect -c '
             set timeout 60
             set t0 [clock seconds]
@@ -364,3 +393,98 @@ jobs:
         if: always()
         run: |
           [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
+
+  # aarch64 boot SOFT-gate: same-ISA TCG on the ARM hosted runner.
+  # Design + review: backlog panel wf_126b3fff-e69; ledger "Runner
+  # capability map" — no hosted runner hardware-accelerates an aarch64
+  # guest, and the >480s TCG figure was cross-ISA (x64 host). Same-ISA
+  # TCG is measured by .github/workflows/aarch64-tcg-probe.yml.
+  #
+  # Verdict semantics (bin/ci/aarch64-boot-probe.sh contract):
+  #   pass (exit 0)             — login: within budget; job green.
+  #   fail-definitive (exit 2)  — guest-emitted panic/mountroot>; TCG
+  #                               slowness can never produce these, so
+  #                               the job goes RED (a broken image is a
+  #                               finding, not a gate defect).
+  #   inconclusive (exit 3/4)   — budget exhausted or host-side qemu
+  #                               death: retried ONCE; if still
+  #                               inconclusive, ::warning + green — the
+  #                               image is NOT verified broken, and NOT
+  #                               verified booting; gate-verdict.txt
+  #                               records which, so an inconclusive
+  #                               qcow2 is never laundered as tested.
+  #
+  # RECALIBRATION (exit condition from soft mode): after 3 measured
+  # runs, if p95 TIME_TO_LOGIN < 300s, tighten the budget to ~2x p95
+  # and promote timeout to hard fail; if runs consistently exhaust the
+  # budget while progressing (markers advance), record TCG-unviable in
+  # the ledger — the hard aarch64 boot gate then formally stays on the
+  # self-hosted-ARM/owner-hardware path. Cite measuring run IDs here.
+  aarch64-boot-softgate:
+    name: aarch64 boot soft-gate (same-ISA TCG)
+    needs: build
+    if: ${{ !inputs.kernel_only && (inputs.arch || 'amd64') == 'aarch64' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45   # worst case 2x900s boots + setup ~= 35 min
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install qemu + AAVMF firmware
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm qemu-utils qemu-efi-aarch64 expect
+          qemu-system-aarch64 --version | head -1
+
+      - name: Fetch this run's aarch64 image
+        uses: actions/download-artifact@v4
+        with:
+          name: smolfire-aarch64   # same-run artifact: retention-proof
+
+      - name: Boot gate (TCG, budget 900s, retry-once on inconclusive)
+        run: |
+          set -e
+          run_gate() {
+            SERIAL_LOG="$PWD/gate-serial-$1.log" \
+              sh bin/ci/aarch64-boot-probe.sh smolfire-aarch64.qcow2 900 "max,pauth-impdef=on" \
+              | tee "gate-$1.out"
+            return "${PIPESTATUS[0]}"
+          }
+          rc=0; run_gate attempt1 || rc=$?
+          attempts=1
+          if [ "$rc" -eq 3 ] || [ "$rc" -eq 4 ]; then
+            echo "::notice::attempt 1 inconclusive (rc=$rc) — retrying once (host-flake policy)"
+            attempts=2
+            rc=0; run_gate attempt2 || rc=$?
+          fi
+          VERDICT=$(grep -h -o 'VERDICT=[a-z-]*' gate-attempt${attempts}.out | tail -1)
+          {
+            echo "verdict=${VERDICT#VERDICT=}"
+            echo "attempts=$attempts"
+            echo "exit_code=$rc"
+            grep -h -E 'TIME_TO_LOGIN=|LAST_MARKER=|QEMU_EXIT' "gate-attempt${attempts}.out" || true
+          } > gate-verdict.txt
+          cat gate-verdict.txt
+          {
+            echo "### aarch64 boot soft-gate"
+            sed 's/^/    /' gate-verdict.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$rc" in
+            0) exit 0 ;;
+            2) echo "::error::aarch64 image failed definitively (guest terminal string) — triage serial per UR-BSD-VERIFY rollback criteria"; exit 2 ;;
+            *) echo "::warning::aarch64 TCG boot inconclusive after $attempts attempt(s): $VERDICT — TCG slowness indistinguishable from hang; image NOT verified broken, NOT verified booting"; exit 0 ;;
+          esac
+
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aarch64-softgate-evidence
+          if-no-files-found: warn
+          path: |
+            gate-verdict.txt
+            gate-attempt*.out
+            gate-serial-*.log

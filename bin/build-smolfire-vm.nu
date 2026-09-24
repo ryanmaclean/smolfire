@@ -310,7 +310,13 @@ def setup [src: string] {
         "WITHOUT_TOOLCHAIN=yes"      # implies WITHOUT_CLANG/CLANG_EXTRAS/CLANG_FORMAT/CLANG_FULL/LLD/LLDB/LLVM_COV
         "WITHOUT_LIB32=yes"
         "WITHOUT_INCLUDES=yes"
-        "WITHOUT_INSTALLLIB=yes"
+        # WITHOUT_INSTALLLIB removed (run 35945692124): it leaks into buildworld's
+        # stage-1.1 legacy bootstrap — Makefile.inc1 overrides MK_INCLUDES=yes there
+        # but NOT MK_INSTALLLIB, so libegacy.a is built yet never installed, and
+        # cross-only bootstrap tools (rpcgen/certctl, built when TARGET != host)
+        # fail to link -legacy. Native amd64 skips those tools, which is why the
+        # knob looked survivable. Its image-size effect is already covered by the
+        # release confs' recursive /usr/lib *.a trim + FIX-10 excluding -dev pkgs.
         "WITHOUT_MAN=yes"            # implies WITHOUT_MAN_UTILS
         "WITHOUT_RESCUE=yes"
         "WITHOUT_ZFS=yes"            # image root is UFS; smolfire kernels don't ship zfs.ko

@@ -479,3 +479,140 @@ rebase cannot silently break image determinism or TPM PCR stability
   the booted guest must equal the build-time set (determinism check),
   and TPM T1-T6 PCR values must be stable across two boots of the same
   image.
+
+## Post-rename revalidation — both heavyweight pipelines GREEN (2026-09-23)
+
+The smolBSD → smolfire rename (issue #41) touched kernconfs, release
+confs, build scripts, and workflow wiring, but per-push CI only
+parse-checks those — no image or kernel had been *built* under the new
+names. Temporary push triggers proved both pipelines end-to-end, then
+were retired (trigger-retirement commits note the run IDs):
+
+- **Kernel leg** (`smolfire.yml`, run 35834636692): GREEN, ~17 min.
+  SMOLFIRE kernconf builds; Firecracker net gate (TAP + token fetch +
+  HOST_PING) and QEMU microvm cross-check both PASS.
+- **Full image** (`build-image-hosted.yml`, run 35834636637): GREEN,
+  3h34m wall. `buildworld` + `buildkernel KERNCONF=SMOLFIRE-VM` +
+  `cloudware-release` (CLOUDWARE=smolfire → SMOLFIRECONF) inside the
+  nested FreeBSD 15 VM. Verified from the run itself, not assumed:
+  - kernel ident in the boot banner: `15.0-RELEASE-p13
+    releng/15.0-af58d0db156a SMOLFIRE-VM amd64`
+  - guest hostname `smolfire` ("Setting hostname: smolfire." +
+    `FreeBSD/amd64 (smolfire) (ttyu0)` login banner) — the renamed
+    conf's identity settings took effect in the shipped image
+  - size gate PASS: raw_bytes=69861376 (66.6 MiB),
+    compressed_bytes=27918336 (26.6 MiB) — byte-identical class to the
+    July diet-round-2 baseline (66.6/26.6), i.e. **no size regression
+    from the rename**; "Enforce size gate" step skipped is the pass
+    path (`if: steps.size.outcome == 'failure'`)
+  - KVM boot gate PASS: TIME_TO_LOGIN=8s, VERDICT=pass (July baseline
+    9s)
+  - artifact `smolfire-amd64` uploaded (qcow2 + build.log +
+    smolfire-build-vm.log + serial.log)
+
+Assumption retired: "the renamed heavyweight pipeline still works" was
+unverified between the rename merge and this run; it is now a verified
+finding for the amd64 leg. The aarch64/riscv64 legs remain cross-built
++ size-gate-only (see runner capability map above) and were not
+re-exercised.
+
+## Same-ISA TCG aarch64 boot: MEASURED — fast; stall is stock firstboot, not TCG (2026-09-24)
+
+Design + adversarial review: backlog panel (dynamic workflow
+wf_126b3fff-e69). Probe: `.github/workflows/aarch64-tcg-probe.yml`
+(TEMPORARY, retired after these results) driving
+`bin/ci/aarch64-boot-probe.sh` (staged-marker classifier; verdict
+contract unit-tested in `tests/aarch64-boot-probe-test.nu`).
+
+- **Run 35940101688** (probe attempt 1): both legs
+  `inconclusive-eof` in <1s — Ubuntu ships the virtio NIC's PXE ROM
+  (`efi-virtio.rom`) in `ipxe-qemu`, dropped by
+  `--no-install-recommends`. Fixed without a new package:
+  `-device virtio-net-pci,...,romfile=` (EFI disk boot never needs a
+  PXE ROM). Same missing ROM fired inside the pauth cpu preflight via
+  the virt machine's implicit default NIC and masqueraded as "cpu
+  property rejected" — preflight now passes `-nic none`. Platform
+  lesson: on Ubuntu ARM runners, any `-machine virt` invocation
+  without an explicit NIC config can die on the missing ROM.
+- **Run 35942080669** (probe attempt 2, stock 15.0-RELEASE arm64
+  BASIC-CLOUDINIT under qemu 8.2.2, AAVMF pflash, budget 1200s/leg):
+  both cpu legs `inconclusive-timeout LAST_MARKER=rc` — but the
+  marker timeline retires the "same-ISA TCG unmeasured" caveat in the
+  Runner capability map above:
+
+  | marker | -cpu max,pauth-impdef=on | -cpu neoverse-n1 |
+  |---|---|---|
+  | uefi (BdsDxe) | 6s | 6s |
+  | EFI loader | 6s | 6s |
+  | kernel banner | 7s | 6s |
+  | rc (Setting hostname) | 22s | 20s |
+
+  **Same-ISA TCG reaches early rc in ~20s** — KVM-class, two orders
+  of magnitude better than the >480s CROSS-ISA figure (which stays
+  true for x64 hosts only). The 1200s exhaustion is entirely the
+  STOCK image's firstboot machinery, visible in the serial: cloud-init,
+  growfs, and `freebsd-update` fetching metadata + "Inspecting
+  system" (a full installed-world hash walk, glacial under TCG and
+  still running at budget). The smolfire image ships none of that
+  (Finding-5 guards; no cloud-init). Entropy is a non-issue on this
+  path: `random: registering fast source VirtIO Entropy Adapter` on
+  both legs and no max-vs-neoverse delta (the HVF RDRAND lesson does
+  not transfer — GENERIC's virtio_random covers it; note SMOLFIRE-VM
+  excludes the module via MODULES_OVERRIDE, so the smolfire-image
+  number may differ — the soft-gate run measures it).
+
+**Consequence:** the aarch64 boot soft-gate (`aarch64-boot-softgate`
+job in build-image-hosted.yml, 900s budget, verdict semantics +
+recalibration rule documented in-file) is viable on ubuntu-24.04-arm.
+The stock number is a GENERIC upper bound and does NOT set the gate
+budget; the first `arch=aarch64` dispatch of the image pipeline
+produces the authoritative smolfire number — and is also the
+first-ever end-to-end run of the scripted aarch64 image leg, so a red
+build job there is triaged from smolfire-build-vm.log before any gate
+conclusion is drawn.
+
+## First end-to-end aarch64 image + TCG soft-gate PASS (2026-09-24, run 35947103487)
+
+The scripted aarch64 image leg had never executed (only a manual
+assembly existed); it is now validated end-to-end on the hosted
+pipeline, with two findings en route:
+
+- **Run 35945692124 (attempt 1) — WITHOUT_INSTALLLIB breaks cross
+  buildworld.** Died 5s in: `ld: unable to find library -legacy` for
+  rpcgen/certctl. Proven by log-diff against the green amd64 run
+  (35834636637, which predates the knob) plus releng/15.0 sources:
+  Makefile.inc1's stage-1.1 legacy env overrides `MK_INCLUDES=yes` but
+  NOT `MK_INSTALLLIB`, so src.conf's `WITHOUT_INSTALLLIB=yes` (added
+  in 4088910, a size-trim proposal never build-validated) let
+  libegacy.a be built but skipped `_libinstall`. Only cross builds
+  notice — rpcgen/certctl are bootstrap-built only when TARGET !=
+  host. Knob removed (its trim effect was already redundant: release
+  confs rm /usr/lib *.a recursively, FIX-10 excludes -dev packages).
+  `WITHOUT_TOOLCHAIN` verified cross-safe (src.opts.mk:
+  MK_CLANG_BOOTSTRAP is gated by CROSS_COMPILER, not MK_TOOLCHAIN).
+- **Run 35947103487 (attempt 2) — GREEN, and fast:**
+  - Build (world + SMOLFIRE-VM kernel + cloudware-release, cross to
+    aarch64): **28 minutes** — ~7.5x faster than the 3.5h baseline.
+    This is the 4088910 trim-knob set's first successful build
+    validation (aarch64 leg; amd64 leg still pending). The knobs also
+    change heavyweight-validation economics: a full image run now
+    costs ~35 min, not ~3.5h, which weakens the "piggyback-only"
+    premise of the round-3 utilities-cut conditional.
+  - Size gate PASS: raw_bytes=66125824 (63.1 MiB),
+    compressed_bytes=26083328 (24.9 MiB) — the first aarch64 size
+    datum; slightly under amd64's 66.6/26.6 pre-knob numbers.
+  - **aarch64 boot soft-gate: VERDICT=pass, TIME_TO_LOGIN=31s,
+    attempt 1** — the first boot of any smolfire aarch64 image,
+    anywhere, and it happened under pure same-ISA TCG on a hosted
+    ubuntu-24.04-arm runner. Serial shows `random: fast provider:
+    "Armv8 rndr RNG"` — `-cpu max` FEAT_RNG covers entropy exactly as
+    the probe design intended (SMOLFIRE-VM has no virtio_random;
+    armv8_rng attaches instead). 31s vs the stock image's >1200s
+    confirms the stall attribution: firstboot machinery, not TCG.
+  - Soft-gate recalibration status: measured run 1 of 3; budget stays
+    900s. p95 < 300s so far — on the current trend the gate tightens
+    to ~2x p95 and timeout promotes to hard fail after run 3.
+
+The "aarch64: size gate only" era is over: the leg now has a boot
+gate, its verdict semantics are honest under TCG, and the evidence
+(gate-verdict.txt + serial) uploads with every run.

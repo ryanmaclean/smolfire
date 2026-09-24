@@ -70,6 +70,9 @@ if $rc.exit_code != 0 { fail "could not read /etc/rc" }
 if not ($rc.stdout | str contains "SMOLFIRE_READY") {
     fail "/etc/rc missing SMOLFIRE_READY gate marker"
 }
+if not ($rc.stdout | str contains "SMOLFIRE_METRIC ready.vm.used.bytes=") {
+    fail "/etc/rc missing post-READY memory metric"
+}
 if not ($rc.stdout | str contains "exec /rescue/sh") {
     fail "/etc/rc missing exec /rescue/sh handoff"
 }
@@ -89,7 +92,7 @@ let tres = (with-env {RESCUE_SRC: $rescue_src, ROOT: $troot, SMOLFIRE_TSLOG: "1"
 if $tres.exit_code != 0 { fail $"SMOLFIRE_TSLOG=1 --rootfs-only exited ($tres.exit_code): ($tres.stderr)" }
 let trc = (open --raw $"($troot)/etc/rc" | lines)
 let idx = {|needle| $trc | enumerate | where {|r| $r.item | str contains $needle} | get index | first }
-for needle in ["/rescue/echo \"SMOLFIRE_READY\"" "SMOLFIRE_TSLOG_BEGIN" "sysctl -b debug.tslog" "debug.tslog_user" "SMOLFIRE_TSLOG_DONE" "exec /rescue/sh"] {
+for needle in ["/rescue/echo \"SMOLFIRE_READY\"" "SMOLFIRE_METRIC ready.vm.used.bytes=" "SMOLFIRE_TSLOG_BEGIN" "sysctl -b debug.tslog" "debug.tslog_user" "SMOLFIRE_TSLOG_DONE" "exec /rescue/sh"] {
     if ($trc | where {|l| $l | str contains $needle} | is-empty) { fail $"TSLOG rc missing: ($needle)" }
 }
 let i_ready = (do $idx "SMOLFIRE_READY")

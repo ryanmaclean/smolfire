@@ -229,6 +229,14 @@ jobs:
           # so terminal echo can never match FIRE_42 — only real sh output can.
           # Gate order: rc emits the net marker BEFORE SMOLFIRE_READY; the
           # token is per-run random, so a pass cannot be faked by echo.
+          cleanup_fc() {
+            if [ -f "$WORK/firecracker.pid" ]; then
+              kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
+              rm -f "$WORK/firecracker.pid"
+            fi
+            return 0
+          }
+          trap cleanup_fc EXIT
           timeout 60 expect -c '
             set timeout 30
             set t0 [clock milliseconds]
@@ -254,6 +262,9 @@ jobs:
                     if {[catch {exec ping -c 2 -W 2 172.16.0.2} pout]} {
                       puts "\nHOST_PING=fail ($pout)"; exit 4
                     } else { puts "\nHOST_PING=pass (host->guest ICMP over tap)" }
+                    if {![catch {exec ps -o rss= -p $fc_pid} rss]} {
+                      puts "\nSMOLFIRE_METRIC ready.host.rss_kib=[string trim $rss]"
+                    }
                     puts "\nBOOT_TRACE=pass"; exit 0
                   }
                   timeout   { puts "\nSHELL_GATE=fail (shell unresponsive)"; exit 1 }
@@ -266,6 +277,13 @@ jobs:
           RC=${PIPESTATUS[0]}
           echo "$RC" > firecracker-gate.rc
           echo "firecracker_expect_rc=$RC"
+          {
+            echo "### SMOLFIRE microVM size report"
+            echo '```'
+            grep -h -a -E '^SMOLFIRE_METRIC |^SMOLFIRE_SECTION ' \
+              "$WORK/smolfire-build-vm.log" "$WORK/firecracker-gate.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           exit 0
 
       - name: Firecracker network gate

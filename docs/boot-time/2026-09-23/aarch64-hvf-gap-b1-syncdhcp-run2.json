@@ -1,0 +1,35 @@
+{
+  "variant": "b1-syncdhcp",
+  "run": 1,
+  "env": {
+    "host": "MacBookPro18,4",
+    "cpu": "Apple M1 Max",
+    "macos": "26.6.2",
+    "qemu": "QEMU emulator version 10.2.1",
+    "accel": "hvf",
+    "mem": "256M",
+    "cpus": 2,
+    "nic": "user,model=virtio-net-pci",
+    "qemu_extra": "-boot menu=on,splash-time=0",
+    "poll_ms": 10,
+    "loadavg_before": "{ 53.01 23.54 15.96 }",
+    "loadavg_after": "{ 56.53 25.32 16.68 }",
+    "date": "2026-09-23T02:56:25-0700"
+  },
+  "markers_ms": {
+    "first_byte": 295,
+    "loader": 454,
+    "kernel": 454,
+    "root_mount": 454,
+    "rc": 454,
+    "login": 8553
+  },
+  "phases_ms": {
+    "firmware": 454,
+    "loader": 0,
+    "kernel": 0,
+    "mount_to_rc": 0,
+    "rc_to_login": 8099,
+    "total": 8553
+  }
+}

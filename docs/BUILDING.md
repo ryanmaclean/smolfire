@@ -157,6 +157,14 @@ nu bin/sizereport.nu smolfire-build-vm.log        # tables, largest first
 nu bin/sizereport.nu smolfire-build-vm.log --top 30
 ```
 
+The microVM path emits `SMOLFIRE_METRIC` / `SMOLFIRE_SECTION` lines into the
+build and gate logs (embedded MFS size, `/rescue/rescue`, kernel text/data/bss,
+ELF section sizes, post-READY memory). Parse them with:
+
+```sh
+nu bin/smolfire-metrics.nu smolfire-build-vm.log smolfire-gate.log
+```
+
 ## Partial runs (qcow2 compatibility path)
 
 If buildworld already completed and the obj tree is intact:

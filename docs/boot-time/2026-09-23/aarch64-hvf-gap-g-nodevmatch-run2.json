@@ -1,0 +1,35 @@
+{
+  "variant": "g-nodevmatch",
+  "run": 1,
+  "env": {
+    "host": "MacBookPro18,4",
+    "cpu": "Apple M1 Max",
+    "macos": "26.6.2",
+    "qemu": "QEMU emulator version 10.2.1",
+    "accel": "hvf",
+    "mem": "256M",
+    "cpus": 2,
+    "nic": "user,model=virtio-net-pci",
+    "qemu_extra": "-boot menu=on,splash-time=0",
+    "poll_ms": 10,
+    "loadavg_before": "{ 102.40 67.53 36.13 }",
+    "loadavg_after": "{ 102.40 67.53 36.13 }",
+    "date": "2026-09-23T02:59:09-0700"
+  },
+  "markers_ms": {
+    "first_byte": 132,
+    "loader": 494,
+    "kernel": 657,
+    "root_mount": 911,
+    "rc": 1371,
+    "login": 3774
+  },
+  "phases_ms": {
+    "firmware": 494,
+    "loader": 163,
+    "kernel": 254,
+    "mount_to_rc": 460,
+    "rc_to_login": 2403,
+    "total": 3774
+  }
+}

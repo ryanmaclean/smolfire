@@ -1,0 +1,7 @@
+NET_GATE=pass (guest-initiated TCP, token verified)
+TIME_TO_READY=511ms
+HOST_PING=pass (host->guest ICMP over tap)
+VERDICT=pass (interactive shell confirmed)
+SMOLFIRE_METRIC ready.vm.used.bytes=20971520
+SMOLFIRE_METRIC ready.host.rss_kib=43008
+

@@ -37,14 +37,35 @@ def write-spool [path: string, content: string] {
     $content | save --force $path
 }
 
+# Drop every PATH directory that contains an executable named after a known
+# billed-agent CLI (binary-existence check, not a directory-name string
+# match — see tests/spawn-subagent-test.nu for why that's the wrong check).
+def strip-agent-bins [path: list<string>] {
+    let agent_bins = [claude codex opencode ollama]
+    $path | where {|dir| $agent_bins | all {|bin| not ($dir | path join $bin | path exists) } }
+}
+
 # Run one coordinator tick.
 # --state-file and --spool are relative paths joined to --root inside coord-tick.nu.
+#
+# Billed-subprocess guard: this suite exercises the FSM/dispatch mechanics,
+# never the real subagent spawn, so SMOLFIRE_SPAWN_SUBAGENT is left unset
+# (spawn-subagent's default-off gate — see bin/coord-tick.nu). PATH is also
+# hardened by stripping any directory that resolves a real claude/codex/
+# opencode/ollama binary, as defense-in-depth in case that default ever
+# regresses. nu itself is invoked by absolute path ($nu.current-exe) so
+# stripping PATH can't also take out the interpreter running the child.
 def run-tick [
     root:      string
     state_rel: string   # relative to root
     spool_rel: string   # relative to root
 ] {
-    ^nu bin/coord-tick.nu --state-file $state_rel --spool $spool_rel --root $root | ignore
+    let nu_bin = $nu.current-exe
+    let hermetic_path = strip-agent-bins $env.PATH
+    with-env {PATH: $hermetic_path} {
+        hide-env -i SMOLFIRE_SPAWN_SUBAGENT
+        (^$nu_bin --no-config-file bin/coord-tick.nu --state-file $state_rel --spool $spool_rel --root $root) | ignore
+    }
 }
 
 # Build a minimal mbox message string.

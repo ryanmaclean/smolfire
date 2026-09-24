@@ -1,0 +1,23 @@
+{
+  "data": {
+    "type": "notebooks",
+    "attributes": {
+      "name": "smolFire — Lower-bound Runtime, Temporal Storage & Lineage",
+      "status": "published",
+      "time": {
+        "live_span": "1w"
+      },
+      "cells": [
+        {
+          "type": "notebook_cells",
+          "attributes": {
+            "definition": {
+              "type": "markdown",
+              "text": "# smolFire: lower-bound runtime, temporal storage, and lineage\n\nCanonical source: `docs/LOWER-BOUND-RUNTIME-2026-09-23.md`\n\n## Objective\n\nFind the smallest/fastest permissively licensed runtime that can run agent work while avoiding duplicated state logic across filesystem, queue, database, tracing, lineage, and orchestration.\n\n## Current execution candidates\n\n- FreeBSD smolFire one-ELF PVH microVM: measured reference\n- NetBSD 11 MICROVM: smallest complete NetBSD candidate\n- NetBSD rump / rumprun: software lower bound before hardware\n- FPGA / SmartNIC / DPU / NVMe transaction sequencer: hardware lower bound\n\n## Storage matrix\n\n- HAMMER1: native fine-grained transaction history\n- HAMMER2: modern portable BSD filesystem candidate\n- NetBSD LFS: append/log/checkpoint semantics\n- NetBSD FFS + WAPBL + fss: mature correctness baseline\n\nCommon workload: create card → pending/running rename → append logs → write artifact → done/failed → fsync → crash → recover → reconstruct history → export lineage.\n\n## Lineage rule\n\nBOP + filesystem-native identities are canonical. OpenLineage is derived.\n\n- card/template → Job\n- execution/lease UUID → Run\n- HAMMER TID / LFS checkpoint / HAMMER2 snapshot/PFS / FFS snapshot → DatasetVersion\n- state rename → START/COMPLETE/FAIL\n\nNo second canonical lineage DB.\n\n## Jev / System One\n\nUse only as a fast decision plane:\n\n- provider selection/rotation\n- retry/fail/escalate\n- priority/routing\n- capability match\n- review/tool gates\n- choose deterministic vs expensive LLM path\n\nDo not use for code/text generation. Safety invariants remain deterministic.\n\n## Hardware direction\n\nPrototype one transaction primitive:\n\nmutation descriptor → sequence/TID → timestamp → hash/checksum → route → DMA/NVMe append → completion.\n\nMeasure a software ring first, then FPGA/SmartNIC/DPU.\n\n## Open work\n\nsmolFire #60, #61, #62, #63, #64, #65, #72, #73\nBOP #5\n\nSee the canonical repo document for full rationale, measurements, constraints, and execution order.\n"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

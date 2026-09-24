@@ -637,3 +637,41 @@ pipeline, with two findings en route:
 The "aarch64: size gate only" era is over: the leg now has a boot
 gate, its verdict semantics are honest under TCG, and the evidence
 (gate-verdict.txt + serial) uploads with every run.
+
+## Round-3 utilities cut LANDED + trim-knob set validated on both legs (2026-09-24)
+
+Three runs close out the backlog panel's (wf_126b3fff-e69) conditional:
+
+- **Run 35955339464 (knobs only, amd64): GREEN, 35 min** — the 4088910
+  trim-knob set (minus WITHOUT_INSTALLLIB, removed above) passes its
+  first amd64 build with the KVM boot gate (10s step). Combined with
+  run 35947103487 (aarch64), the knob set is validated on both legs.
+  Build time drops ~7x on both: heavyweight validation now costs
+  ~35 min, permanently changing the piggyback-only economics.
+- **Run 35955631938 (cut, attempt 1): RED — LDDCHECK's first catch.**
+  `LDDCHECK: FAIL MISSING libpcap.so.8 needed by /usr/sbin/ipfwpcap`.
+  The round-3 enumeration's "sole consumer tcpdump" claim was wrong;
+  the fail-loud gate the design review demanded caught the orphan
+  before a broken binary shipped. ipfwpcap joined the libpcap+RDMA
+  revert unit (consumers+lib cut together, ZFS-block precedent).
+- **Run 35959282125 (cut, attempt 2): GREEN, 38 min** — all gates:
+  - `LDDCHECK: PASS (no orphaned sonames; index 162 libs)` — the
+    libprivatessh canary confirms the index sees /usr/lib/private.
+  - Survivors sub-report (new instrument, same run):
+    `UTILITIES_TOTAL_KIB=9992` — FreeBSD-utilities shipped bytes fell
+    13.2 → 9.76 MiB (~3.4 MiB cut, above the ~2.5 projection thanks
+    to ipfwpcap + hardlink families).
+  - Size gate PASS: raw_bytes=65601536 (62.6 MiB),
+    compressed_bytes=26214400 (25.0 MiB) — amd64 image down from the
+    66.6 MiB pre-knob baseline (knobs + cut combined; the per-cause
+    split is not separately attributed).
+  - KVM boot gate: TIME_TO_LOGIN=9s VERDICT=pass — no boot regression.
+- Two-conf drift is now structurally prevented: the SHARED-TRIM region
+  is diffed per-push in ci.yml, and conf-hook-test executes the cut +
+  LDDCHECK canary against a fixture tree.
+- aarch64 validation of the cut rides the soft-gate's next run (the
+  region is byte-identical by CI-enforced construction; the remaining
+  aarch64-specific risk is nil-to-low and the gate is armed).
+
+Temp push trigger on build-image-hosted.yml retired in this commit —
+exit condition met (runs 35955339464 + 35959282125 green).

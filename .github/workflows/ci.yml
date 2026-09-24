@@ -171,6 +171,19 @@ jobs:
                      release/tools/smolfire-qemu.conf \
                      release/tools/smolfire-qemu-aarch64.conf
 
+      # The SHARED-TRIM region (safety guard through SIZEREPORT, incl. the
+      # round-3 cut + LDDCHECK gate) must stay byte-identical across both
+      # confs — this is what makes two-conf drift impossible.
+      - name: SHARED-TRIM region sync check
+        run: |
+          sed -n '/>>> SHARED-TRIM >>>/,/<<< SHARED-TRIM <<</p' \
+            release/tools/smolfire-qemu.conf > /tmp/trim-amd64
+          sed -n '/>>> SHARED-TRIM >>>/,/<<< SHARED-TRIM <<</p' \
+            release/tools/smolfire-qemu-aarch64.conf > /tmp/trim-aarch64
+          test -s /tmp/trim-amd64 || { echo "SHARED-TRIM markers missing from smolfire-qemu.conf"; exit 1; }
+          diff -u /tmp/trim-amd64 /tmp/trim-aarch64
+          echo "SHARED-TRIM regions identical ($(wc -l < /tmp/trim-amd64) lines)"
+
   # ── Release config hook smoke-test ───────────────────────────────────────────
   conf-hook-test:
     name: Release conf hook test
@@ -207,6 +220,23 @@ jobs:
           touch "$DESTDIR/usr/lib/libfoo.a"
           touch "$DESTDIR/usr/share/zoneinfo/UTC"
           touch "$DESTDIR/usr/share/zoneinfo/America/New_York"
+          # round-3 utilities-cut fixtures + LDDCHECK canary requirement:
+          # the gate's self-test demands libprivatessh be visible in a
+          # recursive lib index (it fails-loud otherwise, by design)
+          mkdir -p "$DESTDIR/usr/lib/private" "$DESTDIR/usr/share/misc" \
+                   "$DESTDIR/usr/share/firmware"
+          touch "$DESTDIR/usr/lib/private/libprivatessh.so.5"
+          touch "$DESTDIR/usr/bin/bc" "$DESTDIR/usr/bin/dc" \
+                "$DESTDIR/usr/bin/netstat" "$DESTDIR/usr/bin/truss" \
+                "$DESTDIR/usr/bin/zstd" "$DESTDIR/usr/sbin/makefs" 2>/dev/null || \
+            { mkdir -p "$DESTDIR/usr/sbin"; touch "$DESTDIR/usr/bin/bc" \
+                "$DESTDIR/usr/bin/dc" "$DESTDIR/usr/bin/netstat" \
+                "$DESTDIR/usr/bin/truss" "$DESTDIR/usr/bin/zstd" \
+                "$DESTDIR/usr/sbin/makefs"; }
+          touch "$DESTDIR/usr/lib/libsysdecode.so.5" "$DESTDIR/lib/libpcap.so.8"
+          touch "$DESTDIR/usr/sbin/ipfwpcap"
+          touch "$DESTDIR/usr/share/misc/usbdevs" \
+                "$DESTDIR/usr/share/firmware/ar5523.bin"
           # Stub out commands that require real system tools
           pw()        { :; }
           ssh-keygen(){
@@ -246,6 +276,26 @@ jobs:
             echo "FAIL: static lib not removed" >&2; fail=1
           else
             echo "PASS: static lib removed"
+          fi
+          # round-3 utilities cut: cut files gone, keep-list intact
+          for f in \
+            "$DESTDIR/usr/bin/bc" "$DESTDIR/usr/bin/dc" \
+            "$DESTDIR/usr/bin/netstat" "$DESTDIR/usr/bin/truss" \
+            "$DESTDIR/usr/bin/zstd" "$DESTDIR/usr/sbin/makefs" \
+            "$DESTDIR/usr/lib/libsysdecode.so.5" "$DESTDIR/lib/libpcap.so.8" \
+            "$DESTDIR/usr/sbin/ipfwpcap" \
+            "$DESTDIR/usr/share/misc/usbdevs" \
+            "$DESTDIR/usr/share/firmware/ar5523.bin"; do
+            if [ -e "$f" ]; then
+              echo "FAIL: round-3 cut left $f behind" >&2; fail=1
+            else
+              echo "PASS: round-3 removed ${f#"$DESTDIR"}"
+            fi
+          done
+          if [ ! -f "$DESTDIR/usr/lib/private/libprivatessh.so.5" ]; then
+            echo "FAIL: keep-list file libprivatessh.so.5 was removed" >&2; fail=1
+          else
+            echo "PASS: keep-list libprivatessh.so.5 retained (LDDCHECK canary saw it)"
           fi
           # UTC zoneinfo retained; America/ stripped
           if [ ! -f "$DESTDIR/usr/share/zoneinfo/UTC" ]; then

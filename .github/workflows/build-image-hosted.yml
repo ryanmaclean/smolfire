@@ -44,21 +44,9 @@ on:
   # 63.1 MiB raw / 24.9 MiB compressed, size gate PASS, TCG soft-gate
   # VERDICT=pass TIME_TO_LOGIN=31s attempt 1. Arch fallbacks reverted to
   # amd64.)
-  #
-  # TEMPORARY push trigger, still armed (dispatch 403s for this session's
-  # token): next push validates the trim-knob set on the amd64 leg (its
-  # first amd64 build — the aarch64 run above is the only build-validation
-  # the knobs have) and then the round-3 utilities cut. Remove after those
-  # runs are green/triaged, citing run IDs.
-  push:
-    branches: ['claude/ur-bsd-26-qnmjho']
-    # build script + release confs included so triage fixes and the
-    # utilities-cut land re-fire without dummy edits
-    paths:
-      - '.github/workflows/build-image-hosted.yml'
-      - 'bin/build-smolfire-vm.nu'
-      - 'release/tools/smolfire-qemu.conf'
-      - 'release/tools/smolfire-qemu-aarch64.conf'
+  # (Trim-knob set + round-3 utilities cut validated on amd64: runs
+  # 35955339464 (knobs, 35 min, KVM boot gate 10s) and 35959282125
+  # (cut: LDDCHECK PASS, 62.6/25.0 MiB, boot 9s). Temp trigger retired.)
   workflow_dispatch:
     inputs:
       arch:

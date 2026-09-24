@@ -64,7 +64,10 @@ Updated: 2026-09-23
 
 ## Phase 5 status
 
-Blocked pending Phase 4 completion and physical hardware availability.
+Deferred 2026-09-24: no RP1 firmware TPM on pi501 (owner-confirmed); SPI TPM
+HAT ruled out (PoE HAT occupies the header). No physical-TPM path on current
+hardware — revisit on RK3588 or future board. Plan skeleton on
+`phase5/ftpm-plan-skeleton` records the decision.
 
 ## Coordinator FSM stories
 

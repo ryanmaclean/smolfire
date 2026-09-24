@@ -67,3 +67,7 @@ Evaluate whether trusted hardware can retain only:
 ```
 
 while external storage retains the immutable history.
+
+## First model-check result (#89)
+
+`bin/durable-tid-model.nu` (bounded explicit-state; CI step `durable-tid model check (#89)`) compares hardware TID allocation with caller-supplied sequence. The allocator alone commits retried requests twice after a reset. The caller-sequence model keeps every invariant above and needs less trusted state. Details are in `docs/DURABLE-TID-SEQ-VS-ALLOC.md`.

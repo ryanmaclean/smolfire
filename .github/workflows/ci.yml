@@ -127,6 +127,18 @@ jobs:
         working-directory: .
         run: nu tests/bhyve-tpm-pcr-verify.nu --dry-run
 
+      # attest-verify fixture tests were previously run-all.sh-only and
+      # broke on Linux (GNU base64 wraps at 76 cols; fixtures now use
+      # `openssl base64 -A` per the verifier's own contract). Wired into
+      # CI on both matrix OSes so the portability fix stays enforced.
+      - name: tpm-attest-verify tests (RSA/ECC fixture paths)
+        run: nu tests/tpm-attest-verify-test.nu
+
+      # aarch64 boot-probe verdict classifier (PROBE_QEMU/AAVMF_DIR test
+      # seams — no qemu or ARM hardware needed; skips without expect(1))
+      - name: aarch64-boot-probe classifier tests
+        run: nu tests/aarch64-boot-probe-test.nu
+
   # ── Shell script linting ─────────────────────────────────────────────────────
   shellcheck:
     name: Shellcheck

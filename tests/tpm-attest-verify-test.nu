@@ -91,9 +91,9 @@ def make-valid-quote [task_id: string, pcr_digest: string, nonce: string] {
     (^openssl dgst -sha256 -sign $priv_key -out $sig_file $quote_file) | ignore
 
     # Read and base64 encode everything
-    let quote_b64 = (open --raw $quote_file | ^base64 | str trim)
-    let sig_b64 = (open --raw $sig_file | ^base64 | str trim)
-    let pub_b64 = (open --raw $pub_key | ^base64 | str trim)
+    let quote_b64 = (open --raw $quote_file | ^openssl base64 -A | str trim)
+    let sig_b64 = (open --raw $sig_file | ^openssl base64 -A | str trim)
+    let pub_b64 = (open --raw $pub_key | ^openssl base64 -A | str trim)
 
     # Cleanup
     ^rm -rf $tmpdir
@@ -353,9 +353,9 @@ do {
     $quote_json | save --force $"($tmp)/quote.json"
     (^openssl rand -out $"($tmp)/quote.sig" 64) | ignore
 
-    let quote_b64 = (open --raw $"($tmp)/quote.json" | ^base64 | str trim)
-    let sig_b64 = (open --raw $"($tmp)/quote.sig" | ^base64 | str trim)
-    let pub_b64 = (open --raw $"($tmp)/ec_pub.pem" | ^base64 | str trim)
+    let quote_b64 = (open --raw $"($tmp)/quote.json" | ^openssl base64 -A | str trim)
+    let sig_b64 = (open --raw $"($tmp)/quote.sig" | ^openssl base64 -A | str trim)
+    let pub_b64 = (open --raw $"($tmp)/ec_pub.pem" | ^openssl base64 -A | str trim)
     let quote_content = $'
 task_id = "t-test-10"
 pcr_digest = "($pcr)"
@@ -388,9 +388,9 @@ do {
     (^openssl ec -in $"($tmp)/ec_priv.pem" -pubout -out $"($tmp)/ec_pub.pem") | ignore
     ({task_id: "t-test-11", pcr_digest: $pcr, nonce: $nonce} | to json) | save --force $"($tmp)/quote.json"
     (^openssl rand -out $"($tmp)/quote.sig" 64) | ignore
-    let quote_b64 = (open --raw $"($tmp)/quote.json" | ^base64 | str trim)
-    let sig_b64 = (open --raw $"($tmp)/quote.sig" | ^base64 | str trim)
-    let pub_b64 = (open --raw $"($tmp)/ec_pub.pem" | ^base64 | str trim)
+    let quote_b64 = (open --raw $"($tmp)/quote.json" | ^openssl base64 -A | str trim)
+    let sig_b64 = (open --raw $"($tmp)/quote.sig" | ^openssl base64 -A | str trim)
+    let pub_b64 = (open --raw $"($tmp)/ec_pub.pem" | ^openssl base64 -A | str trim)
     let quote_content = $'
 task_id = "t-test-11"
 pcr_digest = "($pcr)"

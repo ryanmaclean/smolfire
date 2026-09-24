@@ -94,9 +94,10 @@ plan after its prerequisites are met — starting with first hardware touch.
   - PASS-A (fTPM present): `/dev/tpm0` exists, PCRs readable, manufacturer
     ID recorded → P2/P3 unblocked, plan expands to executable.
   - PASS-B (no TPM): SUPERSEDED 2026-09-24 — owner confirms no RP1 firmware TPM;
-    the fTPM path is dead. Remaining physical-TPM option is a discrete SPI TPM
-    HAT (Infineon SLB9670 / LetsTrust), which needs procurement + SPI overlay
-    enablement, or defer Phase 5. Do not probe for fTPM.
+    the fTPM path is dead. Discrete SPI TPM HAT also ruled out same day
+    (PoE HAT already occupies the header — no slot). Phase 5 DEFERRED:
+    no physical-TPM path on pi501; revisit on RK3588 or future board.
+    Do not probe for fTPM.
   </acceptance_sketch>
   <human_physical>HUMAN-REMOTE (not physical): SSH credential handoff only.</human_physical>
 </gate>

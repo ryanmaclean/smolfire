@@ -46,7 +46,11 @@ on:
   # the run ID.
   push:
     branches: ['claude/ur-bsd-26-qnmjho']
-    paths: ['.github/workflows/build-image-hosted.yml']
+    # build script included so triage fixes re-fire without dummy edits
+    # (same lesson as the probe's trigger paths)
+    paths:
+      - '.github/workflows/build-image-hosted.yml'
+      - 'bin/build-smolfire-vm.nu'
   workflow_dispatch:
     inputs:
       arch:

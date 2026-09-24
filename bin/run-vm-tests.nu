@@ -655,6 +655,11 @@ export def main [
             "-nic"   $"user,model=virtio-net-pci,hostfwd=tcp::($hostfwd_ssh)-:22"
             "-serial" "stdio" "-nographic"
         ]
+        # aarch64 + HVF: skip EDK2's ~5 s boot-menu wait — same rule as
+        # qemu-smolfire-vm.nu fw-boot-menu-args (docs/BOOT-TIME-ROADMAP.md §1).
+        if $norm_arch == "aarch64" and $accel == "hvf" {
+            $parts = $parts | append ["-boot" "menu=on,splash-time=0"]
+        }
         $parts | str join " "
     } else {
         ""   # bhyve path does not use SMOLFIRE_QEMU_CMD

@@ -35,12 +35,29 @@ if [ "${1:-}" = "--rootfs-only" ]; then
     ROOTFS_ONLY=yes
 fi
 
+emit_metric() {
+    printf 'SMOLFIRE_METRIC %s=%s\n' "$1" "$2"
+}
+
+emit_section_metrics() {
+    size -A -d "$1" | awk '
+        $1 ~ /^\./ && $2 ~ /^[0-9]+$/ {
+            printf "SMOLFIRE_SECTION %s=%s\n", $1, $2
+            if ($1 == ".text" || $1 == ".data" || $1 == ".bss") {
+                printf "SMOLFIRE_METRIC kernel%s.bytes=%s\n", $1, $2
+            }
+            ok = 1
+        }
+        END { exit ok ? 0 : 1 }'
+}
+
 RESCUE_DIR=$(dirname "$RESCUE_SRC")
 echo "==> rootfs: static /rescue crunchgen userland ($(du -sh "$RESCUE_DIR" | cut -f1))"
 rm -rf "$ROOT"
 mkdir -p "$ROOT/dev" "$ROOT/etc" "$ROOT/rescue" "$ROOT/sbin" "$ROOT/bin" \
          "$ROOT/tmp" "$ROOT/mnt"
 cp -p "$RESCUE_SRC" "$ROOT/rescue/rescue"
+emit_metric rescue.bytes "$(wc -c < "$ROOT/rescue/rescue")"
 # crunchgen dispatches on argv[0]; hard-link the names we use (same fs).
 for n in init sh ifconfig route ping fetch nc sysctl mount umount \
          mount_nullfs devfs mdconfig \
@@ -57,9 +74,8 @@ ln "$ROOT/rescue/rescue" "$ROOT/bin/sh"
 
 # init(8) runs /etc/rc and waits; rc never exits — it becomes the console
 # shell. Gate protocol: SMOLFIRE_READY on serial, then interactive sh.
-# write_rc release|tslog — the two variants share everything up to the
-# READY marker; only the tail differs (the release rc is byte-identical
-# to the pre-TSLOG one, so the release ELF's measured path is unchanged).
+# write_rc release|tslog — the two variants share the same READY + memory
+# metric path; only the TSLOG dump tail is measurement-only.
 write_rc() {
 cat > "$ROOT/etc/rc" <<'EOF'
 #!/rescue/sh
@@ -94,6 +110,13 @@ if [ "$1" = tslog ]; then
     ln -f "$ROOT/rescue/rescue" "$ROOT/rescue/sed"
     cat >> "$ROOT/etc/rc" <<'EOF'
 /rescue/echo "SMOLFIRE_READY"
+pages=$(sysctl -n vm.stats.vm.v_page_count 2>/dev/null) || pages=""
+free=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null) || free=""
+psize=$(sysctl -n vm.stats.vm.v_page_size 2>/dev/null) || psize=""
+if [ -n "$pages" ] && [ -n "$free" ] && [ -n "$psize" ]; then
+    used=$(( (pages - free) * psize ))
+    echo "SMOLFIRE_METRIC ready.vm.used.bytes=$used"
+fi
 echo "SMOLFIRE_TSLOG_META tsc_freq=$(sysctl -n machdep.tsc_freq) ncpu=$(sysctl -n hw.ncpu) ident=$(sysctl -n kern.ident)"
 echo "SMOLFIRE_TSLOG_BEGIN"
 sysctl -b debug.tslog
@@ -107,6 +130,13 @@ EOF
 else
     cat >> "$ROOT/etc/rc" <<'EOF'
 echo "SMOLFIRE_READY"
+pages=$(sysctl -n vm.stats.vm.v_page_count 2>/dev/null) || pages=""
+free=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null) || free=""
+psize=$(sysctl -n vm.stats.vm.v_page_size 2>/dev/null) || psize=""
+if [ -n "$pages" ] && [ -n "$free" ] && [ -n "$psize" ]; then
+used=$(( (pages - free) * psize ))
+echo "SMOLFIRE_METRIC ready.vm.used.bytes=$used"
+fi
 exec /rescue/sh </dev/console >/dev/console 2>&1
 EOF
 fi
@@ -135,17 +165,26 @@ NCPU=$(sysctl -n hw.ncpu)
 # xen_delay unconditionally — xen_delay faults on non-Xen PVH
 # (Firecracker, QEMU microvm) because HYPERVISOR_shared_info is never
 # mapped (run #6). Preserves real Xen PVH boots, unlike the old sed
-# swap. Upstream submission draft; drop once it lands in releng.
-# Idempotent: skipped when already applied.
+# swap. If upstream/main grows a different non-Xen-safe fix first, this
+# block must classify that state and skip the local patch explicitly.
 PV=/usr/src/sys/x86/xen/pv.c
 if grep -q 'pvh_early_delay' "$PV"; then
     echo "==> pv.c already patched (pvh_early_delay dispatch present)"
+elif grep -Eq 'early_clock_source_init[[:space:]]*=[[:space:]]*xen_clock_init' "$PV" &&
+     grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV"; then
+    echo "==> patching pv.c: isxen() runtime dispatch for early clock/delay"
 else
     # Fail LOUD if the file shape is unrecognized (run #7's lesson) —
-    # also catches a tree still carrying the old i8254 sed swap.
-    grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV" \
-        || { echo "ERROR: pv.c shape unrecognized — refusing to build unpatched"; exit 1; }
-    echo "==> patching pv.c: isxen() runtime dispatch for early clock/delay"
+    # also catches trees that moved only one init hook away from Xen.
+    if grep -Eq 'early_clock_source_init[[:space:]]*=[[:space:]]*xen_clock_init' "$PV" ||
+       grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV"; then
+        echo "ERROR: pv.c only partially moved away from Xen early hooks — refusing ambiguous tree"
+        exit 1
+    fi
+    echo "==> pv.c already carries non-Xen early hooks; skipping local patch"
+fi
+if grep -Eq 'early_clock_source_init[[:space:]]*=[[:space:]]*xen_clock_init' "$PV" &&
+   grep -Eq 'early_delay[[:space:]]*=[[:space:]]*xen_delay' "$PV"; then
     patch -p1 -d /usr/src <<'PVEOF'
 --- a/sys/x86/xen/pv.c
 +++ b/sys/x86/xen/pv.c
@@ -222,6 +261,7 @@ echo "==> makefs (UFS image with free-space headroom)"
 # root filesystem boots ~100% full — any runtime write would fail.
 makefs -t ffs -o version=2 -o label=smolfire -b 10% "$IMG" "$ROOT"
 ls -lh "$IMG"
+emit_metric mfs.bytes "$(wc -c < "$IMG")"
 
 echo "==> kernel-toolchain + buildkernel SMOLFIRE (log: $LOG)"
 # kernel-toolchain is the small buildworld subset buildkernel needs.
@@ -233,6 +273,8 @@ KERNEL="/usr/obj${SRC}/amd64.amd64/sys/SMOLFIRE/kernel"
 test -f "$KERNEL" || { echo "ERROR: no kernel at $KERNEL"; tail -50 "$LOG"; exit 1; }
 cp "$KERNEL" "$OUT"
 echo "==> smolfire kernel: $(du -h "$OUT" | cut -f1) (rootfs embedded)"
+emit_metric kernel.bytes "$(wc -c < "$OUT")"
+emit_section_metrics "$OUT"
 
 if [ "$TSLOG" = yes ]; then
     # Measurement-only second kernel: same tree, same objdir toolchain

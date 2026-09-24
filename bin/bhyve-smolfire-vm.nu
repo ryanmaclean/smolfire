@@ -3,9 +3,11 @@
 # bhyve-smolfire-vm.nu — launch smolfire inside bhyve with optional swtpm
 #
 # Boots a smolfire qcow2 or raw image in bhyve on a FreeBSD 15 host.
-# With --tpm, starts an swtpm socket daemon and passes it to bhyve as a
-# virtio-tpm device; the guest sees /dev/tpm0 and can read PCR0 via tpm2-tools.
-# --tpm requires --arch amd64 (arm64 bhyve has no virtio-tpm device).
+# With --tpm, starts an swtpm socket daemon and passes it to bhyve as an
+# LPC/ACPI CRB TPM device (`-l tpm,swtpm,<socket>`); the guest sees /dev/tpm0
+# and can read PCR0 via tpm2-tools.
+# --tpm requires --arch amd64 (arm64 bhyve has no TPM device backend — see
+# bhyve(8): the tpm frontend is only wired up on amd64).
 #
 # Prerequisites (on FreeBSD bhyve host):
 #   - bhyve(8), bhyvectl(8)  (base system)
@@ -30,10 +32,14 @@
 #       -s 2,virtio-blk,<img> -s 3,virtio-net,tap0 \
 #       -l com1,/dev/nmdm0A \
 #       -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd \
-#       [-s 5,tpm,type=swtpm,path=<sock>] \
+#       [-l tpm,swtpm,<data-sock>] \
 #       -m 512M -c 2 <vmname>
 #
-#   arm64 (no -H/-P, no lpc slot, no -l com1, no virtio-tpm):
+#   TPM is an LPC/ACPI CRB device attached with `-l tpm,swtpm,<socket>`
+#   (or `-l tpm,passthru,/dev/tpm0` for passthrough) — NOT a PCI slot
+#   (`-s N,tpm,...` is not a valid bhyve device). See bhyve(8).
+#
+#   arm64 (no -H/-P, no lpc slot, no -l com1, no tpm device):
 #     bhyve \
 #       -o console=stdio \
 #       -o bootrom=/usr/local/share/u-boot/u-boot-bhyve-arm64/u-boot.bin \
@@ -57,9 +63,18 @@ def log-step [step: string, msg: string, extra: record = {}] {
 
 # ── swtpm helpers ──────────────────────────────────────────────────────────────
 
-# Start an swtpm socket daemon.  Returns the socket path.
+# Start an swtpm socket daemon.  Returns the *data* socket path — this is
+# the socket bhyve connects to via `-l tpm,swtpm,<path>`.
+#
+# swtpm exposes two distinct unix sockets:
+#   --server  the TPM command/response data channel (what bhyve/QEMU talk to)
+#   --ctrl    an out-of-band control channel (reset, terminate, etc.)
+# bhyve only ever dials the --server socket; passing the --ctrl socket to
+# `-l tpm,swtpm,...` leaves bhyve unable to complete the TPM handshake.
+# See swtpm(8).
 def start-swtpm [state_dir: string]: nothing -> string {
-    let sock = $"($state_dir)/swtpm.sock"
+    let sock      = $"($state_dir)/swtpm.sock"
+    let ctrl_sock = $"($state_dir)/swtpm-ctrl.sock"
 
     log-step "swtpm-start" "creating swtpm state directory" {dir: $state_dir}
     ^mkdir -p $state_dir
@@ -72,24 +87,26 @@ def start-swtpm [state_dir: string]: nothing -> string {
     }
     let swtpm_bin = $found | first
 
-    log-step "swtpm-start" "launching swtpm daemon" {bin: $swtpm_bin, sock: $sock, state: $state_dir}
+    log-step "swtpm-start" "launching swtpm daemon" {bin: $swtpm_bin, sock: $sock, ctrl_sock: $ctrl_sock, state: $state_dir}
     let tpmstate_arg = $"dir=($state_dir)"
-    let ctrl_arg     = $"type=unixio,path=($sock)"
-    ^$swtpm_bin socket --tpmstate $tpmstate_arg --tpm2 --ctrl $ctrl_arg --daemon
+    let server_arg   = $"type=unixio,path=($sock)"
+    let ctrl_arg     = $"type=unixio,path=($ctrl_sock)"
+    ^$swtpm_bin socket --tpmstate $tpmstate_arg --tpm2 --server $server_arg --ctrl $ctrl_arg --daemon
 
     if $env.LAST_EXIT_CODE != 0 {
         error make {msg: $"swtpm failed to start (exit ($env.LAST_EXIT_CODE))"}
     }
 
-    log-step "swtpm-start" "swtpm daemon started" {sock: $sock}
+    log-step "swtpm-start" "swtpm daemon started" {sock: $sock, ctrl_sock: $ctrl_sock}
     $sock
 }
 
 # Stop swtpm by sending SIGTERM to the process recorded in the pid file.
 def stop-swtpm [state_dir: string] {
-    let sock     = $"($state_dir)/swtpm.sock"
-    let pid_file = $"($state_dir)/swtpm.pid"
-    log-step "swtpm-stop" "stopping swtpm" {sock: $sock}
+    let sock      = $"($state_dir)/swtpm.sock"
+    let ctrl_sock = $"($state_dir)/swtpm-ctrl.sock"
+    let pid_file  = $"($state_dir)/swtpm.pid"
+    log-step "swtpm-stop" "stopping swtpm" {sock: $sock, ctrl_sock: $ctrl_sock}
 
     # swtpm writes its PID into <state_dir>/swtpm.pid when --daemon is used
     # with recent swtpm versions; fall back to pkill if the file is absent.
@@ -101,9 +118,12 @@ def stop-swtpm [state_dir: string] {
         ^pkill -f $"swtpm.*($sock)" o> /dev/null e> /dev/null
     }
 
-    # Remove stale socket so a subsequent run does not see a leftover file
+    # Remove stale sockets so a subsequent run does not see leftover files
     if ($sock | path exists) {
         ^rm -f $sock
+    }
+    if ($ctrl_sock | path exists) {
+        ^rm -f $ctrl_sock
     }
 
     log-step "swtpm-stop" "swtpm stopped" {}
@@ -124,7 +144,7 @@ def build-cmd-amd64 [
 ] {
     let uefi_rom = "/usr/local/share/uefi-firmware/BHYVE_UEFI.fd"
 
-    mut slots = [
+    let slots = [
         "-s" "0,hostbridge"
         "-s" "1,lpc"
         "-s" $"2,virtio-blk,($image)"
@@ -132,16 +152,23 @@ def build-cmd-amd64 [
         "-s" "4,ahci-cd,/dev/null"
     ]
 
+    # TPM is an LPC/ACPI CRB device, not a PCI slot: `-l tpm,swtpm,<path>`
+    # (or `-l tpm,passthru,/dev/tpm0` for passthrough). `-s N,tpm,...` is not
+    # a valid bhyve device and is silently wrong. See bhyve(8).
+    mut lpc_opts = [
+        "-l" $"com1,($console)"
+        "-l" $"bootrom,($uefi_rom)"
+    ]
+
     if $tpm {
-        $slots = ($slots | append ["-s" $"5,tpm,type=swtpm,path=($sock_path)"])
+        $lpc_opts = ($lpc_opts | append ["-l" $"tpm,swtpm,($sock_path)"])
     }
 
     [
         "bhyve"
         "-H" "-P"
         ...$slots
-        "-l" $"com1,($console)"
-        "-l" $"bootrom,($uefi_rom)"
+        ...$lpc_opts
         "-m" $mem
         "-c" ($cpus | into string)
         $name
@@ -208,7 +235,7 @@ def main [
     --arch:        string = "amd64"                      # amd64 | arm64 (aarch64)
     --mem:         string = "512M"
     --cpus:        int    = 2
-    --tpm                                                # attach swtpm as virtio-tpm (amd64 only)
+    --tpm                                                # attach swtpm via -l tpm,swtpm,<sock> (amd64 only)
     --tpm-state:   string = "/var/run/smolfire-tpm"       # swtpm state directory
     --hostfwd-ssh: int    = 2240                         # host port forwarded to guest :22
     --console:     string = "/dev/nmdm0A"                # amd64: bhyve null-modem device (com1)
@@ -227,9 +254,9 @@ def main [
         error make {msg: $"--arch must be amd64 or arm64, got: ($arch)"}
     }
 
-    # TPM is amd64-only: arm64 bhyve has no virtio-tpm device.
+    # TPM is amd64-only: arm64 bhyve has no `-l tpm` device backend.
     if $tpm and $arch == "arm64" {
-        error make {msg: "arm64 bhyve has no virtio-tpm device; TPM testing requires --arch amd64"}
+        error make {msg: "arm64 bhyve has no -l tpm device backend; TPM testing requires --arch amd64"}
     }
 
     if not ($image | path exists) {
@@ -261,8 +288,9 @@ def main [
             log-step "swtpm-dry" "would start swtpm" {
                 state_dir: $tpm_state
                 sock:      $"($tpm_state)/swtpm.sock"
+                ctrl_sock: $"($tpm_state)/swtpm-ctrl.sock"
             }
-            print $"swtpm socket --tpmstate dir=($tpm_state) --tpm2 --ctrl type=unixio,path=($tpm_state)/swtpm.sock --daemon"
+            print $"swtpm socket --tpmstate dir=($tpm_state) --tpm2 --server type=unixio,path=($tpm_state)/swtpm.sock --ctrl type=unixio,path=($tpm_state)/swtpm-ctrl.sock --daemon"
             $sock_path = $"($tpm_state)/swtpm.sock"
         } else {
             $sock_path = start-swtpm $tpm_state

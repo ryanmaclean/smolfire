@@ -26,7 +26,9 @@ def make-temp-dir [] { ^mktemp -d | str trim }
 
 # Write the stub binaries into <tmp>/bin. Every stub appends "<name> <args>"
 # to $MOCK_LOG. Behaviour knobs (env): MOCK_JAIL_CREATE_FAIL, MOCK_JAIL_REMOVE_FAIL,
-# MOCK_RACCT (value of kern.racct.enable, default 1).
+# MOCK_RACCT (value of kern.racct.enable, default 1), MOCK_FREEBSD_VERSION_K
+# (value of `freebsd-version -k`, default a patched "15.0-RELEASE-p13"),
+# MOCK_MAC_DO_RULES (value of `security.mac.do.rules`, default a gid-pinned rule).
 def make-stubs [tmp: string, --no-mdo] {
     let bin = [$tmp "bin"] | path join
     mkdir $bin
@@ -38,6 +40,7 @@ conf=''; prev=''
 for a in \"$@\"; do [ \"$prev\" = '-f' ] && conf=\"$a\"; prev=\"$a\"; done
 case \"$1\" in
   -c) [ -n \"$conf\" ] && cp \"$conf\" \"$MOCK_DIR/last.conf\"
+      [ -f \"${conf%/*}/resolv.conf\" ] && cp \"${conf%/*}/resolv.conf\" \"$MOCK_DIR/last.resolv.conf\"
       [ \"${MOCK_JAIL_CREATE_FAIL:-0}\" = 1 ] && { echo 'jail: mock create failure' >&2; exit 1; } ;;
   -r) [ \"${MOCK_JAIL_REMOVE_FAIL:-0}\" = 1 ] && { echo 'jail: mock remove failure' >&2; exit 1; } ;;
 esac
@@ -64,13 +67,20 @@ exit 0
 case \"$2\" in
   kern.racct.enable\) echo \"${MOCK_RACCT:-1}\" ;;
   security.mac.do.enabled\) echo 1 ;;
+  security.mac.do.rules\) echo \"${MOCK_MAC_DO_RULES:-uid=1001>uid=0:gid=0}\" ;;
 esac
 exit 0
 "
         rctl:   $"#!/bin/sh\n($log)\nexit 0\n"
         zfs:    $"#!/bin/sh\n($log)\nexit 0\n"
         umount: $"#!/bin/sh\n($log)\nexit 0\n"
-        mdo:    $"#!/bin/sh\n($log)\nexec \"$@\"\n"
+        install: $"#!/bin/sh\n($log)\nexit 0\n"
+        mdo:    $"#!/bin/sh\n($log)\n[ \"$1\" = -i ] && shift\nexec \"$@\"\n"
+        "freebsd-version": $"#!/bin/sh
+($log)
+echo \"${MOCK_FREEBSD_VERSION_K:-15.0-RELEASE-p13}\"
+exit 0
+"
     }
     for kv in ($stubs | transpose name body) {
         if $no_mdo and $kv.name == "mdo" { continue }
@@ -198,11 +208,21 @@ do {
     let z = render-jail-conf "sf_z_1" "/j/sf_z_1" --backend zfs
     assert (not ($z | str contains "nullfs")) "zfs clone needs no nullfs"
     assert ($z | str contains "tmpfs /j/sf_z_1/tmp") "zfs still gets tmpfs"
+
+    assert (not ($net | str contains "resolv.conf")) "no DNS unless a resolv.conf is passed"
+    let dns = render-jail-conf "sf_n_2" "/j/sf_n_2" --base "/b" --network --resolv-conf "/tmp/c/resolv.conf"
+    assert ($dns | str contains 'mount += "/tmp/c/resolv.conf /j/sf_n_2/etc/resolv.conf nullfs ro 0 0";') "resolv.conf file mount, read-only"
+    let lines = $dns | lines
+    let at = {|p| $lines | enumerate | where {|e| $e.item | str contains $p} | first | get index }
+    assert ((do $at "/b /j/sf_n_2 nullfs") < (do $at "etc/resolv.conf")) "file mount after the base mount"
+    let zdns = render-jail-conf "sf_z_2" "/j/sf_z_2" --backend zfs --network --resolv-conf "/tmp/c/resolv.conf"
+    assert (not ($zdns | str contains "resolv.conf")) "zfs copies resolv.conf instead of mounting it"
 }
 
 print "test 7: rctl rules, podman/OCI args, exec argv"
 do {
-    assert equal (rctl-rules "sf_a" "512m" 256 100) ["jail:sf_a:memoryuse:deny=512m" "jail:sf_a:maxproc:deny=256" "jail:sf_a:pcpu:deny=100"]
+    assert equal (rctl-rules "sf_a" "512m" 256 100) ["jail:sf_a:memoryuse:deny=512m" "jail:sf_a:vmemoryuse:deny=512m" "jail:sf_a:maxproc:deny=256" "jail:sf_a:pcpu:deny=100"]
+    assert ("jail:sf_a:vmemoryuse:deny=2g" in (rctl-rules "sf_a" "512m" 256 100 --vmemory "2g")) "vmemory override"
     let pa = podman-run-args "sf_a" "img:1" 240
     assert (($pa | take 2) == ["podman" "run"]) "podman run"
     let i = $pa | enumerate | where item == "--network" | get index | first
@@ -219,7 +239,7 @@ do {
 print "test 8: privilege hop is mdo(1) only"
 do {
     assert equal (priv-prefix 0 false).prefix [] "root needs no hop"
-    assert equal (priv-prefix 1001 true).prefix ["mdo"] "mac_do hop"
+    assert equal (priv-prefix 1001 true).prefix ["mdo" "-i"] "mac_do hop (uid only, keep groups)"
     let r = priv-prefix 1001 false
     assert ($r.error | str contains "mac_do") "explains mac_do"
     assert ($r.error | str contains "uid=1001>uid=0") "gives the rule"
@@ -241,6 +261,7 @@ print "test 10: reply envelope parses and targets the dispatch Message-ID"
 do {
     let res = result-record "fail" 2 [{cmd: "echo \"hi\"", stdout: "hi", stderr: "", exit_code: 0} {cmd: "false", stdout: "", stderr: "", exit_code: 1}] "boom"
     let env_txt = reply-envelope "t-rep" "<coord.1.r1.x@smolfire.local>" $res --now "20260101000000"
+    assert ($env_txt | str ends-with "\n\n") "reply ends with a blank line (strict mbox)"
     let msgs = parse-mbox $env_txt
     assert equal ($msgs | length) 1
     let m = $msgs | first
@@ -301,16 +322,17 @@ do {
 
     let log = mock-log $tmp
     let name = "sf_task_0042_ab12cd"
-    assert ((lines-starting $log "mdo mkdir") | is-not-empty) "dir via mdo"
+    assert ((lines-starting $log "mdo -i mkdir") | is-not-empty) "dir via mdo"
     assert equal (lines-starting $log "jail -c -f" | length) 1 "one create"
     assert ((lines-starting $log "jail -c -f") | first | str ends-with $name) "create by name"
-    assert equal (lines-starting $log "rctl -a" | length) 3 "three rctl rules"
+    assert equal (lines-starting $log "rctl -a" | length) 4 "four rctl rules"
+    assert equal (lines-starting $log $"rctl -a jail:($name):vmemoryuse:deny=512m" | length) 1 "address-space cap alongside memoryuse"
     assert ((lines-starting $log "rctl -a") | all {|l| $l | str contains $"jail:($name):"}) "rules scoped to jail"
     assert equal (lines-starting $log "jexec" | length) 2 "two execs"
     assert ((lines-starting $log "timeout -k 5") | is-not-empty) "timeout(1) wraps exec"
     assert equal (lines-starting $log "jail -r" | length) 1 "removed"
     assert equal (lines-starting $log $"rctl -r jail:($name)" | length) 1 "limits removed"
-    assert ((lines-starting $log "mdo rmdir") | is-not-empty) "rmdir, not rm -rf"
+    assert ((lines-starting $log "mdo -i rmdir") | is-not-empty) "rmdir, not rm -rf"
     # order: create < exec < remove
     let idx = {|p| $log | enumerate | where {|e| $e.item | str starts-with $p} | first | get index }
     assert ((do $idx "jail -c") < (do $idx "jexec")) "create before exec"
@@ -321,6 +343,8 @@ do {
     assert ($conf | str contains 'ip4 = "disable";') "no network"
     assert ($conf | str contains 'mac.do = "disable";') "mdo hop → mac.do disabled in jail"
     assert ($conf | str contains "nullfs ro") "read-only base"
+    assert (not ($conf | str contains "resolv.conf")) "no DNS without Network"
+    assert (not ([$tmp "last.resolv.conf"] | path join | path exists)) "no resolv.conf snapshot without Network"
     ^rm -rf $tmp
 }
 
@@ -334,7 +358,9 @@ do {
     }
     assert equal $r.verdict "fail"
     assert equal ($r.outputs | get exit_code) [1 0] "later commands still run after a non-timeout failure (vm parity)"
-    assert ((open --raw ([$tmp "last.conf"] | path join)) | str contains 'ip4 = "inherit";')
+    let conf = open --raw ([$tmp "last.conf"] | path join)
+    assert ($conf | str contains 'ip4 = "inherit";')
+    assert (not ($conf | str contains "resolv.conf")) "no placeholder in the base → warn, no mount"
     assert equal (lines-starting (mock-log $tmp) "jail -r" | length) 1
     ^rm -rf $tmp
 }
@@ -443,6 +469,7 @@ do {
     assert ($clone | str ends-with "zroot/smolfire/base@clean zroot/smolfire/sf_t_zfs_000008") "clone target"
     assert equal (lines-starting $log "zfs destroy -f zroot/smolfire/sf_t_zfs_000008" | length) 1 "ephemeral dataset destroyed"
     assert (not ((open --raw ([$tmp "last.conf"] | path join)) | str contains "nullfs"))
+    assert equal (lines-starting $log "install" | length) 0 "no resolv.conf without Network"
     ^rm -rf $tmp
 }
 
@@ -476,7 +503,10 @@ do {
     }
     assert equal $r.verdict "fail"
     assert ($r.error | str contains "mac_do")
-    assert equal (mock-log $tmp) []
+    # The read-only §3 preflight (freebsd-version -k, sysctl mac.do.rules) runs
+    # before the privilege check and is expected; nothing state-changing is.
+    let side_effects = mock-log $tmp | where {|l| not ($l | str starts-with "freebsd-version") and not ($l | str starts-with "sysctl") }
+    assert equal $side_effects [] "no jail/rctl/zfs/podman/mdo call, only read-only preflight probes"
     ^rm -rf $tmp
 }
 
@@ -557,11 +587,14 @@ do {
 print "test 25: Network capability is gated by §17 like any tool"
 do {
     let tmp = make-temp-dir
-    let spool = [$tmp "var" "mail" "spool"] | path join
-    mkdir ($spool | path dirname)
-    make-msg "coordinator@smolfire.local" "reviewer@smolfire.local" "<req.net.001@host>" "task_id = \"t-net\"\nagent_type = \"reviewer\"\ntools_required = [\"Network\"]" | save --force $spool
-    let out = ^nu bin/coord-tick.nu --state-file var/run/coord-state.toml --spool var/mail/spool --root $tmp | complete
-    assert ($out.stdout | str contains "dispatch_capability_mismatch") "reviewer lacks Network"
+    # This currently stops at dispatch_capability_mismatch before ever
+    # reaching spawn-subagent, but a regression in the §17 capability gate
+    # would otherwise fall through to a real, billed subagent spawn. Route
+    # through coord-tick-run (stub `claude` on PATH, never the real CLI)
+    # instead of a raw coord-tick.nu invocation with the inherited PATH, so
+    # this stays safe even if that gate regresses.
+    let r = coord-tick-run $tmp "task_id = \"t-net\"\nagent_type = \"reviewer\"\ntools_required = [\"Network\"]" {}
+    assert ($r.out | str contains "dispatch_capability_mismatch") "reviewer lacks Network"
     ^rm -rf $tmp
 }
 
@@ -575,11 +608,215 @@ do {
     assert equal $out.exit_code 2
     let msgs = parse-mbox (open --raw $spool)
     assert equal ($msgs | length) 2 "reply appended"
+    assert ((open --raw $spool) | str contains "\n\nFrom jail-agent@smolfire.local ") "blank line before the reply's From line"
     let reply = $msgs | last
     assert equal ($reply.headers | get "In-Reply-To") "<coord.1.r1.d@smolfire.local>"
     assert equal (extract-toml $reply | get verdict) "fail"
     assert (($reply.headers | get "X-Jail-Error") | str contains "requires a FreeBSD host")
     ^rm -rf $tmp
+}
+
+print "test 27: mbox append separator"
+do {
+    assert equal (mbox-append-prefix "") "" "empty spool"
+    assert equal (mbox-append-prefix "body\n\n") "" "already separated"
+    assert equal (mbox-append-prefix "body\n") "\n" "one newline → add the blank line"
+    assert equal (mbox-append-prefix "body") "\n\n" "no trailing newline"
+    let res = result-record "pass" 0 [{cmd: "true", stdout: "", stderr: "", exit_code: 0}]
+    let first = make-msg "coordinator@smolfire.local" "builder@smolfire.local" "<req.1@host>" "task_id = \"t\""
+    let spool = $first + (mbox-append-prefix $first) + (reply-envelope "t" "<coord.1@smolfire.local>" $res)
+    assert ($spool | str contains "\n\nFrom jail-agent@smolfire.local ") "strict mbox"
+    assert equal (parse-mbox $spool | length) 2
+}
+
+print "test 28: resolv.conf plan (Network DNS)"
+do {
+    let tmp = make-temp-dir
+    let src = [$tmp "host-resolv.conf"] | path join
+    "nameserver 192.0.2.53\n" | save --force $src
+    let empty = [$tmp "empty-resolv.conf"] | path join
+    "" | save --force $empty
+    let base = [$tmp "base"] | path join
+    mkdir ([$base "etc"] | path join)
+    assert ((resolv-plan nullfs $base $src).error | str contains "placeholder") "nullfs needs a placeholder"
+    "" | save --force ([$base "etc" "resolv.conf"] | path join)
+    assert equal (resolv-plan nullfs $base $src).error "" "placeholder present"
+    assert equal (resolv-plan zfs "" $src).error "" "zfs clone is writable"
+    assert ((resolv-plan nullfs $base ([$tmp "nope"] | path join)).error | str contains "not found") "missing source"
+    assert ((resolv-plan nullfs $base $empty).error | str contains "empty") "empty source"
+    assert ((resolv-plan podman "" $src).error | str contains "podman") "podman handles its own"
+    let lbase = [$tmp "lbase"] | path join
+    mkdir ([$lbase "etc"] | path join)
+    ^ln -s /etc/hosts ([$lbase "etc" "resolv.conf"] | path join)
+    assert ((resolv-plan nullfs $lbase $src).error | str contains "placeholder") "symlinked placeholder refused"
+    ^rm -rf $tmp
+}
+
+print "test 29: Network task gets a resolv.conf snapshot; nullfs mounts it, zfs installs it"
+do {
+    if $is_root { print "  (skipped as root)"; return }
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let src = [$tmp "host-resolv.conf"] | path join
+    "nameserver 192.0.2.53\n" | save --force $src
+    let base = [$tmp "base"] | path join
+    mkdir ([$base "etc"] | path join)
+    "" | save --force ([$base "etc" "resolv.conf"] | path join)
+    let r = with-stubs $tmp $bin {} {
+        run-jail-task "t-dns" ["echo x"] --base $base --network --resolv-conf $src --jail-root (jr $tmp) --salt "00000a" --os freebsd
+    }
+    assert equal $r.verdict "pass" $"verdict: ($r | to nuon)"
+    let conf = open --raw ([$tmp "last.conf"] | path join)
+    let path = [(jr $tmp) "sf_t_dns_00000a"] | path join
+    assert ($conf | str contains $"/resolv.conf ($path)/etc/resolv.conf nullfs ro 0 0") $"resolv mount: ($conf)"
+    assert equal (open --raw ([$tmp "last.resolv.conf"] | path join)) "nameserver 192.0.2.53\n" "snapshot of the host file"
+    ^rm -rf $tmp
+
+    let tmp2 = make-temp-dir
+    let bin2 = make-stubs $tmp2
+    let src2 = [$tmp2 "host-resolv.conf"] | path join
+    "nameserver 192.0.2.53\n" | save --force $src2
+    let r2 = with-stubs $tmp2 $bin2 {} {
+        run-jail-task "t-zdns" ["echo z"] --zfs-snapshot "zroot/smolfire/base@clean" --network --resolv-conf $src2 --jail-root (jr $tmp2) --salt "00000b" --os freebsd
+    }
+    assert equal $r2.verdict "pass"
+    let log2 = mock-log $tmp2
+    let inst = lines-starting $log2 "install -m 0644"
+    assert equal ($inst | length) 1 "one install into the clone"
+    assert ($inst | first | str ends-with $"(jr $tmp2)/sf_t_zdns_00000b/etc/resolv.conf") "target is the clone's /etc"
+    let idx = {|p| $log2 | enumerate | where {|e| $e.item | str starts-with $p} | first | get index }
+    assert ((do $idx "zfs clone") < (do $idx "install")) "after the clone"
+    assert ((do $idx "install") < (do $idx "jail -c")) "before the jail starts"
+    assert (not ((open --raw ([$tmp2 "last.conf"] | path join)) | str contains "resolv.conf")) "no mount for zfs"
+    ^rm -rf $tmp2
+}
+
+# ── FreeBSD-SA-26:59.mac_do (CVE-2026-58092) hardening ────────────────────────
+# A security.mac.do.rules entry without an explicit target gid can leave the
+# switched credential's primary gid at 0 on an unpatched host. §3 pins the
+# floor at 15.0-RELEASE-p13 / 15.1-RELEASE-p3 (also covers SA-26:25.thr and
+# SA-26:18.setcred) and every documented rule now names gid=.
+
+print "test 30: freebsd-version -k parsing and patch-floor comparison"
+do {
+    assert equal (parse-freebsd-version-k "15.0-RELEASE-p13") {ok: true, major: 15, minor: 0, patch: 13, raw: "15.0-RELEASE-p13", error: ""}
+    assert equal (parse-freebsd-version-k "15.1-RELEASE-p3").patch 3
+    assert equal (parse-freebsd-version-k "15.0-RELEASE").patch 0 "no -pN suffix means p0"
+    assert (not (parse-freebsd-version-k "15.0-CURRENT").ok) "non-RELEASE strings can't be trusted"
+    assert (not (parse-freebsd-version-k "garbage").ok)
+
+    assert (patch-level-ok? (parse-freebsd-version-k "15.0-RELEASE-p13")) "at the floor"
+    assert (patch-level-ok? (parse-freebsd-version-k "15.0-RELEASE-p20")) "above the floor"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "15.0-RELEASE-p12"))) "one below the floor"
+    assert (patch-level-ok? (parse-freebsd-version-k "15.1-RELEASE-p3")) "15.1 floor"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "15.1-RELEASE-p2"))) "15.1 below floor"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "14.3-RELEASE-p10"))) "an older branch is never the required floor"
+    assert (patch-level-ok? (parse-freebsd-version-k "15.2-RELEASE-p0")) "a branch newer than either advisory shipped against"
+    assert (not (patch-level-ok? (parse-freebsd-version-k "not-a-version"))) "unparseable can't be confirmed patched"
+}
+
+print "test 31: preflight-patch-level — patched passes silently, unpatched refuses, override warns"
+do {
+    let patched = preflight-patch-level "15.0-RELEASE-p13" false
+    assert $patched.ok
+    assert equal $patched.error ""
+    assert equal $patched.warn ""
+
+    let refused = preflight-patch-level "15.0-RELEASE-p5" false
+    assert (not $refused.ok)
+    assert ($refused.error | str starts-with "jail executor requires a patched FreeBSD host") $"clear error: ($refused.error)"
+    assert ($refused.error | str contains "15.0-RELEASE-p5")
+    assert ($refused.error | str contains "SA-26:59")
+    assert ($refused.error | str contains "--allow-unpatched")
+
+    let overridden = preflight-patch-level "15.0-RELEASE-p5" true
+    assert $overridden.ok "override lets it through"
+    assert equal $overridden.error ""
+    assert ($overridden.warn | str contains "15.0-RELEASE-p5")
+    assert ($overridden.warn | str contains "allow-unpatched")
+
+    # result-exit maps both refusal shapes to exit 2, like the non-FreeBSD one
+    assert equal (result-exit {verdict: "fail", boot_sec: 0, outputs: [], error: $refused.error}) 2 "unpatched-host refusal exits 2"
+    assert equal (result-exit {verdict: "fail", boot_sec: 0, outputs: [], error: (host-check "linux").error}) 2 "non-FreeBSD refusal still exits 2"
+    assert equal (result-exit {verdict: "fail", boot_sec: 0, outputs: [], error: "some other failure"}) 1 "ordinary failures stay exit 1"
+    assert equal (result-exit {verdict: "pass", boot_sec: 1, outputs: []}) 0
+}
+
+print "test 32: mac_do rule gid= audit"
+do {
+    assert equal (mac-do-rules-missing-gid "") []
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0:gid=0") []
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0") ["uid=1001>uid=0"]
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0:gid=0,uid=1002>uid=0") ["uid=1002>uid=0"]
+    assert equal (mac-do-rules-missing-gid "uid=1001>uid=0, uid=1002>gid=68") ["uid=1001>uid=0"] "only the first rule lacks gid="
+}
+
+print "test 33: patch-floor preflight wired into run-jail-task"
+do {
+    if $is_root { print "  (skipped as root: this case exercises the mdo hop)"; return }
+
+    # patched (default stub) → normal happy path, no warnings key at all
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let ok = with-stubs $tmp $bin {} {
+        run-jail-task "t-patched" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp) --salt "aaaaaa" --os freebsd
+    }
+    assert equal $ok.verdict "pass" $"patched host runs clean: ($ok | to nuon)"
+    assert (not ("warnings" in ($ok | columns))) "no warnings on a clean, patched host"
+    ^rm -rf $tmp
+
+    # unpatched, no override → refused before anything runs (exit 2 via result-exit)
+    let tmp2 = make-temp-dir
+    let bin2 = make-stubs $tmp2
+    let refused = with-stubs $tmp2 $bin2 {MOCK_FREEBSD_VERSION_K: "15.0-RELEASE-p5"} {
+        run-jail-task "t-unpatched" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp2) --salt "bbbbbb" --os freebsd
+    }
+    assert equal $refused.verdict "fail"
+    assert ($refused.error | str starts-with "jail executor requires a patched FreeBSD host") $"clear refusal: ($refused.error)"
+    assert ($refused.error | str contains "15.0-RELEASE-p5")
+    assert equal (result-exit $refused) 2 "refusal maps to exit 2"
+    assert equal ((mock-log $tmp2) | where {|l| $l | str starts-with "jail "} | length) 0 "no jail was ever created"
+    assert (not ((jr $tmp2) | path exists)) "no jail-root dir created"
+    ^rm -rf $tmp2
+
+    # unpatched, --allow-unpatched → proceeds, warning surfaces in the record
+    let tmp3 = make-temp-dir
+    let bin3 = make-stubs $tmp3
+    let overridden = with-stubs $tmp3 $bin3 {MOCK_FREEBSD_VERSION_K: "15.0-RELEASE-p5"} {
+        run-jail-task "t-override" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp3) --salt "cccccc" --os freebsd --allow-unpatched
+    }
+    assert equal $overridden.verdict "pass" $"override still runs: ($overridden | to nuon)"
+    assert ("warnings" in ($overridden | columns)) "override surfaces a warning"
+    assert (($overridden.warnings | any {|w| $w | str contains "15.0-RELEASE-p5"})) $"warning names the version: ($overridden.warnings)"
+    assert equal (result-exit $overridden) 0 "override still exits 0"
+    ^rm -rf $tmp3
+}
+
+print "test 34: gid-less mac_do rule warns, does not refuse"
+do {
+    if $is_root { print "  (skipped as root: this case exercises the mdo hop)"; return }
+
+    let tmp = make-temp-dir
+    let bin = make-stubs $tmp
+    let r = with-stubs $tmp $bin {MOCK_MAC_DO_RULES: "uid=1001>uid=0"} {
+        run-jail-task "t-gidless" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp) --salt "dddddd" --os freebsd
+    }
+    assert equal $r.verdict "pass" $"gid-less rule warns, doesn't block: ($r | to nuon)"
+    assert ("warnings" in ($r | columns)) "missing-gid warning surfaces"
+    assert (($r.warnings | any {|w| $w | str contains "gid="})) $"names the gap: ($r.warnings)"
+    assert (($r.warnings | any {|w| $w | str contains "uid=1001>uid=0"})) "names the offending rule"
+    assert (($r.warnings | any {|w| $w | str contains "SA-26:59"})) "cites the advisory"
+    ^rm -rf $tmp
+
+    # a rule that already names gid= (the default stub value) produces no warning
+    let tmp2 = make-temp-dir
+    let bin2 = make-stubs $tmp2
+    let clean = with-stubs $tmp2 $bin2 {} {
+        run-jail-task "t-gidfull" ["echo hi"] --base "/usr/local/smolfire/base" --jail-root (jr $tmp2) --salt "eeeeee" --os freebsd
+    }
+    assert equal $clean.verdict "pass"
+    assert (not ("warnings" in ($clean | columns))) "no warning when every rule names gid="
+    ^rm -rf $tmp2
 }
 
 print "all tests passed"

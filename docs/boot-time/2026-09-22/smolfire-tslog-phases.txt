@@ -1,0 +1,93 @@
+Phases (TSLOG kernel, ms; median / min / max over runs):
+| phase | n | median | min | max |
+| --- | --- | --- | --- | --- |
+| vmm_to_vcpu | 3 | 5.0 | 3.8 | 5.7 |
+| vcpu_to_kernel | 3 | 5.8 | 5.8 | 6.2 |
+| early_kernel | 3 | 5.7 | 5.3 | 6.3 |
+| sysinit_devices | 3 | 440.3 | 410.3 | 452.7 |
+| root_mount | 3 | 2.6 | 2.4 | 2.7 |
+| start_init_other | 3 | 0.5 | 0.5 | 0.5 |
+| init_rc_to_ready | 3 | 33.1 | 30.0 | 34.0 |
+| wall_to_ready | 3 | 494.0 | 464.0 | 501.0 |
+| kernel_first_to_ready | 3 | 482.9 | 452.5 | 491.4 |
+Release SMOLFIRE wall clock exec→READY: {n: 3, median: 476.0, min: 399.0, max: 477.0} values=[477, 476, 399]
+Top SYSINITs (median inclusive ms):
+| name | runs | median_incl_ms |
+| --- | --- | --- |
+| clocks | 3 | 160.1 |
+| cpu | 3 | 143.6 |
+| configure2 | 3 | 84.2 |
+| version | 3 | 11.1 |
+| announce | 3 | 7.6 |
+| stack_chk | 3 | 6.5 |
+| apic_setup_io | 3 | 5.3 |
+| rdseedmodule | 3 | 4.2 |
+| apic_setup_local | 3 | 2.9 |
+| trademark | 3 | 2.5 |
+Top self-time frames (run 1):
+| name | parent | incl_ms | self_ms |
+| --- | --- | --- | --- |
+| clockcalib | SYSINIT clocks | 159.4 | 159.4 |
+| DELAY | SYSINIT cpu | 100.0 | 100.0 |
+| _sleep |  | 11.6 | 11.6 |
+| clockcalib | SYSINIT clocks | 10.6 | 10.6 |
+| _sleep |  | 9.9 | 9.9 |
+| DEVICE_ATTACH acpi | DEVICE_ATTACH nexus | 60.5 | 9.9 |
+| _sleep |  | 9.1 | 9.1 |
+| DEVICE_PROBE uart | DEVICE_ATTACH acpi | 9.4 | 7.8 |
+| DEVICE_PROBE uart | DEVICE_ATTACH acpi | 9.1 | 7.6 |
+| DEVICE_PROBE uart | DEVICE_ATTACH acpi | 9.1 | 7.6 |
+| _vprintf | SYSINIT announce | 7.6 | 7.6 |
+| DEVICE_PROBE uart | DEVICE_ATTACH acpi | 9.4 | 7.5 |
+Self time summed by frame name (run 1):
+| name | calls | self_ms | incl_ms |
+| --- | --- | --- | --- |
+| clockcalib | 2 | 170.0 | 170.0 |
+| _vprintf | 106 | 126.5 | 126.5 |
+| DELAY | 17 | 101.5 | 101.5 |
+| _sleep | 686 | 64.9 | 64.9 |
+| DEVICE_PROBE uart | 8 | 30.7 | 37.2 |
+| DEVICE_ATTACH acpi | 1 | 9.9 | 60.5 |
+| keg_alloc_slab | 1694 | 6.9 | 7.1 |
+| DEVICE_ATTACH nexus | 1 | 6.1 | 84.2 |
+| DEVICE_ATTACH kvmclock | 1 | 2.7 | 5.2 |
+| DEVICE_PROBE virtio_mmio | 6 | 1.8 | 1.8 |
+| DEVICE_ATTACH virtio_mmio | 1 | 1.7 | 10.5 |
+| SYSINIT apic_setup_io | 1 | 1.6 | 5.3 |
+| DEVICE_ATTACH uart | 4 | 1.4 | 2.8 |
+| xen_pvh_parse_preload_data | 1 | 1.4 | 1.4 |
+| vm_phys_finish_init | 61 | 1.1 | 1.1 |
+Userland processes (run 1):
+| pid | ppid | exec | start_ms | dur_ms |
+| --- | --- | --- | --- | --- |
+| 10 | 0 |  | 194.2 |  |
+| 1 | 0 | /sbin/init | 194.3 |  |
+| 11 | 0 |  | 194.3 |  |
+| 12 | 0 |  | 199.7 |  |
+| 2 | 0 |  | 199.8 |  |
+| 13 | 0 |  | 201.7 |  |
+| 3 | 0 |  | 201.9 |  |
+| 4 | 0 |  | 461.3 |  |
+| 5 | 0 |  | 461.4 |  |
+| 6 | 0 |  | 461.4 |  |
+| 7 | 0 |  | 461.4 |  |
+| 8 | 0 |  | 461.5 |  |
+| 9 | 0 |  | 461.5 |  |
+| 14 | 0 |  | 461.5 |  |
+| 15 | 1 | /etc/rc | 471.2 |  |
+| 16 | 15 | hostname | 476.0 | 1.1 |
+| 17 | 15 | ifconfig | 477.2 | 2.3 |
+| 18 | 15 | ifconfig | 479.6 | 0.8 |
+| 19 | 15 | kenv | 480.5 | 0.5 |
+| 20 | 15 | kenv | 481.1 | 0.4 |
+| 21 | 15 | ifconfig | 481.5 | 9.9 |
+| 22 | 15 | route | 491.5 | 0.6 |
+| 23 | 15 | kenv | 492.1 | 0.5 |
+| 24 | 15 | fetch | 492.7 | 2.2 |
+| 25 | 15 | /rescue/echo | 496.1 | 1.1 |
+| 26 | 15 | sysctl | 497.3 | 0.5 |
+| 27 | 15 | sysctl | 497.9 | 0.4 |
+| 28 | 15 | sysctl | 498.3 | 0.4 |
+| 29 | 15 | sysctl | 501.9 | 14261.7 |
+| 30 | 15 | sysctl | 14765.2 |  |
+| 31 | 15 | sed | 14765.8 |  |

@@ -20,7 +20,7 @@ inside bhyve on a FreeBSD 15 host.
 > | Any VM with nested virtualisation disabled | No | bhyve requires hardware VMX/SVM |
 >
 > Passing `--tpm` with `--arch arm64` to `bin/bhyve-smolfire-vm.nu` will produce
-> an explicit error: `arm64 bhyve has no virtio-tpm device; TPM testing
+> an explicit error: `arm64 bhyve has no -l tpm device backend; TPM testing
 > requires --arch amd64`.
 
 ---
@@ -31,11 +31,12 @@ inside bhyve on a FreeBSD 15 host.
 > with nested virtualization exposed. Apple Silicon Macs running FreeBSD under
 > HVF cannot run bhyve — HVF does not expose EL2 to guest VMs, so `vmm.ko`
 > will fail to load. Vultr vc2/vhf amd64 instances work (VMX is exposed by
-> default). arm64 bhyve lacks `virtio-tpm` — TPM tests T2–T6 require an amd64
-> bhyve host. See `plans/tinyos/PHASE-3-TPM.md §4a` for the full platform
-> requirements matrix.**
+> default). arm64 bhyve has no `-l tpm` device backend — TPM tests T2–T6
+> require an amd64 bhyve host. See `plans/tinyos/PHASE-3-TPM.md §4a` for the
+> full platform requirements matrix.**
 
-**Host OS:** FreeBSD 15.0-RELEASE amd64 (bhyve `virtio-tpm` landed in FreeBSD 15).
+**Host OS:** FreeBSD 15.0-RELEASE amd64 (bhyve TPM support, `-l tpm,swtpm,<socket>`
+or `-l tpm,passthru,/dev/tpm0`, landed in FreeBSD 15; see bhyve(8)).
 
 **Kernel modules** (load once per boot, or add to `/boot/loader.conf`):
 
@@ -233,15 +234,23 @@ The guest kernel must have `device tpm` compiled in. Check:
 ```sh
 # In guest
 dmesg | grep -i tpm
-# Expected: tpm0: <TPM 2.0> on pci0
+# Expected: tpm0: <TPM 2.0> on acpi0
 ```
 
 If absent, the smolfire kernel config is missing `device tpm` or the VM was
-launched without `--tpm`. Confirm the bhyve command line includes:
+launched without `--tpm`. Confirm the bhyve command line includes (TPM is an
+LPC/ACPI CRB device, not a PCI slot — `-s N,tpm,...` is not a valid bhyve
+device; see bhyve(8)):
 
 ```
--s 5,tpm,type=swtpm,path=/var/run/smolfire-tpm/swtpm.sock
+-l tpm,swtpm,/var/run/smolfire-tpm/swtpm.sock
 ```
+
+Note: the path must be swtpm's **data** socket (`--server type=unixio,path=...`
+in swtpm(8)), not its `--ctrl` control-channel socket — bhyve dials the data
+socket only. `bin/swtpm-setup.nu` and `bin/bhyve-smolfire-vm.nu` both start
+swtpm with separate `--server` (data, `swtpm.sock`) and `--ctrl` (control,
+`swtpm-ctrl.sock`) sockets; pass the `swtpm.sock` path to `-l tpm,swtpm,...`.
 
 Or for QEMU amd64, confirm the command includes:
 

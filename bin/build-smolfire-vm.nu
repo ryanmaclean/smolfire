@@ -281,6 +281,23 @@ def setup [src: string] {
     print "==> Setup"
 
     # FIX-1: Write /etc/src.conf if missing or incomplete
+    #
+    # size-lever proposal (docs/IMAGE-SIZE.md; not build-verified — this
+    # commit adds no new build run): WITHOUT_DEBUG_LIBRARIES and
+    # WITHOUT_DEPEND_FILES do not appear in src.conf(5) for 15.1 (the
+    # closest documented knob is WITHOUT_DEPEND_CLEANUP) and are likely
+    # no-ops; kept below for now rather than removed sight-unseen — verify
+    # with `make -C /usr/src showconfig` before dropping them. The knobs
+    # added here (WITHOUT_TOOLCHAIN, WITHOUT_LIB32, WITHOUT_INCLUDES,
+    # WITHOUT_INSTALLLIB, WITHOUT_MAN, WITHOUT_RESCUE, WITHOUT_ZFS,
+    # WITHOUT_BHYVE, and the hardware-absent set) are all documented in
+    # src.conf(5) 15.1-RELEASE and match content this repo's own
+    # bin/shrink-image.nu already removes post-build (toolchain, tests,
+    # debug-symbols, static-libs, rescue, zfs, hw-tools classes —
+    # docs/IMAGE-SIZE.md) — building without them in the first place skips
+    # that build work entirely instead of trimming it afterward.
+    # WITHOUT_KERNEL_SYMBOLS=yes is passed to the release `make` invocation
+    # itself (vmimage.subr reads it directly), not written to src.conf.
     let src_conf = "/etc/src.conf"
     let required_keys = [
         "WITHOUT_SENDMAIL=yes"
@@ -290,6 +307,28 @@ def setup [src: string] {
         "WITHOUT_GAMES=yes"
         "WITHOUT_EXAMPLES=yes"
         "WITHOUT_DEPEND_FILES=yes"   # FIX-4: prevents bad substitution in LLVM builds
+        "WITHOUT_TOOLCHAIN=yes"      # implies WITHOUT_CLANG/CLANG_EXTRAS/CLANG_FORMAT/CLANG_FULL/LLD/LLDB/LLVM_COV
+        "WITHOUT_LIB32=yes"
+        "WITHOUT_INCLUDES=yes"
+        "WITHOUT_INSTALLLIB=yes"
+        "WITHOUT_MAN=yes"            # implies WITHOUT_MAN_UTILS
+        "WITHOUT_RESCUE=yes"
+        "WITHOUT_ZFS=yes"            # image root is UFS; smolfire kernels don't ship zfs.ko
+        "WITHOUT_BHYVE=yes"          # guest runs under QEMU/Firecracker, not as a bhyve host
+        "WITHOUT_OFED=yes"
+        "WITHOUT_UNBOUND=yes"        # resolv.conf comes from DHCP
+        "WITHOUT_LOCALES=yes"
+        "WITHOUT_NLS=yes"
+        # hardware absent in a virtio guest (Makefile.firecracker WITHOUT_VM_ENOENT)
+        "WITHOUT_APM=yes"
+        "WITHOUT_BLUETOOTH=yes"
+        "WITHOUT_CXGBETOOL=yes"
+        "WITHOUT_FLOPPY=yes"
+        "WITHOUT_GPIO=yes"
+        "WITHOUT_MLX5TOOL=yes"
+        "WITHOUT_USB=yes"
+        "WITHOUT_USB_GADGET_EXAMPLES=yes"
+        "WITHOUT_WIRELESS=yes"
     ]
 
     if not ($src_conf | path exists) {

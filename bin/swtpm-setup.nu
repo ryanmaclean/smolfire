@@ -11,6 +11,14 @@
 #   status  — report running state as a TOML record
 #   reset   — stop + wipe state dir + start fresh (destroys all PCR state)
 #
+# swtpm exposes two distinct unix sockets (see swtpm(8)):
+#   --server  the TPM command/response *data* channel — this is the socket
+#             bhyve dials via `-l tpm,swtpm,<path>` (or QEMU via -chardev).
+#   --ctrl    an out-of-band *control* channel (reset, terminate, etc.) that
+#             bhyve/QEMU do not use for TPM traffic.
+# `--socket` below resolves the data (--server) socket that callers should
+# hand to bhyve/QEMU; `--ctrl-socket` resolves the separate control socket.
+#
 # Usage:
 #   nu bin/swtpm-setup.nu --action start
 #   nu bin/swtpm-setup.nu --action stop
@@ -27,18 +35,53 @@ def log-step [step: string, payload: record] {
 }
 
 # Resolve default paths from state_dir when optional flags are empty strings.
-def resolve-paths [state_dir: string, socket: string, pid_file: string] {
+#
+# `socket` is the swtpm *data* socket (--server) — the one bhyve/QEMU dial
+# for TPM traffic. `ctrl_socket` is the separate out-of-band control channel.
+def resolve-paths [
+    state_dir:   string
+    socket:      string
+    ctrl_socket: string
+    pid_file:    string
+] {
     let sock = if ($socket | str length) > 0 {
         $socket
     } else {
         [$state_dir, "swtpm.sock"] | path join
+    }
+    let ctrl = if ($ctrl_socket | str length) > 0 {
+        $ctrl_socket
+    } else {
+        [$state_dir, "swtpm-ctrl.sock"] | path join
     }
     let pid = if ($pid_file | str length) > 0 {
         $pid_file
     } else {
         [$state_dir, "swtpm.pid"] | path join
     }
-    {state_dir: $state_dir, socket: $sock, pid_file: $pid}
+    {state_dir: $state_dir, socket: $sock, ctrl_socket: $ctrl, pid_file: $pid}
+}
+
+# Build the swtpm(8) argv for `swtpm socket ... --daemon` given a resolved
+# `paths` record (as returned by resolve-paths) and the swtpm binary path.
+# Pure function — no I/O — so it can be unit-tested without a running swtpm.
+def build-start-args [swtpm_bin: string, paths: record]: nothing -> list<string> {
+    let tpmstate_arg = $"dir=($paths.state_dir)"
+    let server_arg   = $"type=unixio,path=($paths.socket)"
+    let ctrl_arg     = $"type=unixio,path=($paths.ctrl_socket)"
+    # Note: FreeBSD swtpm uses --pid-file <path>; Ubuntu/Linux swtpm uses --pid file=<path>
+    # Use the Linux-compatible form ("--pid file=") which also works on FreeBSD >= 0.7.x
+    let pid_arg = $"file=($paths.pid_file)"
+    [
+        $swtpm_bin
+        "socket"
+        "--tpmstate" $tpmstate_arg
+        "--tpm2"
+        "--server" $server_arg
+        "--ctrl" $ctrl_arg
+        "--pid" $pid_arg
+        "--daemon"
+    ]
 }
 
 # Read pid from pid file; return null if file absent or not a valid integer.
@@ -63,9 +106,10 @@ def pid-alive [pid: int] {
 
 def action-start [paths: record] {
     log-step "swtpm_start_begin" {
-        state_dir: $paths.state_dir
-        socket:    $paths.socket
-        pid_file:  $paths.pid_file
+        state_dir:   $paths.state_dir
+        socket:      $paths.socket
+        ctrl_socket: $paths.ctrl_socket
+        pid_file:    $paths.pid_file
     }
 
     # Refuse to start if an existing daemon is alive.
@@ -94,18 +138,18 @@ def action-start [paths: record] {
     let swtpm_bin = $swtpm_bin | first
 
     log-step "swtpm_launching" {
-        cmd:       $swtpm_bin
-        tpmstate:  $paths.state_dir
-        ctrl_path: $paths.socket
-        pid_file:  $paths.pid_file
+        cmd:         $swtpm_bin
+        tpmstate:    $paths.state_dir
+        socket:      $paths.socket
+        ctrl_socket: $paths.ctrl_socket
+        pid_file:    $paths.pid_file
     }
 
-    let tpmstate_arg = $"dir=($paths.state_dir)"
-    let ctrl_arg     = $"type=unixio,path=($paths.socket)"
-    # Note: FreeBSD swtpm uses --pid-file <path>; Ubuntu/Linux swtpm uses --pid file=<path>
-    # Use the Linux-compatible form ("--pid file=") which also works on FreeBSD >= 0.7.x
-    let pid_arg = $"file=($paths.pid_file)"
-    ^$swtpm_bin socket --tpmstate $tpmstate_arg --tpm2 --ctrl $ctrl_arg --pid $pid_arg --daemon
+    # --server is the data socket bhyve/QEMU dial for TPM traffic; --ctrl is
+    # a separate out-of-band control channel. Both are needed: bhyve's
+    # `-l tpm,swtpm,<path>` connects to --server only. See swtpm(8).
+    let args = build-start-args $swtpm_bin $paths
+    ^$args.0 ...($args | skip 1)
 
     # Verify socket appears within 3 seconds (poll every 0.3s, 10 attempts).
     let max_polls = 10
@@ -140,23 +184,28 @@ def action-start [paths: record] {
 # ── action: stop ──────────────────────────────────────────────────────────────
 
 def action-stop [paths: record] {
-    log-step "swtpm_stop_begin" {pid_file: $paths.pid_file, socket: $paths.socket}
+    log-step "swtpm_stop_begin" {pid_file: $paths.pid_file, socket: $paths.socket, ctrl_socket: $paths.ctrl_socket}
 
     let pid = read-pid $paths.pid_file
     if $pid == null {
         log-step "swtpm_stop_no_pid" {note: "pid file absent or unreadable; nothing to stop"}
-        # Still clean up socket if it lingers.
+        # Still clean up sockets if they linger.
         if ($paths.socket | path exists) {
             ^rm -f $paths.socket
             log-step "swtpm_stop_stale_socket_removed" {socket: $paths.socket}
+        }
+        if ($paths.ctrl_socket | path exists) {
+            ^rm -f $paths.ctrl_socket
+            log-step "swtpm_stop_stale_ctrl_socket_removed" {ctrl_socket: $paths.ctrl_socket}
         }
         return
     }
 
     if not (pid-alive $pid) {
         log-step "swtpm_stop_not_running" {pid: $pid, note: "process not alive; cleaning up files"}
-        if ($paths.socket   | path exists) { ^rm -f $paths.socket }
-        if ($paths.pid_file | path exists) { ^rm -f $paths.pid_file }
+        if ($paths.socket      | path exists) { ^rm -f $paths.socket }
+        if ($paths.ctrl_socket | path exists) { ^rm -f $paths.ctrl_socket }
+        if ($paths.pid_file    | path exists) { ^rm -f $paths.pid_file }
         return
     }
 
@@ -182,9 +231,10 @@ def action-stop [paths: record] {
         error make {msg: $"swtpm pid ($pid) did not exit within 5s after SIGTERM"}
     }
 
-    # Remove socket and pid file.
-    if ($paths.socket   | path exists) { ^rm -f $paths.socket }
-    if ($paths.pid_file | path exists) { ^rm -f $paths.pid_file }
+    # Remove sockets and pid file.
+    if ($paths.socket      | path exists) { ^rm -f $paths.socket }
+    if ($paths.ctrl_socket | path exists) { ^rm -f $paths.ctrl_socket }
+    if ($paths.pid_file    | path exists) { ^rm -f $paths.pid_file }
 
     log-step "swtpm_stop_ok" {pid: $pid, verdict: "pass"}
 }
@@ -192,19 +242,22 @@ def action-stop [paths: record] {
 # ── action: status ────────────────────────────────────────────────────────────
 
 def action-status [paths: record] {
-    log-step "swtpm_status_check" {state_dir: $paths.state_dir, socket: $paths.socket}
+    log-step "swtpm_status_check" {state_dir: $paths.state_dir, socket: $paths.socket, ctrl_socket: $paths.ctrl_socket}
 
     let pid = read-pid $paths.pid_file
     let running = if $pid != null { pid-alive $pid } else { false }
     let sock_exists = $paths.socket | path exists
+    let ctrl_sock_exists = $paths.ctrl_socket | path exists
 
     let result = {
-        running:       $running
-        pid:           ($pid | default null)
-        socket_exists: $sock_exists
-        state_dir:     $paths.state_dir
-        socket:        $paths.socket
-        pid_file:      $paths.pid_file
+        running:            $running
+        pid:                ($pid | default null)
+        socket_exists:      $sock_exists
+        ctrl_socket_exists: $ctrl_sock_exists
+        state_dir:          $paths.state_dir
+        socket:             $paths.socket
+        ctrl_socket:        $paths.ctrl_socket
+        pid_file:           $paths.pid_file
     }
 
     log-step "swtpm_status_result" $result
@@ -239,17 +292,21 @@ def action-reset [paths: record] {
 
 # Manage the smolfire swtpm (software TPM 2.0) daemon for bhyve guests.
 #
-# --action     start | stop | status | reset
-# --state-dir  directory for TPM state files and pid  (default: /var/run/smolfire-tpm)
-# --socket     Unix socket path  (default: <state-dir>/swtpm.sock)
-# --pid-file   pid file path     (default: <state-dir>/swtpm.pid)
+# --action       start | stop | status | reset
+# --state-dir    directory for TPM state files and pid  (default: /var/run/smolfire-tpm)
+# --socket       swtpm *data* socket (--server) — pass this to bhyve/QEMU
+#                (default: <state-dir>/swtpm.sock)
+# --ctrl-socket  swtpm *control* socket (--ctrl) — out-of-band only, not used
+#                by bhyve/QEMU for TPM traffic (default: <state-dir>/swtpm-ctrl.sock)
+# --pid-file     pid file path     (default: <state-dir>/swtpm.pid)
 export def main [
-    --action:    string = "status"               # start | stop | status | reset
-    --state-dir: string = "/var/run/smolfire-tpm" # directory for TPM state + pid
-    --socket:    string = ""                      # defaults to <state-dir>/swtpm.sock
-    --pid-file:  string = ""                      # defaults to <state-dir>/swtpm.pid
+    --action:      string = "status"               # start | stop | status | reset
+    --state-dir:   string = "/var/run/smolfire-tpm" # directory for TPM state + pid
+    --socket:      string = ""                      # data socket; defaults to <state-dir>/swtpm.sock
+    --ctrl-socket: string = ""                      # control socket; defaults to <state-dir>/swtpm-ctrl.sock
+    --pid-file:    string = ""                      # defaults to <state-dir>/swtpm.pid
 ] {
-    let paths = resolve-paths $state_dir $socket $pid_file
+    let paths = resolve-paths $state_dir $socket $ctrl_socket $pid_file
 
     match $action {
         "start"  => { action-start  $paths }

@@ -21,7 +21,8 @@
 #   - per-task jail/container name derived from task_id + random salt
 #   - no network unless the caller passes --network (coord-tick sets it only
 #     when the request's tools_required contains "Network")
-#   - rctl(8) memory/process/CPU limits when kern.racct.enable=1
+#   - rctl(8) memory (RSS and virtual)/process/CPU limits when kern.racct.enable=1
+#   - /etc/resolv.conf (a copy of the host's) only when --network is given
 #   - wall-clock deadline for the whole task (timeout(1) per command)
 #   - teardown (jail -r, rctl -r, zfs destroy / rmdir) always runs; a failed
 #     teardown turns the verdict into "fail"
@@ -50,6 +51,17 @@ export const KILLED_EXIT_CODE       = 137      # 128 + SIGKILL (timeout -k fired
 export const NETWORK_CAPABILITY     = "Network"
 export const DEFAULT_JAIL_ROOT      = "/var/smolfire/jails"
 
+# Minimum patched FreeBSD levels (docs/JAIL-EXECUTOR.md §3). Below these, a
+# `security.mac.do.rules` entry without an explicit target gid can leave the
+# switched credential's primary gid at 0 when the caller's supplementary-group
+# list is empty: FreeBSD-SA-26:59.mac_do, CVE-2026-58092. SA-26:25.thr
+# (thr_kill2(2) breaks jail signal isolation) and SA-26:18.setcred (kernel
+# stack overflow under setcred(2), the syscall beneath mdo/mac_do) land in the
+# same or earlier patch levels, so the same floor covers all three.
+export const MIN_PATCH_15_0 = 13
+export const MIN_PATCH_15_1 = 3
+export const MIN_PATCH_LEVEL_MSG = "15.0-RELEASE-p13 or 15.1-RELEASE-p3 (FreeBSD-SA-26:59.mac_do / CVE-2026-58092, FreeBSD-SA-26:25.thr, FreeBSD-SA-26:18.setcred)"
+
 # ── Pure helpers (unit-tested on any OS) ──────────────────────────────────────
 
 # Refuse on anything but FreeBSD. Returns {ok: bool, error: string}.
@@ -58,6 +70,66 @@ export def host-check [os: string] {
         {ok: true, error: ""}
     } else {
         {ok: false, error: $"jail executor requires a FreeBSD host \(jail\(8\), rctl\(8\), mac_do\(4\)\); this host is ($os). Use SMOLFIRE_EXECUTOR=vm here."}
+    }
+}
+
+# Parse `freebsd-version -k` output, e.g. "15.0-RELEASE-p13" or
+# "15.1-RELEASE-p3" or "15.0-RELEASE" (patch 0). Anything else (CURRENT,
+# BETA, RC, STABLE, unparseable) is reported as ok: false, since patch level
+# can't be confirmed from it.
+export def parse-freebsd-version-k [v: string] {
+    let s = ($v | str trim)
+    let m = ($s | parse --regex '^(?<major>[0-9]+)\.(?<minor>[0-9]+)-RELEASE(-p(?<patch>[0-9]+))?$')
+    if ($m | is-empty) {
+        {ok: false, major: 0, minor: 0, patch: 0, raw: $s, error: $"unrecognized freebsd-version -k output: '($s)'"}
+    } else {
+        let row = $m | first
+        let patch_s = ($row | get -o patch | default "")
+        {ok: true, major: ($row.major | into int), minor: ($row.minor | into int), patch: (if $patch_s == "" { 0 } else { $patch_s | into int }), raw: $s, error: ""}
+    }
+}
+
+# Is a parsed freebsd-version-k record at or above the patched floor for its
+# branch? 15.2+/16+ (a branch newer than either advisory ever shipped
+# against) is treated as patched. Anything below 15.0, or unparseable, is not.
+export def patch-level-ok? [p: record] {
+    if not $p.ok {
+        false
+    } else if $p.major < 15 {
+        false
+    } else if $p.major == 15 and $p.minor == 0 {
+        $p.patch >= $MIN_PATCH_15_0
+    } else if $p.major == 15 and $p.minor == 1 {
+        $p.patch >= $MIN_PATCH_15_1
+    } else {
+        true
+    }
+}
+
+# Decide whether the executor may proceed on this host. Returns
+# {ok: bool, error: string, warn: string}. `error` is set (and `ok` false)
+# when the host is below the patched floor and `allow_unpatched` is false.
+# `warn` carries a non-fatal notice when `allow_unpatched` overrode a refusal.
+export def preflight-patch-level [freebsd_version_k: string, allow_unpatched: bool] {
+    let p = parse-freebsd-version-k $freebsd_version_k
+    if (patch-level-ok? $p) {
+        {ok: true, error: "", warn: ""}
+    } else if $allow_unpatched {
+        {ok: true, error: "", warn: $"jail executor: host reports freebsd-version -k = '($freebsd_version_k)', below the minimum patched level \(($MIN_PATCH_LEVEL_MSG)\); continuing because --allow-unpatched was passed"}
+    } else {
+        {ok: false, error: $"jail executor requires a patched FreeBSD host: freebsd-version -k reports '($freebsd_version_k)', below the minimum \(($MIN_PATCH_LEVEL_MSG)\). Patch the host, or pass --allow-unpatched to override \(not recommended\).", warn: ""}
+    }
+}
+
+# Which entries of a `security.mac.do.rules` value (comma-separated) lack an
+# explicit `gid=` clause. Empty input (rules unset, or sysctl unreadable) is
+# not a warning — there is nothing to check.
+export def mac-do-rules-missing-gid [rules: string] {
+    let s = ($rules | str trim)
+    if $s == "" {
+        []
+    } else {
+        $s | split row "," | each {|r| $r | str trim } | where {|r| $r != "" and not ($r | str contains "gid=") }
     }
 }
 
@@ -155,6 +227,7 @@ export def render-jail-conf [
     --network
     --tmpfs-size: string = "1g"
     --mac-do-disable
+    --resolv-conf: string = ""   # file nullfs-mounted read-only at /etc/resolv.conf (nullfs backend)
 ] {
     let hostname = $name | str replace --all "_" "-"
     let ip = if $network { "inherit" } else { "disable" }
@@ -167,6 +240,11 @@ export def render-jail-conf [
         [$"    mount += \"($base) ($path) nullfs ro 0 0\";"]
     } else { [] }
     let mac_do = if $mac_do_disable { ["    mac.do = \"disable\";"] } else { [] }
+    # Single-file nullfs mount (FreeBSD 14+): source and target must both be
+    # regular files, so the base needs an /etc/resolv.conf placeholder.
+    let resolv_mount = if $resolv_conf != "" and $backend == "nullfs" {
+        [$"    mount += \"($resolv_conf) ($path)/etc/resolv.conf nullfs ro 0 0\";"]
+    } else { [] }
 
     [
         $"# generated by bin/jail-execute.nu \(schema ($JAIL_EXECUTOR_SCHEMA)\) — ephemeral, removed on exit"
@@ -188,16 +266,51 @@ export def render-jail-conf [
         $"    ip4 = \"($ip)\";"
         $"    ip6 = \"($ip)\";"
         ...$base_mount
+        ...$resolv_mount
         $"    mount += \"tmpfs ($path)/tmp tmpfs rw,mode=1777,size=($tmpfs_size) 0 0\";"
         ...$mac_do
         "}"
     ] | str join "\n" | $in + "\n"
 }
 
+# Can a "Network" task get DNS? Returns {error: string} ("" = yes).
+# The source must be a non-empty host file. The nullfs backend mounts it over
+# <base>/etc/resolv.conf, which must already exist as a regular file (a
+# single-file nullfs mount needs a file target, and the base is read-only);
+# base.txz ships none, so the operator adds an empty placeholder once.
+# The zfs clone is writable, so it needs no placeholder. Podman manages
+# /etc/resolv.conf itself, so it is never handled here.
+export def resolv-plan [backend: string, base: string, src: string] {
+    if $backend == "podman" { return {error: "podman manages /etc/resolv.conf itself"} }
+    if not (safe-path? $src) { return {error: $"unsafe resolv.conf source: ($src)"} }
+    # the host file may be a symlink (e.g. managed by resolvconf); follow it
+    if not ($src | path exists) or (($src | path expand | path type) != "file") {
+        return {error: $"($src) not found on the host; the task gets network but no DNS"}
+    }
+    if (ls ($src | path expand) | get 0.size | into int) == 0 {
+        return {error: $"($src) is empty; the task gets network but no DNS"}
+    }
+    if $backend == "nullfs" {
+        let target = [$base "etc" "resolv.conf"] | path join
+        # `path type` does not follow symlinks: a symlinked placeholder would
+        # make the mount resolve on the host, so only a regular file counts
+        if (($target | path type) != "file") {
+            return {error: $"($target) missing: create an empty placeholder \(touch ($target)\) so it can be nullfs-mounted; the task gets network but no DNS"}
+        }
+    }
+    {error: ""}
+}
+
 # rctl(8) rules for the jail. pcpu is a percentage of one CPU.
-export def rctl-rules [name: string, memory: string, maxproc: int, pcpu: int] {
+# memoryuse is RSS and is enforced lazily by the pager, so on its own it is not
+# a hard cap (a 200m allocation succeeded under memoryuse:deny=64m on a
+# swapless FreeBSD 15.0 host). vmemoryuse (address space) is denied at
+# allocation time and makes the cap real; it defaults to the same size.
+export def rctl-rules [name: string, memory: string, maxproc: int, pcpu: int, --vmemory: string = ""] {
+    let vmem = if $vmemory == "" { $memory } else { $vmemory }
     [
         $"jail:($name):memoryuse:deny=($memory)"
+        $"jail:($name):vmemoryuse:deny=($vmem)"
         $"jail:($name):maxproc:deny=($maxproc)"
         $"jail:($name):pcpu:deny=($pcpu)"
     ]
@@ -243,15 +356,23 @@ export def exec-argv [backend: string, name: string, cmd: string, remaining: int
     }
 }
 
-# Privilege prefix for root-only steps. uid 0 → none; else mdo(1) if present.
+# Privilege prefix for root-only steps. uid 0 → none; else `mdo -i` if present.
+# `-i` switches only the user IDs to root and keeps the caller's groups, so the
+# minimal mac_do(4) rule `uid=N>uid=0:gid=0` authorizes it. The rule must name
+# an explicit target gid: on a host below the patch level in
+# docs/JAIL-EXECUTOR.md §3, a gid-less rule can leave the switched credential's
+# primary gid at 0 even when that wasn't named (FreeBSD-SA-26:59.mac_do,
+# CVE-2026-58092). Plain `mdo` implies `-u root`, which also switches to
+# root's login groups (wheel, operator) and is refused with EPERM under that
+# rule (verified on FreeBSD 15.0-RELEASE-p5).
 # Returns {prefix: list<string>, error: string}.
 export def priv-prefix [uid: int, has_mdo: bool] {
     if $uid == 0 {
         {prefix: [], error: ""}
     } else if $has_mdo {
-        {prefix: ["mdo"], error: ""}
+        {prefix: ["mdo" "-i"], error: ""}
     } else {
-        {prefix: [], error: $"jail executor needs root: run as root, or load mac_do\(4\) and allow this uid \(($uid)\) to reach root, e.g. security.mac.do.rules=\"uid=($uid)>uid=0\", with mdo\(1\) at /usr/bin/mdo"}
+        {prefix: [], error: $"jail executor needs root: run as root, or load mac_do\(4\) and allow this uid \(($uid)\) to reach root, e.g. security.mac.do.rules=\"uid=($uid)>uid=0:gid=0\", with mdo\(1\) at /usr/bin/mdo"}
     }
 }
 
@@ -259,6 +380,13 @@ export def priv-prefix [uid: int, has_mdo: bool] {
 export def result-record [verdict: string, boot_sec: int, outputs: list, error: string = ""] {
     let r = {verdict: $verdict, boot_sec: $boot_sec, outputs: $outputs}
     if $error == "" { $r } else { $r | insert error $error }
+}
+
+# Add a `warnings` key (non-fatal, e.g. --allow-unpatched or a gid-less mac_do
+# rule) only when there is at least one, so the common case keeps the exact
+# vm-execute.nu-parity shape that result-record produces.
+export def attach-warnings [result: record, warnings: list<string>] {
+    if ($warnings | is-empty) { $result } else { $result | insert warnings $warnings }
 }
 
 # mbox reply envelope for a jail run. Mirrors coord-dispatch.nu dispatch-vm's
@@ -301,7 +429,20 @@ subject   = \"jail executed all commands\"
 expected  = \"all commands exit 0\"
 evidence  = ($"($result.outputs | length) commands run; exit codes [($exit_codes)]" | to json)
 verdict   = ($result.verdict | to json)
+
 "
+}
+
+# What to write before appending a message to an mbox whose current contents
+# are `existing`, so the new "From " line follows a blank line (strict mbox).
+export def mbox-append-prefix [existing: string] {
+    if $existing == "" or ($existing | str ends-with "\n\n") {
+        ""
+    } else if ($existing | str ends-with "\n") {
+        "\n"
+    } else {
+        "\n\n"
+    }
 }
 
 # ── Side-effecting helpers ────────────────────────────────────────────────────
@@ -337,6 +478,21 @@ def mac-do-loaded [] {
     $r.exit_code == 0 and ($r.stdout | str trim) == "1"
 }
 
+# `freebsd-version -k` (kernel patch level), or "" if the binary is missing
+# or fails — preflight-patch-level then refuses (unparseable) unless
+# --allow-unpatched.
+def read-freebsd-version-k [] {
+    let r = try { ^freebsd-version -k | complete } catch { {exit_code: 1, stdout: ""} }
+    if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
+}
+
+# `sysctl -n security.mac.do.rules`, or "" if unreadable (mac_do not loaded,
+# no rules set, or the binary is missing) — treated as "nothing to warn about".
+def read-mac-do-rules [] {
+    let r = try { ^sysctl -n security.mac.do.rules | complete } catch { {exit_code: 1, stdout: ""} }
+    if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
+}
+
 # Tear everything down. Returns a list of error strings (empty = clean).
 def teardown [ctx: record] {
     mut errs = []
@@ -354,7 +510,8 @@ def teardown [ctx: record] {
             $errs = $errs | append $"jail -r failed: ($r.stderr | str trim)"
             # jail(8) unmounts its `mount` entries on removal; if removal failed,
             # force-unmount so the base is never left mounted under the jail dir.
-            for mp in [$"($ctx.path)/dev" $"($ctx.path)/tmp" $ctx.path] {
+            let resolv_mp = if $ctx.resolv_mounted { [$"($ctx.path)/etc/resolv.conf"] } else { [] }
+            for mp in [...$resolv_mp $"($ctx.path)/dev" $"($ctx.path)/tmp" $ctx.path] {
                 let _ = priv-run $ctx.prefix ["umount" "-f" $mp]
             }
         }
@@ -390,24 +547,49 @@ export def run-jail-task [
     --network                          # grant network (only for tools_required "Network")
     --timeout:       int    = 240      # whole-task wall clock, seconds (clamped)
     --memory:        string = "512m"   # rctl memoryuse / podman --memory
+    --vmemory:       string = ""       # rctl vmemoryuse; empty = same as --memory
     --maxproc:       int    = 256      # rctl maxproc / podman --pids-limit
     --pcpu:          int    = 100      # rctl pcpu (% of one CPU) / podman --cpus
     --tmpfs-size:    string = "1g"     # writable /tmp size
     --jail-root:     string = "/var/smolfire/jails"
     --jail-user:     string = "root"   # user inside the jail for jexec -U
+    --resolv-conf:   string = "/etc/resolv.conf"  # copied into the jail only with --network
     --require-limits                   # fail instead of warn when rctl is unavailable
     --salt:          string = ""       # name salt (tests); random when empty
     --os:            string = ""       # host OS override (tests); default $nu.os-info.name
+    --allow-unpatched                  # skip the freebsd-version -k patch-floor refusal (not recommended)
 ] {
     let host_os = if $os == "" { $nu.os-info.name } else { $os }
     let hc = host-check $host_os
     if not $hc.ok { return (result-record "fail" 0 [] $hc.error) }
+
+    # Patch-floor preflight (docs/JAIL-EXECUTOR.md §3): refuse below the
+    # minimum patched level unless --allow-unpatched. host-check above already
+    # confirmed $host_os matches FreeBSD, real or overridden for tests.
+    let pf = preflight-patch-level (read-freebsd-version-k) $allow_unpatched
+    if not $pf.ok { return (result-record "fail" 0 [] $pf.error) }
+    mut warnings = []
+    if $pf.warn != "" {
+        diag "jail_patch_level_warning" {task_id: $task_id, warning: $pf.warn}
+        $warnings = $warnings | append $pf.warn
+    }
+
+    # Defense-in-depth warning (not a refusal): flag any configured mac_do
+    # rule that omits an explicit gid= clause, the exact shape
+    # FreeBSD-SA-26:59.mac_do (CVE-2026-58092) warns about.
+    let missing_gid = mac-do-rules-missing-gid (read-mac-do-rules)
+    if ($missing_gid | length) > 0 {
+        let gid_warning = $"security.mac.do.rules has ($missing_gid | length) rule\(s\) with no explicit gid= clause \(FreeBSD-SA-26:59.mac_do / CVE-2026-58092\): ($missing_gid | str join ', ')"
+        diag "jail_mac_do_rule_missing_gid" {task_id: $task_id, rules: $missing_gid}
+        $warnings = $warnings | append $gid_warning
+    }
 
     if ($commands | length) == 0 { return (result-record "fail" 0 [] "no commands to run") }
     let be = resolve-backend $base $zfs_snapshot $image
     if $be.error != "" { return (result-record "fail" 0 [] $be.error) }
     if not (safe-path? $jail_root) { return (result-record "fail" 0 [] $"unsafe --jail-root: ($jail_root)") }
     if not (safe-size? $memory) { return (result-record "fail" 0 [] $"bad --memory: ($memory)") }
+    if $vmemory != "" and not (safe-size? $vmemory) { return (result-record "fail" 0 [] $"bad --vmemory: ($vmemory)") }
     if not (safe-size? $tmpfs_size) { return (result-record "fail" 0 [] $"bad --tmpfs-size: ($tmpfs_size)") }
     if not ($jail_user =~ '^[a-z_][a-z0-9_-]*$') { return (result-record "fail" 0 [] $"bad --jail-user: ($jail_user)") }
 
@@ -425,7 +607,8 @@ export def run-jail-task [
     mut ctx = {
         backend: $be.backend, name: $name, prefix: $prefix, path: $path,
         conf: "", conf_dir: "", dataset: "",
-        created: false, rctl_added: false, cloned: false, dir_made: false
+        created: false, rctl_added: false, cloned: false, dir_made: false,
+        resolv_mounted: false
     }
     mut setup_error = ""
 
@@ -463,15 +646,42 @@ export def run-jail-task [
             }
         }
 
+        # DNS for "Network" tasks only: a snapshot of the host's resolv.conf.
+        # zfs clone: copied into the writable clone. nullfs: mounted read-only
+        # over the base's /etc/resolv.conf placeholder (see docs §3).
+        mut resolv_mount = ""
+        if $setup_error == "" and $network {
+            let dns = resolv-plan $be.backend $base $resolv_conf
+            if $dns.error != "" {
+                diag "jail_dns_unavailable" {task_id: $task_id, jail: $name, reason: $dns.error}
+            } else {
+                let snap = [$conf_dir "resolv.conf"] | path join
+                open --raw ($resolv_conf | path expand) | save --force $snap
+                ^chmod 644 $snap
+                if $be.backend == "zfs" {
+                    # install(1) writes a temp file and renames it, so it never
+                    # follows a symlink at the target
+                    let r = priv-run $prefix ["install" "-m" "0644" $snap $"($path)/etc/resolv.conf"]
+                    if $r.exit_code != 0 { $setup_error = $"install resolv.conf into clone failed: ($r.stderr | str trim)" }
+                } else if not (safe-path? $snap) {
+                    diag "jail_dns_unavailable" {task_id: $task_id, jail: $name, reason: $"unsafe resolv.conf snapshot path: ($snap)"}
+                } else {
+                    $resolv_mount = $snap
+                    $ctx = $ctx | update resolv_mounted true
+                }
+            }
+        }
+
         if $setup_error == "" {
             let use_mdo = ($prefix | length) > 0
             let mac_do_off = $use_mdo or (mac-do-loaded)
-            let rendered = render-jail-conf $name $path --backend $be.backend --base $base --network=$network --tmpfs-size $tmpfs_size --mac-do-disable=$mac_do_off
+            let rendered = render-jail-conf $name $path --backend $be.backend --base $base --network=$network --tmpfs-size $tmpfs_size --mac-do-disable=$mac_do_off --resolv-conf $resolv_mount
             $rendered | save --force $conf
             let r = priv-run $prefix ["jail" "-c" "-f" $conf $name]
             if $r.exit_code == 0 {
                 $ctx = $ctx | update created true
             } else {
+                $ctx = $ctx | update resolv_mounted false
                 $setup_error = $"jail -c failed: ($r.stderr | str trim)"
             }
         }
@@ -479,7 +689,7 @@ export def run-jail-task [
         if $setup_error == "" {
             if (racct-enabled) {
                 mut rctl_err = ""
-                for rule in (rctl-rules $name $memory $maxproc $pcpu) {
+                for rule in (rctl-rules $name $memory $maxproc $pcpu --vmemory $vmemory) {
                     let r = priv-run $prefix ["rctl" "-a" $rule]
                     $ctx = $ctx | update rctl_added true
                     if $r.exit_code != 0 { $rctl_err = $"rctl -a ($rule) failed: ($r.stderr | str trim)"; break }
@@ -498,7 +708,7 @@ export def run-jail-task [
     if $setup_error != "" {
         let errs = teardown $ctx
         let msg = [$setup_error ...$errs] | str join "; "
-        return (result-record "fail" $boot_sec [] $msg)
+        return (attach-warnings (result-record "fail" $boot_sec [] $msg) $warnings)
     }
 
     # ── run ──────────────────────────────────────────────────────────────────
@@ -530,14 +740,22 @@ export def run-jail-task [
     let errs = teardown $ctx
     let all_errors = [$run_error ...$errs] | where {|e| $e != ""}
     let verdict = if $all_ok and ($errs | is-empty) { "pass" } else { "fail" }
-    result-record $verdict $boot_sec $outputs ($all_errors | str join "; ")
+    attach-warnings (result-record $verdict $boot_sec $outputs ($all_errors | str join "; ")) $warnings
 }
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-# Exit status for a result: 0 pass, 2 refused (non-FreeBSD host), 1 otherwise.
-def result-exit [result: record] {
-    if $result.verdict == "pass" { 0 } else if (($result | get -o error | default "") | str starts-with "jail executor requires a FreeBSD host") { 2 } else { 1 }
+# Exit status for a result: 0 pass, 2 refused (non-FreeBSD host, or a FreeBSD
+# host below the patch floor without --allow-unpatched), 1 otherwise.
+export def result-exit [result: record] {
+    let err = ($result | get -o error | default "")
+    if $result.verdict == "pass" {
+        0
+    } else if ($err | str starts-with "jail executor requires a FreeBSD host") or ($err | str starts-with "jail executor requires a patched FreeBSD host") {
+        2
+    } else {
+        1
+    }
 }
 
 # Run commands in an ephemeral jail and print the result record as JSON.
@@ -550,14 +768,16 @@ def "main run" [
     --network
     --timeout: int = 240
     --memory: string = "512m"
+    --vmemory: string = ""
     --maxproc: int = 256
     --pcpu: int = 100
     --tmpfs-size: string = "1g"
     --jail-root: string = "/var/smolfire/jails"
     --require-limits
+    --allow-unpatched    # skip the freebsd-version -k patch-floor refusal (not recommended)
 ] {
     let cmds = $commands | each {|c| $c | into string }
-    let result = run-jail-task $task_id $cmds --base $base --zfs-snapshot $zfs_snapshot --image $image --network=$network --timeout $timeout --memory $memory --maxproc $maxproc --pcpu $pcpu --tmpfs-size $tmpfs_size --jail-root $jail_root --require-limits=$require_limits
+    let result = run-jail-task $task_id $cmds --base $base --zfs-snapshot $zfs_snapshot --image $image --network=$network --timeout $timeout --memory $memory --vmemory $vmemory --maxproc $maxproc --pcpu $pcpu --tmpfs-size $tmpfs_size --jail-root $jail_root --require-limits=$require_limits --allow-unpatched=$allow_unpatched
     print ($result | to json)
     exit (result-exit $result)
 }
@@ -588,13 +808,17 @@ def "main dispatch" [
     let tools = $payload | get -o tools_required | default []
     let timeout = $payload | get -o timeout_sec | default ($env.SMOLFIRE_JAIL_TIMEOUT? | default $DEFAULT_TIMEOUT_SEC | into int)
     let jail_root = $env.SMOLFIRE_JAIL_ROOT? | default $DEFAULT_JAIL_ROOT
+    # Same escape hatch as `run --allow-unpatched`, for the coordinator-spawned path.
+    let allow_unpatched = ($env.SMOLFIRE_JAIL_ALLOW_UNPATCHED? | default "" ) in ["1" "true" "yes"]
 
     let result = if ($req | is-empty) {
         result-record "fail" 0 [] $"request ($request_id) not found in spool"
     } else {
-        run-jail-task $task_id $commands --base $base --zfs-snapshot $zsnap --image $image --network=(network-wanted $tools) --timeout $timeout --jail-root $jail_root
+        run-jail-task $task_id $commands --base $base --zfs-snapshot $zsnap --image $image --network=(network-wanted $tools) --timeout $timeout --jail-root $jail_root --allow-unpatched=$allow_unpatched
     }
-    reply-envelope $task_id $dispatch_id $result | save --append $spool
+    # Strict mbox: the reply's "From " line must follow a blank line.
+    let existing = if ($spool | path exists) { open --raw $spool } else { "" }
+    (mbox-append-prefix $existing) + (reply-envelope $task_id $dispatch_id $result) | save --append $spool
     diag "jail_dispatch_done" {task_id: $task_id, verdict: $result.verdict, boot_sec: $result.boot_sec, error: ($result | get -o error | default "")}
     exit (result-exit $result)
 }

@@ -40,6 +40,13 @@ on:
       vmsize:
         description: "Image VMSIZE (sparse)"
         default: "2g"
+      kernconf:
+        description: "KERNCONF under sys/<arch>/conf (e.g. SMOLFIRE-VM-TSLOG, the aarch64 TSLOG measurement kernel)"
+        default: "SMOLFIRE-VM"
+      kernel_only:
+        description: "Kernel only: kernel-toolchain + buildkernel + installkernel, upload boot/kernel tarball; no world, no image, no gates (~1.5 h vs ~3.5 h)"
+        type: boolean
+        default: false
   # (Rename phase-3b temporary push trigger retired after run #9 went green:
   #  smolfire.ufs.qcow2 built via CLOUDWARE=smolfire + KERNCONF=SMOLFIRE-VM,
   #  size gate and KVM boot gate passed with the new root password.)
@@ -58,7 +65,7 @@ env:
 
 jobs:
   build:
-    name: Build smolfire ${{ inputs.arch || 'amd64' }} qcow2
+    name: Build smolfire ${{ inputs.arch || 'amd64' }} ${{ inputs.kernel_only && format('kernel {0}', inputs.kernconf) || 'qcow2' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     defaults:
@@ -168,10 +175,69 @@ jobs:
           $SSH "git clone --depth 1 -b $SRC_BRANCH https://git.freebsd.org/src.git /usr/src"
           # Ship the smolfire repo (kernconfs, release confs, build pipeline).
           tar -C "$GITHUB_WORKSPACE" -cf - . | $SSH 'mkdir -p /root/smolfire && tar -C /root/smolfire -xf -'
+          # Install the whole SMOLFIRE* kernconf family for every arch:
+          # *-TSLOG variants `include` their base conf (mirrors smolfire.yml).
+          $SSH 'for d in amd64 arm64 riscv; do
+                  cp /root/smolfire/sys/$d/conf/SMOLFIRE* /usr/src/sys/$d/conf/ 2>/dev/null || true
+                done; ls /usr/src/sys/*/conf/SMOLFIRE*'
+
+      - name: Build kernel only (kernel-toolchain + buildkernel) inside VM
+        if: ${{ inputs.kernel_only }}
+        env:
+          ARCH_INPUT: ${{ inputs.arch || 'amd64' }}
+          KERNCONF_INPUT: ${{ inputs.kernconf || 'SMOLFIRE-VM' }}
+        run: |
+          set -e
+          cd "$WORK"
+          SSH="ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+               -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@127.0.0.1"
+          case "$ARCH_INPUT" in
+            amd64)   T="" ;;   # native on the amd64 build VM
+            aarch64) T="TARGET=arm64 TARGET_ARCH=aarch64" ;;
+            riscv64) T="TARGET=riscv TARGET_ARCH=riscv64" ;;
+            *) echo "unknown arch $ARCH_INPUT"; exit 1 ;;
+          esac
+          case "$KERNCONF_INPUT" in *[!A-Za-z0-9_-]*) echo "bad kernconf"; exit 1 ;; esac
+          # One remote sh (fed on stdin, so root's login shell does not
+          # matter): toolchain, kernel, staged install. Per-stage seconds are
+          # echoed so the wall time is attributable from the job summary.
+          cat > kbuild.sh <<EOF
+          set -e
+          L=/var/tmp/smolfire-build.log; NJ=\$(sysctl -n hw.ncpu)
+          t0=\$(date +%s); echo "kernel-toolchain start \$(date -u +%FT%TZ) -j\$NJ $T"
+          make -C /usr/src -j\$NJ $T kernel-toolchain >>\$L 2>&1
+          t1=\$(date +%s); echo "kernel-toolchain done \$((t1-t0))s"
+          make -C /usr/src -j\$NJ $T buildkernel KERNCONF=$KERNCONF_INPUT >>\$L 2>&1
+          t2=\$(date +%s); echo "buildkernel done \$((t2-t1))s"
+          rm -rf /var/tmp/kinst && mkdir -p /var/tmp/kinst
+          make -C /usr/src $T installkernel KERNCONF=$KERNCONF_INPUT DESTDIR=/var/tmp/kinst >>\$L 2>&1
+          tar -C /var/tmp/kinst -cf /var/tmp/kernel.tar boot
+          ls -l /var/tmp/kinst/boot/kernel
+          echo "KERNEL_BUILD_SECS=\$((\$(date +%s)-t0))"
+          EOF
+          BUILD_RC=0
+          $SSH 'sh -s' < kbuild.sh \
+            2>&1 | tee build.log || BUILD_RC=$?
+          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -P "$SSH_PORT" root@127.0.0.1:/var/tmp/smolfire-build.log \
+              "$WORK/smolfire-build-vm.log" || true
+          if [ "$BUILD_RC" -ne 0 ]; then
+            echo "ERROR: kernel build rc=$BUILD_RC"; tail -n 150 "$WORK/smolfire-build-vm.log" || true; exit 1
+          fi
+          OUT="$WORK/smolfire-kernel-${ARCH_INPUT}-${KERNCONF_INPUT}.tar"
+          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -P "$SSH_PORT" root@127.0.0.1:/var/tmp/kernel.tar "$OUT"
+          ls -lh "$OUT"; tar -tvf "$OUT" | head -20
+          {
+            echo "### kernel-only build (${ARCH_INPUT}, ${KERNCONF_INPUT})"
+            grep -E 'done|KERNEL_BUILD_SECS' build.log | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build (world + kernel + cloudware-release) inside VM
+        if: ${{ !inputs.kernel_only }}
         env:
           VMSIZE_INPUT: ${{ inputs.vmsize || '2g' }}
+          KERNCONF_INPUT: ${{ inputs.kernconf || 'SMOLFIRE-VM' }}
         run: |
           set -e
           cd "$WORK"
@@ -182,7 +248,8 @@ jobs:
           # location (a nu bug) and the qcow2 was lost with the ephemeral VM.
           BUILD_RC=0
           $SSH "cd /root/smolfire && nu bin/build-smolfire-vm.nu \
-                  --arch '${{ inputs.arch || 'amd64' }}' --vmsize '$VMSIZE_INPUT'" \
+                  --arch '${{ inputs.arch || 'amd64' }}' --vmsize '$VMSIZE_INPUT' \
+                  --kernconf '$KERNCONF_INPUT'" \
             2>&1 | tee build.log || BUILD_RC=$?
           # Locate the artifact (FIX-9: cloudware-release writes
           # <objdir>/usr/src/release/smolfire.ufs.qcow2)
@@ -207,6 +274,7 @@ jobs:
           ls -lh "$WORK/smolfire-${{ inputs.arch || 'amd64' }}.qcow2"
 
       - name: Compress qcow2 (in place)
+        if: ${{ !inputs.kernel_only }}
         run: |
           set -e
           ARCH="${{ inputs.arch || 'amd64' }}"
@@ -238,6 +306,7 @@ jobs:
 
       - name: Size gate (<= 512 MiB)
         id: size
+        if: ${{ !inputs.kernel_only }}
         continue-on-error: true   # deferred: enforced after the boot gate below
         run: |
           BYTES=$(wc -c < "$WORK/smolfire-${{ inputs.arch || 'amd64' }}.qcow2")
@@ -251,7 +320,7 @@ jobs:
           fi
 
       - name: Boot gate (KVM, amd64 only)
-        if: ${{ (inputs.arch || 'amd64') == 'amd64' }}
+        if: ${{ !inputs.kernel_only && (inputs.arch || 'amd64') == 'amd64' }}
         run: |
           set -e
           cd "$WORK"
@@ -281,10 +350,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smolfire-${{ inputs.arch || 'amd64' }}
+          name: smolfire-${{ inputs.arch || 'amd64' }}${{ inputs.kernel_only && format('-kernel-{0}', inputs.kernconf) || '' }}
           if-no-files-found: warn
           path: |
             /mnt/smolfire-ci/smolfire-*.qcow2
+            /mnt/smolfire-ci/smolfire-kernel-*.tar
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log

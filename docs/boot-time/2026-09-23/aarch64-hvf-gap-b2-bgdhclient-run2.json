@@ -1,0 +1,35 @@
+{
+  "variant": "b2-bgdhclient",
+  "run": 1,
+  "env": {
+    "host": "MacBookPro18,4",
+    "cpu": "Apple M1 Max",
+    "macos": "26.6.2",
+    "qemu": "QEMU emulator version 10.2.1",
+    "accel": "hvf",
+    "mem": "256M",
+    "cpus": 2,
+    "nic": "user,model=virtio-net-pci",
+    "qemu_extra": "-boot menu=on,splash-time=0",
+    "poll_ms": 10,
+    "loadavg_before": "{ 63.08 27.75 17.64 }",
+    "loadavg_after": "{ 73.24 31.65 19.20 }",
+    "date": "2026-09-23T02:56:51-0700"
+  },
+  "markers_ms": {
+    "first_byte": 422,
+    "loader": 1127,
+    "kernel": 1481,
+    "root_mount": 1691,
+    "rc": 4043,
+    "login": 11429
+  },
+  "phases_ms": {
+    "firmware": 1127,
+    "loader": 354,
+    "kernel": 210,
+    "mount_to_rc": 2352,
+    "rc_to_login": 7386,
+    "total": 11429
+  }
+}

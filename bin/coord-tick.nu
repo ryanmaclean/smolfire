@@ -357,15 +357,37 @@ def spawn-jail-executor [task_id: string, dispatch_id: string, request_id: strin
 # Check whether the originating request for a reply required attestation.
 # Spawn a subagent (claude CLI) in the background to execute a dispatched task.
 # Non-blocking: writes a prompt file and launches `claude -p` via `sh -c ... &`.
-# If the `claude` CLI is not on PATH, logs `subagent_spawn_skipped` and returns —
-# the operator must launch manually in that case.
+#
+# Billed-subprocess guard (two independent layers — see docs/UR-BSD.md and
+# tests/spawn-subagent-test.nu):
+#   1. Opt-in kill switch: spawning a real subagent costs real money
+#      (--max-budget-usd) and outlives this process (detached `&`), so it is
+#      OFF by default. Every coord-tick.nu run — including every test and CI
+#      invocation — must explicitly set SMOLFIRE_SPAWN_SUBAGENT=1 to allow it.
+#      A test that merely forgets to sanitize PATH can no longer bill.
+#   2. SMOLFIRE_SUBAGENT_CMD overrides which binary name is resolved and
+#      launched (default "claude"), so tests can point this at a stub without
+#      relying solely on PATH ordering/stripping.
+# If the resolved CLI is not on PATH (or spawning is disabled), logs
+# `subagent_spawn_skipped` and returns — the operator must launch manually.
 def spawn-subagent [agent_type: string, task_id: string, spool_path: string, root: string] {
-    let claude_found = (which claude | length) > 0
+    let spawn_enabled = (($env | get SMOLFIRE_SPAWN_SUBAGENT? | default "") == "1")
+    if not $spawn_enabled {
+        log-event "subagent_spawn_skipped" {
+            task_id:    $task_id
+            agent_type: $agent_type
+            reason:     "subagent spawning disabled by default (set SMOLFIRE_SPAWN_SUBAGENT=1 to enable)"
+        }
+        return
+    }
+
+    let claude_bin = $env | get SMOLFIRE_SUBAGENT_CMD? | default "claude"
+    let claude_found = (which $claude_bin | length) > 0
     if not $claude_found {
         log-event "subagent_spawn_skipped" {
             task_id:    $task_id
             agent_type: $agent_type
-            reason:     "claude CLI not installed"
+            reason:     $"($claude_bin) CLI not installed"
         }
         return
     }
@@ -401,7 +423,7 @@ Do not modify any other messages in the spool. Append only.
     let model = $env | get SMOLFIRE_CLAUDE_MODEL? | default "claude-sonnet-5"
     # Launch claude as a truly-detached process (survives coord-tick.nu exit).
     # Prompt is passed via stdin redirect to avoid shell quoting fragility.
-    let sh_cmd = $"claude --print --bare --allowedTools 'Write,Bash,Read,Glob,Grep' --max-budget-usd 1.0 --model ($model) < '($prompt_file)' >'($log_file)' 2>&1 &"
+    let sh_cmd = $"($claude_bin) --print --bare --allowedTools 'Write,Bash,Read,Glob,Grep' --max-budget-usd 1.0 --model ($model) < '($prompt_file)' >'($log_file)' 2>&1 &"
     ^sh -c $sh_cmd
 
     log-event "subagent_spawned" {

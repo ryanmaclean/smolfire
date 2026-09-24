@@ -179,6 +179,34 @@ bhyve.
 | Physical Pi 5 fTPM | Pi 5 physical board (Phase IV) | RP1 TrustZone fTPM |
 | Physical RK3588 fTPM | RK3588 + OP-TEE build (Phase IV) | ARM TrustZone + OP-TEE |
 
+**Root-cause doubt (2026-09-23, needs re-diagnosis before touching any kernconf):**
+A candidate explanation floated for "no `/dev/tpm0` on arm64" was that FreeBSD's
+`tpm_crb.c` (the ACPI CRB attachment used by `tpm_tis_acpi`) is amd64-only in
+`sys/conf/files.amd64`, combined with `sys/arm64/conf/SMOLFIRE-VM` disabling
+ACPI via `nodevice acpi`, so `tpm_tis_acpi` would have nothing to attach to.
+That combination does **not** hold in this repo: `sys/conf/files.amd64` is not
+present here at all (this repo's `sys/` tree carries only kernel *config*
+files under `sys/{amd64,arm64,riscv}/conf/`, not FreeBSD kernel driver
+sources, so the amd64-only claim can't be checked against this checkout — it
+would need verification against an actual FreeBSD src tree). More importantly,
+`sys/arm64/conf/SMOLFIRE-VM` (the arm64 QEMU/bhyve VM kernel used for TPM
+testing) does **not** set `nodevice acpi` — grep confirms it: ACPI is kept
+enabled there (`# device acpi # Kept via MINIMAL; needed for -machine virt +
+EDK2`, commented out only because it's already pulled in by `std.virt`/
+`MINIMAL`), and `device tpm` is already compiled in
+(`sys/arm64/conf/SMOLFIRE-VM`, "TPM 2.0 support" section). `nodevice acpi`
+appears only in `sys/arm64/conf/SMOLFIRE-RK3588:87` and
+`sys/arm64/conf/SMOLFIRE-PI5:77` — the *physical-board* kernels, which are
+unrelated to the QEMU/bhyve VM path this phase tests. The two already-verified
+root causes for arm64 TPM gaps remain §4a.2 (bhyve on arm64 has no `-l tpm`
+device backend at all — a hypervisor limitation per bhyve(8), independent of
+guest kernel config) and §4a.3 below (QEMU aarch64's `-device tpm-tis-device`
+emits an ACPI TPM2 table with `ControlArea=0`, which FreeBSD's `tpm(4)` CRB
+driver refuses to attach to). Before changing any kernconf on the strength of
+the `files.amd64`/`nodevice acpi` theory, re-diagnose against the actual
+FreeBSD source tree (not present in this repo) and confirm which of the two
+already-documented mechanisms — or a third one — is actually responsible.
+
 ### 4a.3 aarch64 QEMU tpm-tis-device limitation (ControlArea=0)
 
 Live run task-0031 confirmed that aarch64 QEMU with `-device tpm-tis-device`
@@ -286,13 +314,16 @@ Two validated paths:
 **Path A — amd64 bhyve (preferred; requires bare-metal VT-x):**
 
 ```sh
-# Boot with virtio-tpm device
+# Boot with bhyve's LPC/ACPI CRB TPM device (-l tpm,swtpm,<data-socket>).
+# NOTE: TPM is not a PCI slot device — `-s N,tpm,...` is not valid bhyve
+# syntax. /tmp/swtpm-sock must be swtpm's --server (data) socket, not its
+# --ctrl (control) socket. See bhyve(8) and swtpm(8).
 bhyve -c 2 -m 512M \
   -l bootrom,/usr/local/share/uefi-firmware/BHYVE_UEFI.fd \
   -s 0,hostbridge \
   -s 1,virtio-blk,smolbsd-amd64.img \
-  -s 2,virtio-tpm,path=/tmp/swtpm-sock \
   -s 31,lpc -l com1,stdio \
+  -l tpm,swtpm,/tmp/swtpm-sock \
   smolbsd-tpm-test
 
 # Acceptance: guest serial log contains '/dev/tpm0' detected message

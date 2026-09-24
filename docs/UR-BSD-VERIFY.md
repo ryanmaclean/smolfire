@@ -570,3 +570,49 @@ produces the authoritative smolfire number — and is also the
 first-ever end-to-end run of the scripted aarch64 image leg, so a red
 build job there is triaged from smolfire-build-vm.log before any gate
 conclusion is drawn.
+
+## First end-to-end aarch64 image + TCG soft-gate PASS (2026-09-24, run 35947103487)
+
+The scripted aarch64 image leg had never executed (only a manual
+assembly existed); it is now validated end-to-end on the hosted
+pipeline, with two findings en route:
+
+- **Run 35945692124 (attempt 1) — WITHOUT_INSTALLLIB breaks cross
+  buildworld.** Died 5s in: `ld: unable to find library -legacy` for
+  rpcgen/certctl. Proven by log-diff against the green amd64 run
+  (35834636637, which predates the knob) plus releng/15.0 sources:
+  Makefile.inc1's stage-1.1 legacy env overrides `MK_INCLUDES=yes` but
+  NOT `MK_INSTALLLIB`, so src.conf's `WITHOUT_INSTALLLIB=yes` (added
+  in 4088910, a size-trim proposal never build-validated) let
+  libegacy.a be built but skipped `_libinstall`. Only cross builds
+  notice — rpcgen/certctl are bootstrap-built only when TARGET !=
+  host. Knob removed (its trim effect was already redundant: release
+  confs rm /usr/lib *.a recursively, FIX-10 excludes -dev packages).
+  `WITHOUT_TOOLCHAIN` verified cross-safe (src.opts.mk:
+  MK_CLANG_BOOTSTRAP is gated by CROSS_COMPILER, not MK_TOOLCHAIN).
+- **Run 35947103487 (attempt 2) — GREEN, and fast:**
+  - Build (world + SMOLFIRE-VM kernel + cloudware-release, cross to
+    aarch64): **28 minutes** — ~7.5x faster than the 3.5h baseline.
+    This is the 4088910 trim-knob set's first successful build
+    validation (aarch64 leg; amd64 leg still pending). The knobs also
+    change heavyweight-validation economics: a full image run now
+    costs ~35 min, not ~3.5h, which weakens the "piggyback-only"
+    premise of the round-3 utilities-cut conditional.
+  - Size gate PASS: raw_bytes=66125824 (63.1 MiB),
+    compressed_bytes=26083328 (24.9 MiB) — the first aarch64 size
+    datum; slightly under amd64's 66.6/26.6 pre-knob numbers.
+  - **aarch64 boot soft-gate: VERDICT=pass, TIME_TO_LOGIN=31s,
+    attempt 1** — the first boot of any smolfire aarch64 image,
+    anywhere, and it happened under pure same-ISA TCG on a hosted
+    ubuntu-24.04-arm runner. Serial shows `random: fast provider:
+    "Armv8 rndr RNG"` — `-cpu max` FEAT_RNG covers entropy exactly as
+    the probe design intended (SMOLFIRE-VM has no virtio_random;
+    armv8_rng attaches instead). 31s vs the stock image's >1200s
+    confirms the stall attribution: firstboot machinery, not TCG.
+  - Soft-gate recalibration status: measured run 1 of 3; budget stays
+    900s. p95 < 300s so far — on the current trend the gate tightens
+    to ~2x p95 and timeout promotes to hard fail after run 3.
+
+The "aarch64: size gate only" era is over: the leg now has a boot
+gate, its verdict semantics are honest under TCG, and the evidence
+(gate-verdict.txt + serial) uploads with every run.

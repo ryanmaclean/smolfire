@@ -675,3 +675,43 @@ Three runs close out the backlog panel's (wf_126b3fff-e69) conditional:
 
 Temp push trigger on build-image-hosted.yml retired in this commit —
 exit condition met (runs 35955339464 + 35959282125 green).
+
+## Host-bench acceptance of the SHIPPED 0.5.0 bytes (2026-09-24)
+
+New validation layer: the release assets themselves, downloaded from
+GitHub and checksum-verified against the published SHA256SUMS, booted
+under TCG on an independent Linux container (no KVM, qemu 8.2.2) —
+hardware and code paths CI never touched. Deeper than the CI boot
+gate: an expect harness LOGS IN over serial and verifies from inside
+the guest.
+
+- **amd64 asset (run-18 build): PASS.** 43s to login (same-ISA TCG),
+  root login works, and in-guest evidence: all 8 round-3 cut targets
+  return "No such file" (bc, dc, netstat, truss, ipfwpcap, makefs,
+  libpcap.so.8, usbdevs); nologin present at 701,376 bytes (the
+  static security binary, intact); awk present (hardlink count 2 =
+  awk/nawk); sshd running; dhclient holds 10.0.2.15.
+- **aarch64 asset (post-swap, run 35965919427 build): PASS** via
+  bin/ci/aarch64-boot-probe.sh on this x86 host — CROSS-ISA TCG,
+  VERDICT=pass TIME_TO_LOGIN=82s (kernel 8s, rc 31s). The historic
+  ">480s cross-ISA" figure is now bounded to stock-GENERIC firstboot
+  images; smolfire boots cross-ISA in under 90s.
+- **Finding — pkgbase private-lib layout:** the image ships
+  libprivatessh.so.5 / libprivateldns.so.5 FLAT in /usr/lib, not in
+  /usr/lib/private (that path is stock-installworld layout; the
+  booted image has no /usr/lib/private at all). Verified via find +
+  `ldd /usr/sbin/sshd` in-guest: sshd resolves
+  /usr/lib/libprivatessh.so.5. LDDCHECK is unaffected (basename
+  index, recursive), conf comments corrected. Earlier ledger/PR text
+  saying sshd needs the libs "from /usr/lib/private" is superseded
+  for pkgbase images.
+- Harness lessons (all local, zero CI cost): expect scripts need
+  log_file from the start (blind runs waste wall-time), getty eats
+  input typed immediately at "login:" (sleep + retry-once fixes it),
+  and pkill -f patterns must not match their own wrapping shell
+  (bracket trick).
+
+0.5.0 asset state after the swap (oneshot runs 35965909249 +
+35965919427): aarch64 = cut-included build, digest a61671aa…, 24.2
+MiB compressed, LDDCHECK's first aarch64-leg PASS, soft-gate
+calibration run 2 at 30s (run 1: 31s).

@@ -2,6 +2,11 @@
 
 > **2026-09-23:** §1 is now measured (TSLOG, run 35829303519); §2 re-ranked.
 > TSC/lapic calibration (~259 ms) and console output (~126 ms) are ~80 % of the boot.
+>
+> **2026-09-24:** §2.2 landed via a guest-side patch (TSC frequency from the KVM
+> pvclock — no Firecracker change needed): release wall clock median 476 → **240 ms**
+> (run 35956015747; partly a faster host, see §2.2). Remaining big items: console
+> output (§2.3), phantom UARTs (§2.4), lapic clockcalib (~17 ms).
 
 Issue #39 items 3+4. Written 2026-08-23 against the round-2 SMOLFIRE state
 (run 30409991192: `TIME_TO_READY=511ms` Firecracker v1.12.0 / 569 ms QEMU
@@ -299,6 +304,29 @@ smolfire.yml -f tslog=true`, then `nu bin/tslog-phases.nu --dir <artifacts>`).
 `bin/build-smolfire.sh` + `smolfire.yml` `tslog` input + `bin/tslog-phases.nu`.
 
 ### 2.2 Skip TSC + lapic calibration via CPUID 0x40000010 (effort: S–M, measured ~259 ms removable — was "20–100 ms")
+
+**DONE for the TSC (2026-09-24) — by a different route than planned below.**
+Instead of waiting for a VMM to publish 0x40000010, the guest takes the TSC
+frequency from the KVM pvclock scale (the value Linux's `kvm_get_tsc_khz()`
+trusts): `docs/upstream/tsc-kvmclock-freq.{patch,md}`, applied by
+`bin/build-smolfire.sh`, guarded by `tests/tsc-kvmclock-patch-test.nu`.
+Measured, TSLOG run 35956015747 (n=3): `DELAY` 101.5 → 1.3 ms; `clockcalib`
+170 ms / 2 calls → 17 ms / 1 call (lapic only); SYSINIT `cpu` 143.6 → 30.1 ms,
+`clocks` 160.1 → 60.2 ms; `machdep.tsc_freq` = 2,596,122,000 Hz on every boot,
+within ~50 ppm of the 2596.25 MHz the stock, calibrating GENERIC build VM
+measured on the same runner. Release wall clock median 476 → 240 ms (228–247); QEMU microvm
+510 → 263–304 ms; Firecracker gate 314 ms (push run 35955999089; the dispatch
+run's single cold gate boot read 534 ms). **Host caveat:** this runner was a
+2.596 GHz EPYC 9V74 vs 2.446 GHz for the baseline, and untouched `_vprintf`
+also fell 126 → 78 ms, so the attributable saving is the removed DELAY +
+TSC clockcalib (≈ 250 ms of thread0), not the whole wall-clock drop. Data:
+[`docs/boot-time/2026-09-24-tsc-kvmclock/`](boot-time/2026-09-24-tsc-kvmclock/).
+Still open from this item: the lapic `clockcalib` (KVM's APIC bus rate is
+not guest-discoverable without 0x40000010), and dropping
+`machdep.disable_tsc_calibration=0` from `boot_args` (harmless now — the
+pvclock path runs first; kept as the non-KVM fallback).
+
+Original plan (kept for the record):
 
 Measured: `tsc_freq_tc()` spins a flat `DELAY(100000)` against the i8254
 (`probe_tsc_freq_late`, sys/x86/x86/tsc.c), then `tsc_calibrate()` runs

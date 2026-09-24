@@ -236,6 +236,27 @@ upstream-ready — it unconditionally drops Xen PVH bootability; an
 upstream version needs runtime isxen() dispatch in the init_ops. The
 finding (xen_delay installed on non-Xen PVH) is the upstreamable part.
 
+**Boot-time §2.2 — TSC frequency from the KVM pvclock (2026-09-24, runs
+35956015747 `tslog=true` + 35955999089 push).** `docs/upstream/tsc-kvmclock-freq.patch`
+(applied by `bin/build-smolfire.sh`, fail-loud three-way guard like pv.c;
+`tests/tsc-kvmclock-patch-test.nu` replays it against a pristine
+releng/15.0 `tsc.c` fixture) reads KVM's pvclock scale in
+`probe_tsc_freq_late()` and sets `tsc_early_calib_exact`. Measured
+(TSLOG, n=3, AMD EPYC 9V74 hosted runner, guest TSC 2.596 GHz):
+`DELAY` self time 101.5 → 1.3 ms, `clockcalib` 2 calls / 170 ms → 1 call
+(lapic only) / 17 ms; SYSINIT `cpu` 143.6 → 30.1 ms, `clocks` 160.1 →
+60.2 ms. `machdep.tsc_freq`=2596122000 on all three boots; the stock (calibrating)
+GENERIC build VM on the same runner reports 2596.25 MHz (`serial.log`),
+i.e. the pvclock value agrees to ~50 ppm. Release wall clock
+(exec → READY) median **240 ms** (228–247), was 476; Firecracker gate
+314 ms (push run) / 534 ms (dispatch run, first cold boot); QEMU microvm
+304 / 263 ms, was 510. All gates green (NET_GATE, HOST_PING, shell,
+size). Caveat: the baseline ran on a 2.446 GHz EPYC, this on 2.596 GHz —
+console `_vprintf` also dropped 126 → 78 ms with no code change, so the
+wall-clock delta overstates the patch; the patch's own saving is the
+DELAY + TSC-clockcalib time, ≈ 250 ms of thread0. Data:
+`docs/boot-time/2026-09-24-tsc-kvmclock/`.
+
 ## Release 0.3.0 shipped-bytes verification (run 30407544832)
 
 A skeptical audit found three gaps: the boot gate never authenticates

@@ -1,0 +1,65 @@
+spawn qemu-system-x86_64 -M microvm -accel kvm -cpu host -m 512M -kernel /mnt/smolfire-ci/smolfire-kernel -append hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/token.txt -netdev user,id=n0 -device virtio-net-device,netdev=n0 -display none -serial mon:stdio
+KDB: debugger backends: ddb
+KDB: current backend: ddb
+---<<BOOT>>---
+Copyright (c) 1992-2025 The FreeBSD Project.
+Copyright (c) 1979, 1980, 1983, 1986, 1988, 1989, 1991, 1992, 1993, 1994
+	The Regents of the University of California. All rights reserved.
+FreeBSD is a registered trademark of The FreeBSD Foundation.
+FreeBSD 15.0-RELEASE-p13 #0 releng/15.0-af58d0db156a-dirty: Thu Sep 24 04:46:23 UTC 2026
+    root@smolfire-build:/usr/obj/usr/src/amd64.amd64/sys/SMOLFIRE amd64
+FreeBSD clang version 19.1.7 (https://github.com/llvm/llvm-project.git llvmorg-19.1.7-0-gcd708029e0b2)
+CPU: AMD EPYC 9V45 96-Core Processor                 (2596.12-MHz K8-class CPU)
+  Origin="AuthenticAMD"  Id=0xb00f21  Family=0x1a  Model=0x2  Stepping=1
+  Features=0x783fbff<FPU,VME,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SEP,MTRR,PGE,MCA,CMOV,PAT,PSE36,MMX,FXSR,SSE,SSE2>
+  Features2=0xfffa3203<SSE3,PCLMULQDQ,SSSE3,FMA,CX16,PCID,SSE4.1,SSE4.2,x2APIC,MOVBE,POPCNT,TSCDLT,AESNI,XSAVE,OSXSAVE,AVX,F16C,RDRAND,HV>
+  AMD Features=0x2e500800<SYSCALL,NX,MMX+,FFXSR,Page1GB,RDTSCP,LM>
+  AMD Features2=0x3f7<LAHF,CMP,SVM,CR8,ABM,SSE4A,MAS,Prefetch,OSVW>
+  Structured Extended Features=0xf1bf07ab<FSGSBASE,TSCADJ,BMI1,AVX2,SMEP,BMI2,ERMS,INVPCID,AVX512F,AVX512DQ,RDSEED,ADX,SMAP,AVX512IFMA,CLFLUSHOPT,CLWB,AVX512CD,SHA,AVX512BW,AVX512VL>
+  Structured Extended Features2=0x405f46<AVX512VBMI,UMIP,AVX512VBMI2,GFNI,VAES,VPCLMULQDQ,AVX512VNNI,AVX512BITALG,AVX512VPOPCNTDQ,RDPID>
+  Structured Extended Features3=0x20000110<FSRM,AVX512VP2INTERSECT,ARCH_CAP>
+  XSAVE Features=0xf<XSAVEOPT,XSAVEC,XINUSE,XSAVES>
+  IA32_ARCH_CAPS=0x4000069<RDCL_NO,SKIP_L1DFL_VME,MDS_NO>
+  AMD Extended Feature Extensions ID EBX=0x10000005<CLZERO,XSaveErPtr,PSFD>
+  SVM: NP,NRIP,VClean,AFlush,NAsids=16
+Hypervisor: Origin = "KVMKVMKVM"
+real memory  = 536866816 (511 MB)
+avail memory = 475262976 (453 MB)
+Event timer "LAPIC" quality 600
+ACPI APIC Table: <BOCHS  BXPC    >
+random: registering fast source Intel Secure Key Seed
+random: fast provider: "Intel Secure Key Seed"
+arc4random: WARNING: initial seeding bypassed the cryptographic random device because it was not yet seeded and the knob 'bypass_before_seeding' was enabled.
+ioapic1: MADT APIC ID 1 != hw id 0
+MADT: Forcing active-low polarity and level trigger for SCI
+ioapic0 <Version 2.0> irqs 0-23
+ioapic1 <Version 2.0> irqs 24-47
+random: entropy device external interface
+kvmclock0: <KVM paravirtual clock>
+Timecounter "kvmclock" frequency 1000000000 Hz quality 975
+kvmclock0: registered as a time-of-day clock, resolution 0.000001s
+aesni0: <AES-CBC,AES-CCM,AES-GCM,AES-ICM,AES-XTS,SHA1,SHA256>
+acpi0: <BOCHS BXPC>
+acpi0: Power Button (fixed)
+acpi0: Sleep Button (fixed)
+uart0: <16550 or compatible> port 0x3f8-0x3ff irq 4 flags 0x10 on acpi0
+uart0: console (9600,n,8,1)
+acpi_button0: <Power Button> on acpi0
+virtio_mmio0: <VirtIO MMIO adapter> iomem 0xfeb02e00-0xfeb02fff irq 47 on acpi0
+vtnet0: <VirtIO Networking Adapter> on virtio_mmio0
+vtnet0: Ethernet address: 52:54:00:12:34:56
+vtnet0: netmap queues/slots: TX 1/1024, RX 1/512
+000.000049 [ 452] vtnet_netmap_attach       vtnet attached txq=1, txd=1024 rxq=1, rxd=512
+Timecounter "TSC-low" frequency 1298061000 Hz quality 800
+Timecounters tick every 10.000 msec
+md0: Embedded image 24248320 bytes at 0xffffffff80a0ef10
+Trying to mount root from ufs:/dev/md0 []...
+random: unblocking device.
+2026-09-24T04:53:27.814315+00:00 - init 15 - - login_getclass: unknown class 'daemon'
+lo0: link state changed to UP
+vtnet0: link state changed to UP
+SMOLFIRE_NET_OK
+MICROVM_NET=pass (SLIRP guest-initiated TCP)
+ net-1576218365
+SMOLFIRE_READY
+MICROVM_TIME_TO_READY=263ms

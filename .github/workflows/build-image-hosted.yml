@@ -35,6 +35,18 @@ name: Build smolfire Image (hosted runner)
 # kernel ident, hostname smolfire, 66.6 MiB raw / 26.6 MiB compressed,
 # size + KVM boot gates PASS, 8s to login. Temp push trigger retired.)
 on:
+  # TEMPORARY aarch64 revalidation trigger: this session's token cannot
+  # workflow_dispatch (403 — MCP integration; human dispatch works), so a
+  # branch-scoped push trigger runs the FIRST-EVER end-to-end aarch64
+  # image leg + same-ISA TCG soft-gate (ledger 2026-09-24 section).
+  # Because push events carry no inputs, every `inputs.arch || 'aarch64'`
+  # fallback in this file is TEMPORARILY flipped from 'amd64' — the
+  # retirement commit reverts the fallbacks to 'amd64' AND removes this
+  # push block after one green (or fully triaged) aarch64 run, citing
+  # the run ID.
+  push:
+    branches: ['claude/ur-bsd-26-qnmjho']
+    paths: ['.github/workflows/build-image-hosted.yml']
   workflow_dispatch:
     inputs:
       arch:
@@ -70,7 +82,7 @@ env:
 
 jobs:
   build:
-    name: Build smolfire ${{ inputs.arch || 'amd64' }} ${{ inputs.kernel_only && format('kernel {0}', inputs.kernconf) || 'qcow2' }}
+    name: Build smolfire ${{ inputs.arch || 'aarch64' }} ${{ inputs.kernel_only && format('kernel {0}', inputs.kernconf) || 'qcow2' }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     defaults:
@@ -189,7 +201,7 @@ jobs:
       - name: Build kernel only (kernel-toolchain + buildkernel) inside VM
         if: ${{ inputs.kernel_only }}
         env:
-          ARCH_INPUT: ${{ inputs.arch || 'amd64' }}
+          ARCH_INPUT: ${{ inputs.arch || 'aarch64' }}
           KERNCONF_INPUT: ${{ inputs.kernconf || 'SMOLFIRE-VM' }}
         run: |
           set -e
@@ -253,7 +265,7 @@ jobs:
           # location (a nu bug) and the qcow2 was lost with the ephemeral VM.
           BUILD_RC=0
           $SSH "cd /root/smolfire && nu bin/build-smolfire-vm.nu \
-                  --arch '${{ inputs.arch || 'amd64' }}' --vmsize '$VMSIZE_INPUT' \
+                  --arch '${{ inputs.arch || 'aarch64' }}' --vmsize '$VMSIZE_INPUT' \
                   --kernconf '$KERNCONF_INPUT'" \
             2>&1 | tee build.log || BUILD_RC=$?
           # Locate the artifact (FIX-9: cloudware-release writes
@@ -275,14 +287,14 @@ jobs:
           echo "artifact=$ART"
           scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -P "$SSH_PORT" "root@127.0.0.1:$ART" \
-              "$WORK/smolfire-${{ inputs.arch || 'amd64' }}.qcow2"
-          ls -lh "$WORK/smolfire-${{ inputs.arch || 'amd64' }}.qcow2"
+              "$WORK/smolfire-${{ inputs.arch || 'aarch64' }}.qcow2"
+          ls -lh "$WORK/smolfire-${{ inputs.arch || 'aarch64' }}.qcow2"
 
       - name: Compress qcow2 (in place)
         if: ${{ !inputs.kernel_only }}
         run: |
           set -e
-          ARCH="${{ inputs.arch || 'amd64' }}"
+          ARCH="${{ inputs.arch || 'aarch64' }}"
           RAW="$WORK/smolfire-${ARCH}.qcow2"
           RAW_BYTES=$(wc -c < "$RAW")
           # Per-cluster zlib compression: read-transparent to every qemu that
@@ -314,7 +326,7 @@ jobs:
         if: ${{ !inputs.kernel_only }}
         continue-on-error: true   # deferred: enforced after the boot gate below
         run: |
-          BYTES=$(wc -c < "$WORK/smolfire-${{ inputs.arch || 'amd64' }}.qcow2")
+          BYTES=$(wc -c < "$WORK/smolfire-${{ inputs.arch || 'aarch64' }}.qcow2")
           LIMIT=536870912
           echo "artifact: $BYTES bytes; limit: $LIMIT bytes"
           if [ "$BYTES" -le "$LIMIT" ]; then
@@ -325,7 +337,7 @@ jobs:
           fi
 
       - name: Boot gate (KVM, amd64 only)
-        if: ${{ !inputs.kernel_only && (inputs.arch || 'amd64') == 'amd64' }}
+        if: ${{ !inputs.kernel_only && (inputs.arch || 'aarch64') == 'amd64' }}
         run: |
           set -e
           cd "$WORK"
@@ -356,7 +368,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: smolfire-${{ inputs.arch || 'amd64' }}${{ inputs.kernel_only && format('-kernel-{0}', inputs.kernconf) || '' }}
+          name: smolfire-${{ inputs.arch || 'aarch64' }}${{ inputs.kernel_only && format('-kernel-{0}', inputs.kernconf) || '' }}
           if-no-files-found: warn
           path: |
             /mnt/smolfire-ci/smolfire-*.qcow2
@@ -399,7 +411,7 @@ jobs:
   aarch64-boot-softgate:
     name: aarch64 boot soft-gate (same-ISA TCG)
     needs: build
-    if: ${{ !inputs.kernel_only && (inputs.arch || 'amd64') == 'aarch64' }}
+    if: ${{ !inputs.kernel_only && (inputs.arch || 'aarch64') == 'aarch64' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45   # worst case 2x900s boots + setup ~= 35 min
     defaults:

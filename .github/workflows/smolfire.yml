@@ -9,11 +9,14 @@
 # but kernel-only (kernel-toolchain + buildkernel, ~30-45 min — no
 # buildworld, no pkgbase, no release stage).
 #
-# Triggers: workflow_dispatch (from a ref that has this file), plus a
-# branch push trigger on this file itself — which doubles as the
-# pre-merge validation trigger (the driving session cannot dispatch).
+# Triggers: workflow_dispatch plus push/pull_request on the dedicated
+# microVM path so SMOLFIRE regressions are validated independently of the
+# full qcow2/package workflows.
 
 name: SMOLFIRE microVM kernel
+
+permissions:
+  contents: read
 
 # (Round-2 push trigger retired after run #9 went GREEN: TIME_TO_READY=
 # 511ms, NET_GATE token-TCP pass + HOST_PING pass over TAP, microvm SLIRP
@@ -21,6 +24,28 @@ name: SMOLFIRE microVM kernel
 # (Post-rename revalidation: run 35834636692 GREEN 2026-09-23 — the
 # renamed kernel pipeline builds and passes both VMM gates.)
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/smolfire.yml'
+      - 'README.md'
+      - 'docs/BUILDING.md'
+      - 'docs/BOOT-TIME-ROADMAP.md'
+      - 'bin/build-smolfire.sh'
+      - 'docs/upstream/tsc-kvmclock-freq.patch'
+      - 'sys/amd64/conf/SMOLFIRE*'
+      - 'tests/microvm-primary-test.nu'
+      - 'tests/smolfire-rootfs-test.nu'
+  push:
+    paths:
+      - '.github/workflows/smolfire.yml'
+      - 'README.md'
+      - 'docs/BUILDING.md'
+      - 'docs/BOOT-TIME-ROADMAP.md'
+      - 'bin/build-smolfire.sh'
+      - 'docs/upstream/tsc-kvmclock-freq.patch'
+      - 'sys/amd64/conf/SMOLFIRE*'
+      - 'tests/microvm-primary-test.nu'
+      - 'tests/smolfire-rootfs-test.nu'
   workflow_dispatch:
     inputs:
       tslog:
@@ -34,6 +59,8 @@ env:
   SRC_BRANCH: releng/15.0
   BASE_URL: https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/amd64/Latest
   BASE_IMG: FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2
+  MICROVM_SIZE_LIMIT: "41943040"
+  MICROVM_READY_TARGET_MS: "1000"
   # PVH boot (the protocol FreeBSD kernels use — XEN_ELFNOTE_PHYS32_ENTRY)
   # was merged in Firecracker v1.12.0 (PR #5048); v1.10.0 entered the ELF
   # via the Linux protocol => instant KVM_EXIT_SHUTDOWN, zero serial (run #1).
@@ -41,7 +68,7 @@ env:
 
 jobs:
   smolfire:
-    name: Build + Firecracker boot gate
+    name: Build + microVM gates
     runs-on: ubuntu-latest
     timeout-minutes: 120
     defaults:
@@ -152,9 +179,25 @@ jobs:
             ls -lh "$WORK/smolfire-kernel-tslog"
           fi
 
-      - name: Boot gate — Firecracker (net gate + target << 1s to SMOLFIRE_READY)
+      - name: Artifact size gate
+        id: microvm_size
+        continue-on-error: true
         run: |
           set -e
+          cd "$WORK"
+          BYTES=$(wc -c < "$WORK/smolfire-kernel")
+          echo "artifact: $BYTES bytes; limit: $MICROVM_SIZE_LIMIT bytes"
+          if [ "$BYTES" -le "$MICROVM_SIZE_LIMIT" ]; then
+            echo "MICROVM_SIZE=pass ($((BYTES / 1048576)) MiB <= $((MICROVM_SIZE_LIMIT / 1048576)) MiB)"
+          else
+            echo "MICROVM_SIZE=fail ($BYTES bytes > $MICROVM_SIZE_LIMIT bytes)"
+            exit 1
+          fi
+
+      - name: Firecracker boot trace
+        continue-on-error: true
+        run: |
+          set +e
           cd "$WORK"
           # Net gate prep: tap + per-run token server. Host<->guest only —
           # NO NAT, no ip_forward (only needed for guest->internet).
@@ -198,21 +241,18 @@ jobs:
             return 0
           }
           trap cleanup_fc EXIT
-          EXPECT_RC=0
-          expect -c '
+          timeout 60 expect -c '
             set timeout 30
             set t0 [clock milliseconds]
             spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK"'/fc.json
-            set fcpid [exp_pid -i $spawn_id]
-            set pidfile [open "'"$WORK"'/firecracker.pid" w]
-            puts $pidfile $fcpid
-            close $pidfile
+            set fc_pid [exp_pid]
+            exec sh -c "echo $fc_pid > '"$WORK"'/firecracker.pid"
             expect {
               "SMOLFIRE_NET_OK '"$TOK"'" { puts "\nNET_GATE=pass (guest-initiated TCP, token verified)" }
               "SMOLFIRE_NET_FAIL"        { puts "\nNET_GATE=fail (fetch failed in guest)"; exit 3 }
-              "panic"   { expect -timeout 5 timeout; puts "\nVERDICT=fail (kernel panic — full text above)"; exit 2 }
+              "panic"   { expect -timeout 5 timeout; puts "\nBOOT_TRACE=fail (kernel panic — full text above)"; exit 2 }
               timeout   { puts "\nNET_GATE=fail (no net marker within 30s)"; exit 3 }
-              eof       { puts "\nVERDICT=fail (firecracker exited)"; exit 2 }
+              eof       { puts "\nBOOT_TRACE=fail (firecracker exited)"; exit 2 }
             }
             expect {
               "SMOLFIRE_READY" {
@@ -222,41 +262,86 @@ jobs:
                 send "\r"
                 expect {
                   "FIRE_42" {
+                    puts "\nSHELL_GATE=pass (interactive shell confirmed)"
                     if {[catch {exec ping -c 2 -W 2 172.16.0.2} pout]} {
                       puts "\nHOST_PING=fail ($pout)"; exit 4
                     } else { puts "\nHOST_PING=pass (host->guest ICMP over tap)" }
-                    if {![catch {exec ps -o rss= -p $fcpid} rss]} {
+                    if {![catch {exec ps -o rss= -p $fc_pid} rss]} {
                       puts "\nSMOLFIRE_METRIC ready.host.rss_kib=[string trim $rss]"
                     }
-                    puts "\nVERDICT=pass (interactive shell confirmed)"; exit 0
+                    puts "\nBOOT_TRACE=pass"; exit 0
                   }
-                  timeout   { puts "\nVERDICT=fail (shell unresponsive)"; exit 1 }
+                  timeout   { puts "\nSHELL_GATE=fail (shell unresponsive)"; exit 1 }
                 }
               }
-              "panic"   { expect -timeout 5 timeout; puts "\nVERDICT=fail (kernel panic — full text above)"; exit 2 }
-              timeout   { puts "\nVERDICT=fail (no READY within 30s)"; exit 1 }
-              eof       { puts "\nVERDICT=fail (firecracker exited)"; exit 2 }
-            }' 2>&1 | tee "$WORK/smolfire-gate.log" || EXPECT_RC=$?
+              "panic"   { expect -timeout 5 timeout; puts "\nBOOT_TRACE=fail (kernel panic — full text above)"; exit 2 }
+              timeout   { puts "\nBOOT_TRACE=fail (no READY within 30s)"; exit 1 }
+              eof       { puts "\nBOOT_TRACE=fail (firecracker exited)"; exit 2 }
+            }' | tee firecracker-gate.log
+          RC=${PIPESTATUS[0]}
+          echo "$RC" > firecracker-gate.rc
+          echo "firecracker_expect_rc=$RC"
           {
             echo "### SMOLFIRE microVM size report"
             echo '```'
             grep -h -a -E '^SMOLFIRE_METRIC |^SMOLFIRE_SECTION ' \
-              "$WORK/smolfire-build-vm.log" "$WORK/smolfire-gate.log" || true
+              "$WORK/smolfire-build-vm.log" "$WORK/firecracker-gate.log" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          cleanup_fc
-          [ "$EXPECT_RC" -eq 0 ] || exit "$EXPECT_RC"
+          exit 0
 
-      - name: Boot gate — QEMU microvm (informational)
-        # Runs even when the Firecracker gate fails — that is exactly when
-        # the cross-check is most diagnostic (a VMM-specific vs kernel bug).
-        if: ${{ !cancelled() }}
+      - name: Firecracker network gate
+        id: firecracker_network
+        if: ${{ always() }}
         continue-on-error: true
         run: |
+          set -e
           cd "$WORK"
-          test -f "$WORK/smolfire-kernel" || { echo "no kernel built — nothing to cross-check"; exit 0; }
+          test -f firecracker-gate.log || { echo "missing firecracker-gate.log"; exit 1; }
+          grep -F "NET_GATE=pass" firecracker-gate.log >/dev/null
+          grep -F "HOST_PING=pass" firecracker-gate.log >/dev/null
+          echo "FIRECRACKER_NETWORK=pass"
+
+      - name: Firecracker boot-time gate
+        id: firecracker_boot_time
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          set -e
+          cd "$WORK"
+          test -f firecracker-gate.log || { echo "missing firecracker-gate.log"; exit 1; }
+          DT=$(sed -n 's/.*TIME_TO_READY=\([0-9][0-9]*\)ms.*/\1/p' firecracker-gate.log | head -1)
+          test -n "$DT" || { echo "no TIME_TO_READY marker found"; exit 1; }
+          echo "TIME_TO_READY=${DT}ms; target <= ${MICROVM_READY_TARGET_MS}ms"
+          if [ "$DT" -le "$MICROVM_READY_TARGET_MS" ]; then
+            echo "FIRECRACKER_BOOT_TIME=pass"
+          else
+            echo "FIRECRACKER_BOOT_TIME=fail"
+            exit 1
+          fi
+
+      - name: Firecracker shell gate
+        id: firecracker_shell
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          set -e
+          cd "$WORK"
+          test -f firecracker-gate.log || { echo "missing firecracker-gate.log"; exit 1; }
+          grep -F "SHELL_GATE=pass" firecracker-gate.log >/dev/null
+          echo "FIRECRACKER_SHELL=pass"
+
+      - name: QEMU microvm gate
+        id: qemu_microvm
+        # Runs even when the Firecracker gates fail — that is exactly when
+        # the cross-check is most diagnostic (a VMM-specific vs kernel bug).
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -e
+          cd "$WORK"
+          test -f "$WORK/smolfire-kernel" || { echo "no kernel built — skipping QEMU cross-check"; exit 0; }
           # Secondary consumer check: PVH direct boot on stock QEMU microvm.
-          # Informational: FIRECRACKER's mptable/ACPI assumptions may differ.
           timeout 60 expect -c '
             set timeout 30
             set t0 [clock milliseconds]
@@ -265,18 +350,20 @@ jobs:
               -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/token.txt" \
               -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
               -display none -serial mon:stdio
+            set qemu_pid [exp_pid]
+            exec sh -c "echo $qemu_pid > '"$WORK"'/qemu-microvm.pid"
             expect {
               "SMOLFIRE_NET_OK" { puts "\nMICROVM_NET=pass (SLIRP guest-initiated TCP)" }
-              "SMOLFIRE_NET_FAIL" { puts "\nMICROVM_NET=fail (informational)" }
+              "SMOLFIRE_NET_FAIL" { puts "\nMICROVM_NET=fail"; exit 1 }
               "SMOLFIRE_READY"  { puts "\nMICROVM_TIME_TO_READY=[expr [clock milliseconds]-$t0]ms (net markers skipped)"; exit 0 }
-              timeout           { puts "\nMICROVM: no output (informational)"; exit 1 }
-              eof               { puts "\nMICROVM: qemu exited (informational)"; exit 1 }
+              timeout           { puts "\nMICROVM: no output"; exit 1 }
+              eof               { puts "\nMICROVM: qemu exited"; exit 1 }
             }
             expect {
               "SMOLFIRE_READY" { puts "\nMICROVM_TIME_TO_READY=[expr [clock milliseconds]-$t0]ms"; exit 0 }
-              timeout          { puts "\nMICROVM: no READY (informational)"; exit 1 }
-              eof              { puts "\nMICROVM: qemu exited (informational)"; exit 1 }
-            }'
+              timeout          { puts "\nMICROVM: no READY"; exit 1 }
+              eof              { puts "\nMICROVM: qemu exited"; exit 1 }
+            }' | tee qemu-microvm.log
 
       - name: TSLOG capture — 3 TSLOG boots + 3 release wall-clock boots (tslog only)
         # Measurement, not a gate: runs after the gates whatever they said
@@ -357,16 +444,45 @@ jobs:
             /mnt/smolfire-ci/smolfire-kernel
             /mnt/smolfire-ci/smolfire-kernel-tslog
             /mnt/smolfire-ci/kernels.sha256
+            /mnt/smolfire-ci/firecracker-gate.log
+            /mnt/smolfire-ci/firecracker-gate.rc
+            /mnt/smolfire-ci/firecracker.pid
+            /mnt/smolfire-ci/qemu-microvm.log
+            /mnt/smolfire-ci/qemu-microvm.pid
             /mnt/smolfire-ci/release-run*.log
             /mnt/smolfire-ci/tslog-run*.log
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
-            /mnt/smolfire-ci/smolfire-gate.log
             /mnt/smolfire-ci/serial.log
+
+      - name: Record microVM gate results
+        if: ${{ always() }}
+        run: |
+          FAIL=0
+          {
+            echo 'microvm_size=${{ steps.microvm_size.outcome }}'
+            echo 'firecracker_network=${{ steps.firecracker_network.outcome }}'
+            echo 'firecracker_boot_time=${{ steps.firecracker_boot_time.outcome }}'
+            echo 'firecracker_shell=${{ steps.firecracker_shell.outcome }}'
+            echo 'qemu_microvm=${{ steps.qemu_microvm.outcome }}'
+          } > "$WORK/gate-results.env"
+          while IFS='=' read -r gate outcome; do
+            echo "$gate=$outcome"
+            [ "$outcome" = "success" ] || FAIL=1
+          done < "$WORK/gate-results.env"
+          echo "gate_fail=$FAIL" >> "$WORK/gate-results.env"
 
       - name: Teardown VM
         if: always()
         run: |
+          [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
+          [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
           [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
           [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
           sudo ip link del tap0 2>/dev/null || true
+
+      - name: Enforce microVM gates
+        if: ${{ always() }}
+        run: |
+          . "$WORK/gate-results.env"
+          test "$gate_fail" = 0

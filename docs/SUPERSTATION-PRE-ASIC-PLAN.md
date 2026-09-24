@@ -2,7 +2,9 @@
 
 ## Goal
 
-Use the three available SuperStation One systems as the cheapest hardware validation path for the lower-bound transaction/ordering primitive before considering ASIC.
+Use the three SuperStation One systems as the cheapest hardware validation path for the lower-bound transaction/ordering primitive before considering ASIC.
+
+Hardware status 2026-09-24: 1× SuperStation One on hand, 2× incoming. FPGA DUT path: MiSTer (already in use, 10.0.2.61) — fit of the durable-tid RTL to its fabric TBD.
 
 ## Node roles
 

@@ -1,0 +1,91 @@
+spawn /mnt/smolfire-ci/firecracker --no-api --config-file /mnt/smolfire-ci/fc-release.json
+2026-09-24T04:53:28.909797762 [anonymous-instance:main] Running Firecracker v1.12.0
+2026-09-24T04:53:28.914472572 [anonymous-instance:main] Artificially kick devices.
+2026-09-24T04:53:28.914513868 [anonymous-instance:fc_vcpu 0] Received a VcpuEvent::Resume message with immediate_exit enabled. immediate_exit was disabled before proceeding
+2026-09-24T04:53:28.915421251 [anonymous-instance:main] Successfully started microvm that was configured from one single json
+KDB: debugger backends: ddb
+KDB: current backend: ddb
+---<<BOOT>>---
+Copyright (c) 1992-2025 The FreeBSD Project.
+Copyright (c) 1979, 1980, 1983, 1986, 1988, 1989, 1991, 1992, 1993, 1994
+	The Regents of the University of California. All rights reserved.
+FreeBSD is a registered trademark of The FreeBSD Foundation.
+FreeBSD 15.0-RELEASE-p13 #0 releng/15.0-af58d0db156a-dirty: Thu Sep 24 04:46:23 UTC 2026
+    root@smolfire-build:/usr/obj/usr/src/amd64.amd64/sys/SMOLFIRE amd64
+FreeBSD clang version 19.1.7 (https://github.com/llvm/llvm-project.git llvmorg-19.1.7-0-gcd708029e0b2)
+CPU: AMD EPYC (2596.12-MHz K8-class CPU)
+  Origin="AuthenticAMD"  Id=0xb00f21  Family=0x1a  Model=0x2  Stepping=1
+  Features=0x783fbff<FPU,VME,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SEP,MTRR,PGE,MCA,CMOV,PAT,PSE36,MMX,FXSR,SSE,SSE2>
+  Features2=0xfffa3203<SSE3,PCLMULQDQ,SSSE3,FMA,CX16,PCID,SSE4.1,SSE4.2,x2APIC,MOVBE,POPCNT,TSCDLT,AESNI,XSAVE,OSXSAVE,AVX,F16C,RDRAND,HV>
+  AMD Features=0x2e500800<SYSCALL,NX,MMX+,FFXSR,Page1GB,RDTSCP,LM>
+  AMD Features2=0x4003f7<LAHF,CMP,SVM,CR8,ABM,SSE4A,MAS,Prefetch,OSVW,Topology>
+  Structured Extended Features=0xf1bf07ab<FSGSBASE,TSCADJ,BMI1,AVX2,SMEP,BMI2,ERMS,INVPCID,AVX512F,AVX512DQ,RDSEED,ADX,SMAP,AVX512IFMA,CLFLUSHOPT,CLWB,AVX512CD,SHA,AVX512BW,AVX512VL>
+  Structured Extended Features2=0x405f46<AVX512VBMI,UMIP,AVX512VBMI2,GFNI,VAES,VPCLMULQDQ,AVX512VNNI,AVX512BITALG,AVX512VPOPCNTDQ,RDPID>
+  Structured Extended Features3=0x110<FSRM,AVX512VP2INTERSECT>
+  XSAVE Features=0xf<XSAVEOPT,XSAVEC,XINUSE,XSAVES>
+  AMD Extended Feature Extensions ID EBX=0x50000005<CLZERO,XSaveErPtr,PSFD,IBPB_RET>
+  SVM: NP,NRIP,VClean,AFlush,NAsids=8
+  TSC: P-state invariant
+Hypervisor: Origin = "KVMKVMKVM"
+real memory  = 536870912 (512 MB)
+avail memory = 475267072 (453 MB)
+Event timer "LAPIC" quality 600
+ACPI APIC Table: <FIRECK FCVMMADT>
+random: registering fast source Intel Secure Key Seed
+random: fast provider: "Intel Secure Key Seed"
+arc4random: WARNING: initial seeding bypassed the cryptographic random device because it was not yet seeded and the knob 'bypass_before_seeding' was enabled.
+MADT: Forcing active-low polarity and level trigger for SCI
+ioapic0 <Version 1.1> irqs 0-23
+random: entropy device external interface
+virtio_mmio0: <VirtIO MMIO adapter> at iomem 0xd0000000-0xd0000fff irq 5
+vtnet0: <VirtIO Networking Adapter> on virtio_mmio0
+vtnet0: Ethernet address: 06:00:ac:10:00:02
+vtnet0: netmap queues/slots: TX 1/128, RX 1/128
+000.000039 [ 452] vtnet_netmap_attach       vtnet attached txq=1, txd=128 rxq=1, rxd=128
+kvmclock0: <KVM paravirtual clock>
+Timecounter "kvmclock" frequency 1000000000 Hz quality 975
+kvmclock0: registered as a time-of-day clock, resolution 0.000001s
+aesni0: <AES-CBC,AES-CCM,AES-GCM,AES-ICM,AES-XTS,SHA1,SHA256>
+acpi0: <FIRECK FCMVXSDT>
+virtio_mmio1: Cannot allocate memory window.
+vmgenc0: <VM Generation Counter> on acpi0
+random: registering fast source VM Generation ID
+uart: ns8250: UART FCR is broken (0x1)
+uart0: <Non-standard ns8250 class UART with FIFOs> port 0x3f8-0x3ff irq 4 flags 0x10 on acpi0
+uart0: console (9600,n,8,1)
+uart: ns8250: UART FCR is broken (0x1)
+uart1: <Non-standard ns8250 class UART with FIFOs> port 0x2f8-0x2ff irq 3 on acpi0
+uart: ns8250: UART FCR is broken (0x1)
+uart2: <Non-standard ns8250 class UART with FIFOs> port 0x3e8-0x3ef irq 4 on acpi0
+uart: ns8250: UART FCR is broken (0x1)
+uart3: <Non-standard ns8250 class UART with FIFOs> port 0x2e8-0x2ef irq 3 on acpi0
+Timecounter "TSC-low" frequency 1298061000 Hz quality 1000
+Timecounters tick every 10.000 msec
+md0: Embedded image 24248320 bytes at 0xffffffff80a0ef10
+Trying to mount root from ufs:/dev/md0 []...
+random: unblocking device.
+2026-09-24T04:53:29.136468+00:00 - init 15 - - login_getclass: unknown class 'daemon'
+lo0: link state changed to UP
+2026-09-24T04:53:29.142681007 [anonymous-instance:fc_vcpu 0] ack virtio features in invalid state 0x8f
+2026-09-24T04:53:29.142714227 [anonymous-instance:fc_vcpu 0] ack virtio features in invalid state 0x8f
+2026-09-24T04:53:29.142781498 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142798093 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142811162 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142825113 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142835639 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142847267 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142857772 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142868218 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142896190 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142912194 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142928398 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142943331 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142958133 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142972885 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.142987938 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+2026-09-24T04:53:29.143003221 [anonymous-instance:fc_vcpu 0] update virtio queue in invalid state 0x8f
+vtnet0: link state changed to UP
+SMOLFIRE_NET_OK net-1576218365
+SMOLFIRE_READY
+
+TIME_TO_READY=240ms

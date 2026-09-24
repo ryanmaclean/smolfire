@@ -60,11 +60,14 @@ Updated: 2026-09-23
 - [x] Phase 3 T1–T6 all pass
 - [x] OP-TEE license audit complete (Apache-2.0 / BSD-2-Clause / BSD-2-Clause-Patent — no GPL)
 - [x] Phase 4 scoped as hardware-free (QEMU+swtpm reuse — no physical board needed)
-- [ ] Physical hardware: Pi 5 or RK3588 board available — Phase 5 only
+- [x] Physical hardware: Pi 5 online at `pi501` (10.0.3.11, DHCP) — Phase 5 unblocked 2026-09-24
 
 ## Phase 5 status
 
-Blocked pending Phase 4 completion and physical hardware availability.
+Deferred 2026-09-24: no RP1 firmware TPM on pi501 (owner-confirmed); SPI TPM
+HAT ruled out (PoE HAT occupies the header). No physical-TPM path on current
+hardware — revisit on RK3588 or future board. Plan skeleton on
+`phase5/ftpm-plan-skeleton` records the decision.
 
 ## Coordinator FSM stories
 

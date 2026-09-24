@@ -4,18 +4,22 @@
 
 ## What it is
 
-smolfire is a minimal FreeBSD 15 VM (aarch64 primary, amd64 secondary) paired
-with a Nushell coordinator finite-state machine that dispatches build,
-review, and ops tasks to agents over an mbox+TOML mail spool. The goal is a
-small qcow2 artifact that boots unattended to a login prompt in under 30
-seconds on HVF/KVM hosts, driven end-to-end by the coordinator without
-shared conversation history.
+smolfire has two build products:
+
+- the **SMOLFIRE microVM**: one PVH-bootable ELF with an embedded static
+  `/rescue` MFS root, optimized for Firecracker and QEMU `microvm`
+- a **full qcow2 compatibility image**: the older cloud/release-image path,
+  retained for broader VM compatibility and package/image experiments
+
+The one-ELF microVM is the primary path. The repository also carries a
+Nushell coordinator finite-state machine that dispatches build, review, and
+ops tasks to agents over an mbox+TOML mail spool.
 
 ## Status
 
 As of 2026-09-24:
 
-| Leg     | Boot gate              | Image size            | Notes                                  |
+| Product | Boot gate              | Artifact size         | Notes                                  |
 |---------|------------------------|-----------------------|----------------------------------------|
 | amd64   | 9s to login on KVM — PASS | **62.6 MiB raw, 25.0 MiB compressed download** (≤ 512 MiB gate PASS) | Built end-to-end by the hosted pipeline in ~35 min; [releases](https://github.com/ryanmaclean/smolfire/releases) (0.1.0: 223 MiB → diet rounds 2+3 + build-knob trims: 62.6/25.0 MiB, zero orphaned sonames per the LDDCHECK gate) |
 | aarch64 | **31s to login under same-ISA TCG soft-gate — PASS** (no hardware accel needed; `ubuntu-24.04-arm` runner) | **63.1 MiB raw, 24.9 MiB compressed** (size gate PASS) | First image ever produced by the scripted aarch64 leg (run 35947103487); HVF on Apple Silicon boots it natively |
@@ -31,34 +35,54 @@ version CI pins in [`.github/nu-version`](.github/nu-version)
 (`pkg install nushell` / `brew install nushell` / a GitHub release binary —
 0.112.2 fails on `str lowercase` in `bin/coord-tick.nu`; 0.111 and older fail on `get -o`).
 
-Three ways in, depending on what you have:
+Default path: build or download the one-ELF SMOLFIRE microVM.
 
 1. **No FreeBSD host?** Dispatch the
-   [hosted build pipeline](.github/workflows/build-image-hosted.yml) from the
-   Actions tab — it builds the qcow2 on a stock GitHub runner and uploads it
-   as a workflow artifact (see `docs/BUILDING.md`, "Building in a pipeline").
-   Gate-passing builds can be published via the manual `Release smolfire Image` workflow —
-   check [Releases](https://github.com/ryanmaclean/smolfire/releases) for
-   prebuilt images.
-2. **Have a FreeBSD 15 host?** Build natively — see **Build** below.
-3. **Already have a qcow2?** Boot it:
+   [SMOLFIRE microVM kernel workflow](.github/workflows/smolfire.yml) from the
+   Actions tab. It builds `/root/smolfire-kernel` on a stock GitHub runner and
+   gates the artifact separately on **size**, **boot time**, **network**, and
+   **interactive shell**, with a QEMU `microvm` cross-check.
+2. **Have a FreeBSD 15 amd64 host with `/usr/src`?** Install the kernconfs into
+   the source tree and build the one-ELF artifact locally:
 
    ```sh
-   qemu-system-x86_64 -M q35 -accel kvm -cpu host -m 512M \
-     -drive file=smolfire.qcow2,format=qcow2,if=virtio \
-     -nic user,model=virtio-net-pci -nographic
+   sudo cp sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/
+   sudo sh bin/build-smolfire.sh
+   ```
+
+   The result is `/root/smolfire-kernel` — one ELF containing the kernel and
+   rootfs. This path does **not** run `buildworld`, `pkgbase`, or
+   `cloudware-release`.
+3. **Already have `smolfire-kernel`?** Boot it directly under QEMU `microvm`:
+
+   ```sh
+   qemu-system-x86_64 -M microvm -accel kvm -cpu host -m 512M \
+     -kernel smolfire-kernel \
+     -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0" \
+     -display none -serial mon:stdio
    # (-accel hvf on macOS; drop -accel/-cpu for slow TCG anywhere else)
    ```
 
-   Log in as `root` / password `smolfire`. **Dev images only**: they ship
-   `PermitRootLogin yes` + password auth — change the password on first
-   login and never expose one beyond QEMU user-mode networking.
+   Wait for `SMOLFIRE_READY`, then use the interactive root shell on the serial
+   console.
+
+4. **Need a full qcow2 anyway?** Use the
+   [hosted qcow2 compatibility pipeline](.github/workflows/build-image-hosted.yml)
+   or the local `bin/build-smolfire-vm.nu` flow in **Build** below. Gate-passing
+   builds can still be published via the manual `Release smolfire Image`
+   workflow — check
+   [Releases](https://github.com/ryanmaclean/smolfire/releases) for prebuilt
+   images.
+
+   Log in as `root` / password `smolfire` for qcow2 dev images only. Change the
+   password on first login and never expose one beyond QEMU user-mode
+   networking.
 
 ## Repo map
 
 | Path | What lives there |
 |---|---|
-| `bin/` | Coordinator FSM (`coord-*.nu`, run via `sh bin/coord-run.sh`), image build (`build-smolfire-vm.nu`), ops (`harvest.sh`, `qemu-smolfire-vm.nu`, bhyve tooling) |
+| `bin/` | Coordinator FSM (`coord-*.nu`, run via `sh bin/coord-run.sh`), primary microVM build (`build-smolfire.sh`), qcow2 compatibility build (`build-smolfire-vm.nu`), ops (`harvest.sh`, `qemu-smolfire-vm.nu`, bhyve tooling) |
 | `sys/`, `release/tools/` | SMOLFIRE kernel configs and release image confs |
 | `tests/` | Nu unit/integration suites + `expect` boot gates (`sh tests/run-all.sh`) |
 | `docs/` | `BUILDING.md` (start here), `UR-BSD.md`/`UR-BSD-VERIFY.md` (size work), `BHYVE-GATE-AMD64.md`, `NETBSD-MICROVM-PROTOTYPE.md` |
@@ -67,18 +91,25 @@ Three ways in, depending on what you have:
 
 ## Build
 
-Full pipeline lives in `docs/BUILDING.md`. The one-liner from a FreeBSD 15
-aarch64 host with `/usr/src` checked out at `releng/15.0`:
+Primary path: the one-ELF microVM.
+
+```sh
+sudo cp sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/
+sudo sh bin/build-smolfire.sh
+```
+
+This produces `/root/smolfire-kernel` and does **not** invoke `buildworld`,
+`pkgbase`, or `cloudware-release`.
+
+Need the full compatibility image instead? Use the qcow2 pipeline:
 
 ```sh
 sudo nu bin/build-smolfire-vm.nu
 ```
 
-This runs setup, `buildworld`, `buildkernel KERNCONF=SMOLFIRE-VM`, kernel obj
-cleanup, and `make cloudware-release` (the release image step). Output streams
-to `/var/tmp/smolfire-build.log`.
-Use `--check` for a read-only preflight, `--skip-buildworld` to resume after
-a long build, or `--arch amd64` to cross-compile.
+That compatibility path runs setup, `buildworld`,
+`buildkernel KERNCONF=SMOLFIRE-VM`, and `make cloudware-release`. Full details
+for both paths live in `docs/BUILDING.md`.
 
 ## Harvest and acceptance gates
 

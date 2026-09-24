@@ -18,7 +18,9 @@ else
     PY_SKIP_REASON="python3 >= 3.10 required (python3 not found)"
 fi
 # Roster: every tests/*-test.nu and tests/*-test.py, plus gates whose names
-# predate those patterns.
+# predate those patterns. tests/no-new-python-test.nu (the Nushell-only
+# script policy guard) and tests/netbsd-microvm-prototype-test.nu are picked
+# up automatically by the tests/*-test.nu glob — no separate wiring needed.
 for f in tests/*-test.nu tests/*-test.py tests/coord-fsm-tests.nu; do
     [ -e "$f" ] || continue
     printf "running %s ... " "$f"

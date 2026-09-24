@@ -1,15 +1,4 @@
-# smolfire (formerly smolBSD) Coordinator — Claude Code Context
-
-> **Rename note**: the project renamed smolBSD → **smolfire** ("smolBSD"
-> belongs to the unaffiliated NetBSDfr/smolBSD NetBSD micro-VM project).
-> The rename is complete (issue #41): repo name, `@smolfire.local` spool
-> addressing, `bin/smolfire.nu` CLI (old `bin/smolbsd.nu` shim removed
-> in #41), kernconfs (`SMOLFIRE` = microVM, `SMOLFIRE-VM` = full VM,
-> `SMOLFIRE-PI5`/`-RK3588` = boards), `smolfire-*.conf` release confs,
-> `CLOUDWARE=smolfire` (→ `SMOLFIRECONF`, `smolfire.ufs.qcow2`),
-> `SMOLFIRE_*` env vars, and guest identity (hostname/password
-> `smolfire`). Historical docs, `plans/`, `.planning/`, and self-hosted
-> runner paths (`/home/studio/smolbsd-*`) intentionally keep old names.
+# smolfire Coordinator — Claude Code Context
 
 ## 1. What this is
 

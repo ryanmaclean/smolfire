@@ -4,6 +4,13 @@
 
 Smallest boot/runtime substrate and storage research harness.
 
+## Language policy
+
+New scripts and tests must be Nushell (.nu). Do not add Python, shell beyond
+POSIX sh glue, or other languages without owner approval. This is enforced by
+`tests/no-new-python-test.nu` (run via `tests/run-all.sh` and in CI) — any
+tracked `*.py` file outside its explicit allow-list fails the build.
+
 ## Owns
 
 - microVM boot/runtime

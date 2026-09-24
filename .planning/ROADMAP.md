@@ -108,7 +108,7 @@ and RK3588 ARM TrustZone + OP-TEE fTPM TA (BSD-2-Clause). Ports the Phase 4
 attestation protocol to real hardware.
 
 **Prerequisites:** Phase 4 attestation passes ✅ (when done). Physical Pi 5 or
-RK3588 board connected. License audit complete ✅.
+RK3588 board connected. Pi 5 `pi501` (10.0.3.11) confirmed online 2026-09-24 — Phase 5 may proceed. License audit complete ✅.
 
 ---
 

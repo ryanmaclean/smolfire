@@ -157,6 +157,14 @@ jobs:
       - name: aarch64-boot-probe classifier tests
         run: nu tests/aarch64-boot-probe-test.nu
 
+      # #89: bounded model check, caller-supplied sequence vs hardware TID
+      # allocator. The table goes to the log so the state counts cited in
+      # docs/DURABLE-TID-SEQ-VS-ALLOC.md can be re-read from any run.
+      - name: durable-tid model check (#89)
+        run: |
+          nu bin/durable-tid-model.nu
+          nu tests/durable-tid-model-test.nu
+
   # ── Shell script linting ─────────────────────────────────────────────────────
   shellcheck:
     name: Shellcheck

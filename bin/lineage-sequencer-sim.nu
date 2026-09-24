@@ -49,11 +49,7 @@ def cpu-cost-ns [mutations: list<any>, costs: record] {
         $mutations
         | each {|m|
             let kib = kib-ceil $m.length
-            $costs.cpu_order_ns +
-            $costs.cpu_timestamp_ns +
-            $costs.cpu_append_ns +
-            $costs.cpu_lineage_ns +
-            ($kib * $costs.cpu_hash_ns_per_kib)
+            ($costs.cpu_order_ns + $costs.cpu_timestamp_ns + $costs.cpu_append_ns + $costs.cpu_lineage_ns + ($kib * $costs.cpu_hash_ns_per_kib))
         }
         | math sum
     ) + $costs.persist_fence_ns
@@ -64,11 +60,7 @@ def sequencer-cost-ns [mutations: list<any>, costs: record] {
         $mutations
         | each {|m|
             let kib = kib-ceil $m.length
-            $costs.sequencer_ring_enqueue_ns +
-            $costs.sequencer_dma_append_ns +
-            $costs.sequencer_completion_ns +
-            $costs.sequencer_sw_consistency_ns +
-            ($kib * $costs.sequencer_hash_ns_per_kib)
+            ($costs.sequencer_ring_enqueue_ns + $costs.sequencer_dma_append_ns + $costs.sequencer_completion_ns + $costs.sequencer_sw_consistency_ns + ($kib * $costs.sequencer_hash_ns_per_kib))
         }
         | math sum
     ) + $costs.persist_fence_ns

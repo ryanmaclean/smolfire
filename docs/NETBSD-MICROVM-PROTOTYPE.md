@@ -1,6 +1,6 @@
 # NetBSD 11 MICROVM sibling prototype
 
-`bin/netbsd-microvm-prototype.py` is a host-side prototype for the issue
+`bin/netbsd-microvm-prototype.nu` is a host-side prototype for the issue
 "Prototype a NetBSD 11 MICROVM sibling for
 SMOLFIRE". It does **not** vendor NetBSD, smolBSD, or third-party build logic.
 Instead, it gives this repository a small, BSD/MIT/Apache-only way to launch a
@@ -31,7 +31,7 @@ The host-side report maps those markers to the issue acceptance criteria:
 ## Example
 
 ```sh
-python3 bin/netbsd-microvm-prototype.py \
+nu bin/netbsd-microvm-prototype.nu \
   --kernel /path/to/netbsd-MICROVM \
   --rootfs /path/to/rootfs.fs \
   --state-image /path/to/state-lfs.img \

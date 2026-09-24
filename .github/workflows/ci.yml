@@ -113,6 +113,18 @@ jobs:
       - name: OpenLineage exporter tests
         run: nu tests/openlineage-export-test.nu
 
+      # netbsd-microvm-prototype-test.nu: dry-run/parse-log parity coverage
+      # for the Nushell port of the (retired) Copilot-authored Python script.
+      - name: NetBSD microvm prototype tests
+        run: nu tests/netbsd-microvm-prototype-test.nu
+
+      # no-new-python-test.nu: fails the build if any tracked *.py file
+      # exists outside the explicit allow-list in the test itself. See
+      # AGENTS.md and .github/copilot-instructions.md — new scripts must be
+      # Nushell, not Python.
+      - name: Nushell-only script policy guard
+        run: nu tests/no-new-python-test.nu
+
       # run-tests.nu --suite unit: runs mbox-parse unit tests + all FSM integration
       # tests (coord-fsm-tests.nu) without the VM e2e suite (no qcow2 in CI).
       - name: run-tests unit suite (mbox-parse + FSM)

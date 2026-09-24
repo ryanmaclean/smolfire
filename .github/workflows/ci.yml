@@ -101,6 +101,9 @@ jobs:
       - name: tslog-phases aggregator test
         run: nu tests/tslog-phases-test.nu
 
+      - name: TSC-from-KVM-pvclock kernel patch test (releng/15.0 fixture)
+        run: nu tests/tsc-kvmclock-patch-test.nu
+
       - name: spool-archive tests
         run: nu tests/spool-archive-test.nu
 

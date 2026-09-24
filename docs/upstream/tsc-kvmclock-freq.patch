@@ -1,0 +1,125 @@
+--- a/sys/x86/x86/tsc.c
++++ b/sys/x86/x86/tsc.c
+@@ -44,11 +44,15 @@
+ #include <sys/kernel.h>
+ #include <sys/smp.h>
+ #include <sys/vdso.h>
++#include <vm/vm.h>
++#include <vm/pmap.h>
+ #include <machine/clock.h>
+ #include <machine/cputypes.h>
+ #include <machine/fpu.h>
+ #include <machine/md_var.h>
+ #include <machine/specialreg.h>
++#include <machine/pvclock.h>
++#include <x86/kvm.h>
+ #include <x86/vmware.h>
+ #include <dev/acpica/acpi_hpet.h>
+ #include <contrib/dev/acpica/include/acpi.h>
+@@ -88,6 +92,11 @@
+     &tsc_skip_calibration, 0,
+     "Disable early TSC frequency calibration");
+ 
++static int	tsc_kvmclock_freq = 1;
++SYSCTL_INT(_machdep, OID_AUTO, tsc_kvmclock_freq, CTLFLAG_RDTUN,
++    &tsc_kvmclock_freq, 0,
++    "Derive the TSC frequency from the KVM pvclock scale when available");
++
+ static void tsc_freq_changed(void *arg, const struct cf_level *level,
+     int status);
+ static void tsc_freq_changing(void *arg, const struct cf_level *level,
+@@ -161,6 +170,78 @@
+ }
+ 
+ /*
++ * Derive the TSC frequency from the KVM paravirtual clock.  KVM computes the
++ * pvclock tsc_to_system_mul/tsc_shift pair from the guest's virtual TSC rate
++ * (the same value Linux trusts via kvm_get_tsc_khz()), so the frequency is
++ * exact rather than an estimate and both the PIT-based early calibration and
++ * the late clockcalib() pass can be skipped.  This matters on hypervisors
++ * which, like Firecracker, do not publish CPUID leaf 0x40000010 and on AMD
++ * hosts without CPUID leaf 0x15: there the two calibration passes otherwise
++ * cost a few hundred milliseconds of boot time.
++ *
++ * Must run after pmap bootstrap (for vtophys()).  A private time-info record
++ * is registered only for the duration of the query and then unregistered,
++ * leaving the MSR free for kvm_clock(4) to claim later.
++ */
++static struct pvclock_vcpu_time_info tsc_kvmclock_ti __aligned(64);
++
++static bool
++tsc_freq_kvmclock(uint64_t *res)
++{
++	struct pvclock_vcpu_time_info *ti;
++	u_int msr, regs[4];
++	uint32_t version, mul;
++	int8_t shift;
++	uint64_t freq;
++	int tries;
++
++	if (vm_guest != VM_GUEST_KVM || !tsc_kvmclock_freq)
++		return (false);
++	if (!kvm_cpuid_features_leaf_supported())
++		return (false);
++	kvm_cpuid_get_features(regs);
++	if ((regs[0] & KVM_FEATURE_CLOCKSOURCE2) != 0)
++		msr = KVM_MSR_SYSTEM_TIME_NEW;
++	else if ((regs[0] & KVM_FEATURE_CLOCKSOURCE) != 0)
++		msr = KVM_MSR_SYSTEM_TIME;
++	else
++		return (false);
++
++	ti = &tsc_kvmclock_ti;
++	memset(ti, 0, sizeof(*ti));
++	/* Bit 0 enables updates; KVM fills the record before re-entry. */
++	wrmsr(msr, vtophys(ti) | 1);
++	mul = 0;
++	shift = 0;
++	for (tries = 0; tries < 1000; tries++) {
++		version = atomic_load_acq_32(&ti->version);
++		if (version == 0 || (version & 1) != 0) {
++			cpu_spinwait();
++			continue;
++		}
++		mul = ti->tsc_to_system_mul;
++		shift = ti->tsc_shift;
++		atomic_thread_fence_acq();
++		if (atomic_load_32(&ti->version) == version)
++			break;
++		mul = 0;
++	}
++	wrmsr(msr, 0);
++	if (mul == 0)
++		return (false);
++
++	freq = (1000000000ULL << 32) / mul;
++	if (shift < 0)
++		freq <<= -shift;
++	else
++		freq >>= shift;
++	if (freq == 0)
++		return (false);
++	*res = freq;
++	return (true);
++}
++
++/*
+  * Calculate TSC frequency using information from the CPUID leaf 0x15 'Time
+  * Stamp Counter and Nominal Core Crystal Clock'.  If leaf 0x15 is not
+  * functional, as it is on Skylake/Kabylake, try 0x16 'Processor Frequency
+@@ -403,6 +484,15 @@
+ 	if (tsc_freq != 0)
+ 		return;
+ 
++	if (tsc_freq_kvmclock(&tsc_freq)) {
++		tsc_early_calib_exact = 1;
++		if (bootverbose)
++			printf(
++		    "Early TSC frequency %juHz derived from KVM pvclock\n",
++			    (uintmax_t)tsc_freq);
++		return;
++	}
++
+ 	if (tsc_skip_calibration) {
+ 		/*
+ 		 * Try to parse the brand string to obtain the nominal TSC

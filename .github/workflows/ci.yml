@@ -95,6 +95,9 @@ jobs:
       - name: smolfire rootfs assembly test
         run: nu tests/smolfire-rootfs-test.nu
 
+      - name: microVM primary-path regression test
+        run: nu tests/microvm-primary-test.nu
+
       - name: tslog-phases aggregator test
         run: nu tests/tslog-phases-test.nu
 

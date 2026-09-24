@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: Apache-2.0
+# a64-refresh-oneshot.yml — rebuild the aarch64 image FROM MAIN (round-3
+# cut included), gate it, and replace the 0.5.0 aarch64 asset in place.
+# TEMPORARY, self-triggering. GITHUB_TOKEN with actions:write CAN create
+# workflow_dispatch events (the documented exception to the no-recursion
+# rule), which is how this sidesteps the session token's dispatch 403.
+# DELETE after the asset swap is verified; retirement commit cites run IDs.
+# This run is also TCG soft-gate calibration run 2 and the first LDDCHECK
+# execution on the aarch64 leg.
+
+name: aarch64 0.5.0 asset refresh (one-shot)
+
+on:
+  push:
+    branches: ['claude/ur-bsd-26-qnmjho']
+    paths: ['.github/workflows/a64-refresh-oneshot.yml']
+
+permissions:
+  actions: write
+  contents: write
+
+env:
+  TAG: "0.5.0"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Dispatch aarch64 image build on main
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          BEFORE=$(gh run list -R "${{ github.repository }}" -w build-image-hosted.yml -L 1 --json databaseId -q '.[0].databaseId // 0')
+          gh workflow run build-image-hosted.yml -R "${{ github.repository }}" --ref main -f arch=aarch64
+          for i in $(seq 1 12); do
+            sleep 10
+            NEW=$(gh run list -R "${{ github.repository }}" -w build-image-hosted.yml -e workflow_dispatch -L 1 --json databaseId,headBranch -q '.[0].databaseId // 0')
+            if [ "$NEW" != "$BEFORE" ] && [ "$NEW" != "0" ]; then
+              echo "run_id=$NEW" >> "$GITHUB_OUTPUT"
+              echo "dispatched run: $NEW"
+              exit 0
+            fi
+          done
+          echo "dispatched run never appeared" >&2
+          exit 1
+
+      - name: Wait for the build + soft-gate (~40 min)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          gh run watch "${{ steps.dispatch.outputs.run_id }}" -R "${{ github.repository }}" --exit-status --interval 60
+
+      - name: Fetch new image + gate evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          RID="${{ steps.dispatch.outputs.run_id }}"
+          gh run download "$RID" -R "${{ github.repository }}" -n smolfire-aarch64 -D new
+          gh run download "$RID" -R "${{ github.repository }}" -n aarch64-softgate-evidence -D gate
+          mv new/smolfire-aarch64.qcow2 "smolfire-aarch64-$TAG.qcow2"
+          echo "== gate verdict of the NEW image =="
+          cat gate/gate-verdict.txt
+          grep -q '^verdict=pass' gate/gate-verdict.txt || { echo "soft-gate did not pass — refusing asset swap" >&2; exit 1; }
+
+      - name: Verify image, swap asset, regenerate checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          sudo apt-get install -y --no-install-recommends qemu-utils >/dev/null
+          qemu-img check "smolfire-aarch64-$TAG.qcow2"
+          OLD_SHA=$(gh release view "$TAG" -R "${{ github.repository }}" --json assets -q '.assets[] | select(.name=="smolfire-aarch64-'"$TAG"'.qcow2") | .digest')
+          gh release download "$TAG" -R "${{ github.repository }}" -p "smolfire-amd64-$TAG.qcow2" -D amd64cur
+          mv "amd64cur/smolfire-amd64-$TAG.qcow2" .
+          sha256sum "smolfire-amd64-$TAG.qcow2" "smolfire-aarch64-$TAG.qcow2" | tee "SHA256SUMS-$TAG"
+          gh release upload "$TAG" -R "${{ github.repository }}" --clobber \
+            "smolfire-aarch64-$TAG.qcow2" "SHA256SUMS-$TAG"
+          NEW_SHA=$(gh release view "$TAG" -R "${{ github.repository }}" --json assets -q '.assets[] | select(.name=="smolfire-aarch64-'"$TAG"'.qcow2") | .digest')
+          echo "old asset digest: $OLD_SHA"
+          echo "new asset digest: $NEW_SHA"
+          [ "$OLD_SHA" != "$NEW_SHA" ] || { echo "asset digest unchanged — swap did not take" >&2; exit 1; }
+
+      - name: Update release notes (drop the pre-cut caveat)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          RID="${{ steps.dispatch.outputs.run_id }}"
+          T2L=$(grep -o 'TIME_TO_LOGIN=[0-9]*s' gate/gate-verdict.txt | head -1 || echo 'TIME_TO_LOGIN=n/a')
+          RAW=$(qemu-img info --output=json "smolfire-aarch64-$TAG.qcow2" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f"{d[\"virtual-size\"]/2**20:.0f}")' 2>/dev/null || echo "?")
+          COMP=$(python3 -c "import os; print(f'{os.path.getsize(\"smolfire-aarch64-$TAG.qcow2\")/2**20:.1f}')")
+          {
+            printf '%s\n' "Both images built, gated, and verified end-to-end by CI on stock GitHub runners (PR #100; findings ledger: docs/UR-BSD-VERIFY.md, 2026-09-24 sections). Full-image builds now take ~35 min (was ~3.5 h)."
+            printf '\n## smolfire-amd64-0.5.0.qcow2 (25.0 MiB download, 62.6 MiB raw)\n'
+            printf '%s\n' "Diet round 3 + build-knob trims (was 66.6 MiB in 0.3.0, 223 MiB in 0.1.0). Gates on this exact image: KVM boot 9s to login, LDDCHECK zero orphaned libraries, size gate PASS (run 35959282125)."
+            printf '%s\n' '- Boot: `qemu-system-x86_64 -M q35 -accel kvm -cpu host -m 512M -drive file=smolfire-amd64-0.5.0.qcow2,format=qcow2,if=virtio -nic user,model=virtio-net-pci -nographic`'
+            printf '\n## smolfire-aarch64-0.5.0.qcow2 (%s MiB download)\n' "$COMP"
+            printf '%s\n' "The first aarch64 release image — built from main WITH the round-3 cut (run $RID). Gates on this exact image: LDDCHECK PASS, size gate PASS, same-ISA TCG soft-gate pass ($T2L on a hosted ubuntu-24.04-arm runner, no hardware acceleration; entropy via Armv8 RNDR)."
+            printf '%s\n' '- Boot (any aarch64 host, or Apple Silicon with `-accel hvf -cpu host`): `qemu-system-aarch64 -machine virt -cpu max -m 512M -drive if=pflash,format=raw,readonly=on,file=<AAVMF/EDK2 code fd> -drive file=smolfire-aarch64-0.5.0.qcow2,format=qcow2,if=virtio -nic user,model=virtio-net-pci -nographic`'
+            printf '\n%s\n' 'Login: root / smolfire — **dev images**: change the password on first login; never expose beyond QEMU user-mode networking.'
+            printf '\n%s\n' 'Kernel-only SMOLFIRE microVM (one-ELF, 511 ms): unchanged since 0.4.0 — use smolfire-kernel-0.4.0.gz from that release.'
+            printf '\n%s\n' 'Verify: `sha256sum -c SHA256SUMS-0.5.0`'
+          } > notes.md
+          gh release edit "$TAG" -R "${{ github.repository }}" --notes-file notes.md

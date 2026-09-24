@@ -216,6 +216,7 @@ jobs:
                 "$DESTDIR/usr/bin/truss" "$DESTDIR/usr/bin/zstd" \
                 "$DESTDIR/usr/sbin/makefs"; }
           touch "$DESTDIR/usr/lib/libsysdecode.so.5" "$DESTDIR/lib/libpcap.so.8"
+          touch "$DESTDIR/usr/sbin/ipfwpcap"
           touch "$DESTDIR/usr/share/misc/usbdevs" \
                 "$DESTDIR/usr/share/firmware/ar5523.bin"
           # Stub out commands that require real system tools
@@ -264,6 +265,7 @@ jobs:
             "$DESTDIR/usr/bin/netstat" "$DESTDIR/usr/bin/truss" \
             "$DESTDIR/usr/bin/zstd" "$DESTDIR/usr/sbin/makefs" \
             "$DESTDIR/usr/lib/libsysdecode.so.5" "$DESTDIR/lib/libpcap.so.8" \
+            "$DESTDIR/usr/sbin/ipfwpcap" \
             "$DESTDIR/usr/share/misc/usbdevs" \
             "$DESTDIR/usr/share/firmware/ar5523.bin"; do
             if [ -e "$f" ]; then

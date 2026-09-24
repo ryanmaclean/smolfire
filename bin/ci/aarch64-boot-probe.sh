@@ -52,7 +52,10 @@ ls -l "$AAVMF_DIR" || { echo "PROBE: AAVMF firmware missing (install qemu-efi-aa
 # pauth-impdef preflight: -S pauses at first insn, so a 5s survival means
 # the cpu property parsed; a property error exits (non-124) immediately.
 if [ "$CPU" != "${CPU%,*}" ]; then
-  if timeout 5 "$PROBE_QEMU" -machine virt -cpu "$CPU" -display none \
+  # -nic none: without it the virt machine creates a default NIC whose PXE
+  # ROM (efi-virtio.rom, ipxe-qemu package) may be absent, and the preflight
+  # would misattribute that to the cpu property (probe run 35940101688).
+  if timeout 5 "$PROBE_QEMU" -machine virt -cpu "$CPU" -display none -nic none \
        -serial none -monitor none -S >/dev/null 2>"$WORKDIR/cpuchk.err"; then
     : # exited 0 within 5s — unexpected but property parsed
   elif [ $? -ne 124 ]; then
@@ -83,13 +86,16 @@ array set seen {}
 
 log_file -a $env(PROBE_SERIAL)
 
+# romfile= disables the NIC's PXE option ROM (efi-virtio.rom lives in the
+# separate ipxe-qemu package on Ubuntu and is never needed for EFI disk boot)
 spawn $env(PROBE_QEMU) -machine virt -accel tcg,thread=multi \
   -cpu $env(PROBE_CPU) -smp 4 -m 1024M \
   -drive if=pflash,format=raw,unit=0,file=$env(PROBE_CODE),readonly=on \
   -drive if=pflash,format=raw,unit=1,file=$env(PROBE_VARS) \
   -drive file=$env(PROBE_IMG),format=qcow2,if=virtio,snapshot=on \
   -device virtio-rng-pci \
-  -nic user,model=virtio-net-pci -display none -serial mon:stdio
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile= \
+  -display none -serial mon:stdio
 
 proc mark {name} {
     global seen last

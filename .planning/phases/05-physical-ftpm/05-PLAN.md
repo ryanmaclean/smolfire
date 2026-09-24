@@ -13,7 +13,7 @@ must_haves:
     - "Phase 4 A1-A5 green (prerequisite, merged PR #59)"
     - "Binaries reused unchanged: bin/guest-attest.nu, bin/attest-verify.nu"
     - "Target host pi501 (10.0.3.11) confirmed online 2026-09-24 — do NOT re-probe"
-    - "RP1 fTPM presence itself is UNCONFIRMED until first hardware touch (see P1)"
+    - "RP1 firmware TPM: ABSENT per owner 2026-09-24 — the RP1 fTPM path is dead, do not pursue"
   artifacts:
     - path: ".planning/phases/05-physical-ftpm/05-CONTEXT.md"
       provides: "Phase 5 decisions + first-touch evidence log"
@@ -93,10 +93,10 @@ plan after its prerequisites are met — starting with first hardware touch.
   <acceptance_sketch>
   - PASS-A (fTPM present): `/dev/tpm0` exists, PCRs readable, manufacturer
     ID recorded → P2/P3 unblocked, plan expands to executable.
-  - PASS-B (no TPM): documented negative (`dmesg` + kernel version +
-    device-tree excerpt) → decision point: SPI TPM HAT, kernel/overlay
-    change, or UEFI-exposed fTPM in P2. A negative probe is still a
-    completed P1 — record, do not thrash.
+  - PASS-B (no TPM): SUPERSEDED 2026-09-24 — owner confirms no RP1 firmware TPM;
+    the fTPM path is dead. Remaining physical-TPM option is a discrete SPI TPM
+    HAT (Infineon SLB9670 / LetsTrust), which needs procurement + SPI overlay
+    enablement, or defer Phase 5. Do not probe for fTPM.
   </acceptance_sketch>
   <human_physical>HUMAN-REMOTE (not physical): SSH credential handoff only.</human_physical>
 </gate>

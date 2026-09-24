@@ -47,9 +47,14 @@
 //   +0x000 EPOCH        (rw)  current epoch, HPS-set on recovery; sticky
 //                             across soft reset; part of CRC descriptor.
 //   +0x004 REQ_LO       (rw)  requested sequence, low  32 bits.
-//   +0x008 PENDING_LO   (ro)  highest accepted-but-undurable seq, low 32.
-//   +0x00C DURABLE_LO   (ro)  TRUSTED_COMPLETE watermark, low 32. Monotonic.
-//   +0x010 VISIBLE_LO   (ro)  completion/visible seq, low 32. Never regresses.
+//   +0x008 PENDING_LO   (ro)  accepted-op count incl. in-flight
+//                             (= highest accepted TID + 1; parked at DURABLE
+//                             on soft reset), low 32.
+//   +0x00C DURABLE_LO   (ro)  TRUSTED_COMPLETE watermark as a COUNT of durable
+//                             ops (= highest durable TID + 1; 0 when empty).
+//                             Monotonic.
+//   +0x010 VISIBLE_LO   (ro)  completion/visible count (= highest visible
+//                             TID + 1). Never regresses.
 //   +0x014 FSM_STATE    (ro)  commit-FSM encoding (low 3 bits).
 //   +0x018 ERROR        (rw1c) sticky error bits, write-1-to-clear:
 //                             [0] CRC_ERR          descriptor CRC mismatch
@@ -85,9 +90,9 @@
 //   +0x040 TID_HI       (ro)  last committed TID, high 32.
 //   +0x044 REQ_HI       (rw)  requested sequence, high 32 bits (must equal
 //                             allocator high half; else MALFORMED).
-//   +0x048 DURABLE_HI   (ro)  durable watermark, high 32.
-//   +0x04C VISIBLE_HI   (ro)  visible watermark, high 32.
-//   +0x050 PENDING_HI   (ro)  pending watermark, high 32.
+//   +0x048 DURABLE_HI   (ro)  durable watermark (count), high 32.
+//   +0x04C VISIBLE_HI   (ro)  visible watermark (count), high 32.
+//   +0x050 PENDING_HI   (ro)  pending watermark (count), high 32.
 //   +0x054 MAGIC        (ro)  0x44555230 ("DUR0").
 //   +0x058 VERSION      (ro)  0x00000000 (v0).
 //
@@ -99,9 +104,15 @@
 // Reset semantics: hard reset (reset_n) zeroes everything. Soft reset
 // (fsm_reset_i or CTRL.SOFT_RST) parks the FSM in IDLE, sets
 // PENDING=DURABLE (in-flight dropped, never surfaced as durable), preserves
-// EPOCH/DURABLE/VISIBLE/TID-allocator (recovery consistency: resubmitting
-// the interrupted descriptor commits under the SAME TID).
+// EPOCH/DURABLE/VISIBLE, and REVOKES the uncommitted TID (tid_next - 1):
+// the allocator had already handed that TID out at accept time, but since
+// the op never reached DURABLE the TID is returned so that resubmitting
+// the interrupted descriptor commits under the SAME TID (recovery
+// consistency, same-TID resubmit). No-op while IDLE/COMPLETE (no TID
+// outstanding there).
 // ---------------------------------------------------------------------------
+
+`timescale 1ns / 1ps
 
 module durable_tid_v0 #(
   parameter integer COMMIT_LATENCY = 2  // cycles spent in COMMIT (persistence
@@ -321,8 +332,14 @@ module durable_tid_v0 #(
         pending         <= durable; // in-flight never surfaces as durable
         reset_cnt       <= reset_cnt + 32'h00000001;
         commit_hold     <= 2'd0;
-        if (state == S_SUBMIT || state == S_COMMIT)
+        if (state == S_SUBMIT || state == S_COMMIT) begin
           err_n[E_RSTMID] = 1'b1;
+          // Revoke the uncommitted TID handed out at accept time so a
+          // resubmit of the dropped descriptor is accepted under the SAME
+          // TID (recovery consistency). No underflow: SUBMIT/COMMIT are
+          // reachable only after an accept, which implies tid_next >= 1.
+          tid_next <= tid_next - 64'h0000000000000001;
+        end
       end else begin
         // --- register writes -------------------------------------------
         if (wr_en) begin
@@ -403,7 +420,11 @@ module durable_tid_v0 #(
             end
             if (crc_lat == lat_crc) begin
               crc_ok_last <= 1'b1;
-              pending     <= lat_tid;
+              // Watermarks are COUNTS (highest durable TID + 1): the accepted
+              // TID lat_tid surfaces as lat_tid+1 in PENDING/DURABLE/VISIBLE,
+              // matching what the HPS harness oracle compares (count of
+              // committed ops). tid_last keeps the 0-based TID (see COMPLETE).
+              pending     <= lat_tid + 64'h0000000000000001;
               tid_next    <= tid_next + 64'h0000000000000001;
               commit_hold <= COMMIT_HOLD_INIT;
               state       <= S_COMMIT;
@@ -431,7 +452,7 @@ module durable_tid_v0 #(
             // TRUSTED_COMPLETE(N) asserted only with DURABLE == N already
             // persistent (written in S_COMMIT the previous cycle(s)).
             visible         <= durable;
-            tid_last        <= pending;
+            tid_last        <= lat_tid; // 0-based TID; watermarks hold +1
             complete_sticky <= 1'b1;
             progress_cnt    <= progress_cnt + 32'h00000001;
             trusted_q       <= 1'b1;

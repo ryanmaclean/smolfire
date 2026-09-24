@@ -36,12 +36,28 @@ testbench is hardware verification, not a repo test script.
 > (not on this Mac, not on the MiSTer); the bitstream cannot be built
 > until an x86 Linux Quartus Lite host is designated.
 
-## Testbench status: UNRUN
+## Testbench status: PASS (verified 2026-09-24)
 
-No SystemVerilog simulator exists on this machine (`iverilog`, `verilator`,
-`yosys` all absent) and no Quartus host exists yet, so the testbench has
-been written carefully but **never executed — treat RTL as unverified**.
-First run with a simulator must precede any synthesis.
+Icarus Verilog 13.0 (`brew install icarus-verilog`, ~7 MB):
+
+```sh
+cd rtl
+iverilog -g2012 -o sim durable_tid_v0.sv durable_tid_v0_tb.sv && ./sim
+# checks passed: 48  failed: 0  +  PASS (stable across repeat runs)
+iverilog -g2012 -Wall ...   # lint-clean, no warnings
+```
+
+Fixes applied to reach PASS (register map UNCHANGED — offsets, widths,
+semantics of the map itself untouched):
+- DUT watermarks are counts (highest durable TID + 1), matching the HPS
+  harness oracle (`oracle_compare(sw_tid, read_durable())`); `tid_last`
+  keeps the 0-based TID.
+- Soft reset revokes the uncommitted TID so a resubmit commits under the
+  SAME TID (recovery consistency); previously the resubmit was rejected
+  as DUP.
+- TB: added missing `A_MAGIC`/`A_VERSION`, monitor compares durable to
+  `tid_last + 1`, reset pulses are negedge-driven (a posedge-timed
+  deassert raced the DUT sample and the idle-reset pulse was missed).
 
 ## How the TB runs (once a simulator exists)
 

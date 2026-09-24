@@ -45,6 +45,8 @@ module durable_tid_v0_tb;
   localparam [11:0] A_DUR_HI   = 12'h048;
   localparam [11:0] A_VIS_HI   = 12'h04C;
   localparam [11:0] A_PEND_HI  = 12'h050;
+  localparam [11:0] A_MAGIC    = 12'h054;
+  localparam [11:0] A_VERSION  = 12'h058;
 
   localparam CTRL_SUBMIT  = 32'h00000001;
   localparam CTRL_RECOVER = 32'h00000004;
@@ -132,11 +134,14 @@ module durable_tid_v0_tb;
   // Always-on property monitors.
   // (1) TRUSTED_COMPLETE(N) => PERSISTENT(N).
   // (2) durable / visible never regress.
+  // NOTE: DUT watermarks are COUNTS (highest durable TID + 1), while
+  // tid_last is the 0-based TID, so the pulse check compares durable
+  // against tid_last + 1.
   always @(posedge clk) begin
     if (mon_armed) begin
       if (trusted_complete_o) begin
         mon_trusted_cnt = mon_trusted_cnt + 1;
-        if (durable_tid_o !== dut.tid_last) begin
+        if (durable_tid_o !== (dut.tid_last + 64'd1)) begin
           checks_failed = checks_failed + 1;
           $display("[FAIL] invariant TRUSTED_COMPLETE=>PERSISTENT violated: durable=%h tid_last=%h",
                    durable_tid_o, dut.tid_last);
@@ -237,6 +242,19 @@ module durable_tid_v0_tb;
   task clear_errors;
     begin
       mm_write(A_ERROR, 32'h0000003F); // rw1c: clear all defined bits
+    end
+  endtask
+
+  // Pulse fsm_reset_i high across exactly one posedge. Negedge-driven
+  // (like the Avalon helpers): the level is stable at every sampling
+  // posedge, so no zero-delay race between the TB deassert and the DUT
+  // sample can shrink or stretch the pulse.
+  task pulse_reset;
+    begin
+      @(negedge clk);
+      fsm_reset_i = 1'b1;
+      @(negedge clk);
+      fsm_reset_i = 1'b0;
     end
   endtask
 
@@ -399,10 +417,12 @@ module durable_tid_v0_tb;
       mm_write(A_CTRL, CTRL_SUBMIT);
       // Two posedges after the submit write returns: SUBMIT entry, then
       // COMMIT entry. Assert reset across the next posedge (COMMIT hold).
+      // Negedge-driven so the pulse covers exactly one sampling posedge.
       @(posedge clk);
       @(posedge clk);
+      @(negedge clk);
       fsm_reset_i = 1'b1;
-      @(posedge clk);
+      @(negedge clk);
       fsm_reset_i = 1'b0;
       wait_idle(t_ok);
       check("T6 wait idle ok after mid-commit reset", t_ok == 1'b1);
@@ -434,9 +454,9 @@ module durable_tid_v0_tb;
     end
 
     // TEST 7: reset while idle. No RSTMID flag, counter++, history kept.
-    fsm_reset_i = 1'b1;
-    @(posedge clk);
-    fsm_reset_i = 1'b0;
+    // Negedge-driven single-cycle pulse (see pulse_reset): a posedge-timed
+    // deassert raced the DUT sample and the pulse was missed entirely.
+    pulse_reset;
     repeat (2) @(posedge clk);
     mm_read(A_ERROR, t_err);
     check("T7 no RSTMID on idle reset", t_err[E_RSTMID] == 1'b0);

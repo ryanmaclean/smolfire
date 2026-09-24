@@ -35,6 +35,15 @@ OpenTitan:
 
 Use these as candidate building blocks before implementing equivalents.
 
+## Non-goals
+
+- No RISC-V CPU in the commit datapath by default.
+- No custom ISA/coprocessor interface (e.g. CV-X-IF) before an MMIO-based Ibex integration has been measured.
+- No generic SoC design — this stays scoped to the durable-tid primitive.
+- No Linux dependency.
+- No GPL/LGPL/AGPL dependency anywhere in the stack (repo-wide licensing rule; Ibex and OpenTitan are Apache-2.0, satisfying this by default).
+- No fresh CPU/DMA/SHA implementation unless an existing permissive IP block (Ibex, OpenTitan DMA/HMAC/SHA) fails the requirements above.
+
 ## SuperStation plan
 
 ### SS1-A
@@ -56,7 +65,12 @@ Keeping the CPU out of v0 lets us measure:
 
 ## Commercial comparison
 
-NVIDIA BlueField demonstrates RISC-V datapath processors adjacent to NVMe/virtio storage offload.
+- **NVIDIA BlueField DPA/SNAP** — RISC-V datapath processors adjacent to NVMe/virtio storage offload; full DPU with general storage virtualization and network stack.
+- **Intel/Altera IPU** — infrastructure processing unit combining an FPGA/ASIC fabric with a CPU complex for network/storage offload; general-purpose infra target, not a durable-commit-identity primitive.
+- **ScaleFlux computational-storage ASIC** — CSD ASIC doing inline compression/transparent compute near flash; proprietary, fixed-function, not formally specified or open.
+- **Samsung SmartSSD** — FPGA-augmented SSD for near-storage compute (Xilinx-based); general accelerator platform, no durable ordered-identity contract of its own.
+
+None of these four target our narrower problem directly — a formally specified, open, durable ordered-completion identity primitive. The point of the comparison is not feature parity with any of them: it's confirming the smallest open, formally specified subset of "durable ordering/version identity" is not already solved by a permissively licensed component we could reuse instead of building. As of this survey, none of the four candidates above is open/permissively licensed at the primitive level, so none satisfies the reuse-before-building rule in the Non-goals section.
 
 Our research target is smaller:
 - no general storage virtualization stack

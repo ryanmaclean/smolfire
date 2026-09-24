@@ -256,6 +256,32 @@ PVEOF
         || { echo "ERROR: pv.c patch did not apply"; exit 1; }
 fi
 
+# TSC frequency from the KVM pvclock (docs/upstream/tsc-kvmclock-freq.md,
+# BOOT-TIME-ROADMAP §2.2): Firecracker publishes no CPUID 0x40000010 and
+# the AMD runners have no leaf 0x15, so stock releng/15.0 spins a 100 ms
+# i8254 DELAY plus a ~130-170 ms clockcalib() pass (TSLOG run
+# 35829303519: ~259 ms, over half the boot). KVM already knows the exact
+# guest TSC rate and exposes it as the pvclock scale; the patch reads it
+# in probe_tsc_freq_late() and sets tsc_early_calib_exact, skipping both
+# passes. Opt-out at boot: machdep.tsc_kvmclock_freq=0. Same fail-loud
+# classification as pv.c: patched / pristine / unrecognized.
+REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
+TSC_PATCH="$REPO_DIR/docs/upstream/tsc-kvmclock-freq.patch"
+TSC=/usr/src/sys/x86/x86/tsc.c
+if grep -q 'tsc_freq_kvmclock' "$TSC"; then
+    echo "==> tsc.c already patched (tsc_freq_kvmclock present)"
+elif grep -q 'probe_tsc_freq_late' "$TSC" && grep -q 'tsc_early_calib_exact' "$TSC"; then
+    echo "==> patching tsc.c: TSC frequency from KVM pvclock (skip calibration)"
+    test -f "$TSC_PATCH" || { echo "ERROR: $TSC_PATCH missing"; exit 1; }
+    patch -p1 -d /usr/src < "$TSC_PATCH" \
+        || { echo "ERROR: tsc.c patch did not apply"; exit 1; }
+    grep -q 'tsc_freq_kvmclock' "$TSC" \
+        || { echo "ERROR: tsc.c patch did not apply"; exit 1; }
+else
+    echo "ERROR: tsc.c shape unrecognized (no probe_tsc_freq_late/tsc_early_calib_exact) — refusing"
+    exit 1
+fi
+
 echo "==> makefs (UFS image with free-space headroom)"
 # -b 10%: without it makefs sizes the image to its contents and the
 # root filesystem boots ~100% full — any runtime write would fail.

@@ -364,6 +364,9 @@ jobs:
               timeout          { puts "\nMICROVM: no READY"; exit 1 }
               eof              { puts "\nMICROVM: qemu exited"; exit 1 }
             }' | tee qemu-microvm.log
+          RC=${PIPESTATUS[0]}
+          echo "qemu_expect_rc=$RC"
+          exit $RC
 
       - name: TSLOG capture — 3 TSLOG boots + 3 release wall-clock boots (tslog only)
         # Measurement, not a gate: runs after the gates whatever they said

@@ -55,6 +55,11 @@ jobs:
       - name: coord-tick integration tests
         run: nu tests/coord-tick-test.nu
 
+      # coord-double-dispatch-test.nu: §12 no-double-dispatch invariant —
+      # crash-recovery guard in state-dispatching (find-inflight-dispatch).
+      - name: coord no-double-dispatch guard tests
+        run: nu tests/coord-double-dispatch-test.nu
+
       # coord-dispatch-test.nu: billed-subprocess guard coverage for
       # dispatch-claude / find-claude (no other test in this suite reaches
       # bin/coord-dispatch.nu's claude-CLI path — only dispatch-vm is

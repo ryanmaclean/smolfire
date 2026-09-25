@@ -37,6 +37,7 @@ const TRANSITION_REASONS = [
     new-request retry task-halted harvest-complete
     reply-received no-reply reply-timeout
     dispatch-sent
+    resume-inflight-dispatch
     halt-marker-present awaiting-resume resume-action
     unknown-state
 ]

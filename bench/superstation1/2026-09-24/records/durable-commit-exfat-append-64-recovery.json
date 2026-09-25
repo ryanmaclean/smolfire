@@ -1,0 +1,23 @@
+{
+  "schema": "ryanlab.bench.v1",
+  "project": "smolfire",
+  "timestamp": "2026-09-24T20:55:13-07:00",
+  "runtime": "superstation1-mister-linux-armv7",
+  "filesystem": "exfat",
+  "workload": "durable-commit-exfat-append-64-recovery",
+  "commit": "3ab2930",
+  "metrics": {
+    "recovery_ns": 61616581,
+    "recovery_records": 10000,
+    "recovery_bad_tail": 0,
+    "recovery_bytes_scanned": 640000,
+    "recovery_wall_from_main_ns": 61728895,
+    "restart_wall_ns": 76973548
+  },
+  "tags": {
+    "project": "smolfire",
+    "runtime": "superstation1-mister-linux-armv7",
+    "workload": "durable-commit-exfat-append-64-recovery"
+  },
+  "notes": "smolFire #86 CPU-only durable-commit baseline, model B, one outstanding op. superstation1 (SuperStation One, Cyclone V HPS 2x Cortex-A9 800MHz, MiSTer Linux 5.15.1 armv7l). exFAT on 64GB microSD mounted rw,sync,dirsync; SD write_cache=write through; HW cycle counter unavailable (perf_event_open failed), cycles_* are 0. Times in ns. bench/superstation1/2026-09-24/raw has the logs."
+}

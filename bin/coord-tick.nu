@@ -820,9 +820,78 @@ failure_reason = \"timeout: no reply within 300s\"
     }
 }
 
+# §12 no-double-dispatch invariant: find a coordinator-authored dispatch
+# already threaded to $pending_request_id that has not yet received an
+# agent reply. Returns the dispatch message record, or null if none exists
+# (the normal case: first dispatch attempt for this request).
+#
+# Why this is needed: `tick` recurses through several FSM transitions
+# in-memory per invocation, but `save-state` runs exactly once, at the very
+# end (see coord-tick.nu header + main). state-dispatching's spool append
+# and subagent spawn are real, immediate side effects; if the process is
+# killed anywhere between that append and the final save-state — a crash,
+# OOM-kill, or host restart — the on-disk state file still reflects
+# whatever it was BEFORE this dispatch. On the next invocation, seen_ids on
+# disk does not include the triggering request/retry-reply message either
+# (same reason), so state-harvesting rediscovers it and re-derives the
+# IDENTICAL pending_request_id, and would otherwise send a second dispatch
+# message and spawn a second real, billed subagent for work already in
+# flight. This guard makes re-entering "dispatching" with an
+# already-outstanding request idempotent: resume waiting on the existing
+# dispatch instead of sending a new one.
+def find-inflight-dispatch [spool: string, pending_request_id: string] {
+    if $pending_request_id == "" or not ($spool | path exists) {
+        return null
+    }
+    let content  = open --raw $spool
+    let messages = parse-mbox $content
+
+    let dispatches = $messages | where {|m|
+        let in_reply_to = $m.headers | get "In-Reply-To"? | default ""
+        let from_addr   = $m.headers | get "From"? | default ""
+        $in_reply_to == $pending_request_id and $from_addr == "coordinator@smolfire.local"
+    }
+    if ($dispatches | length) == 0 {
+        return null
+    }
+
+    # Already answered? (a genuine agent reply, not the coordinator's own
+    # dispatch, threaded to the same pending_request_id — matches the
+    # predicate state-waiting itself uses to detect a reply, narrowed by
+    # direction so the coordinator's own dispatch can never count as its
+    # own answer.)
+    let has_reply = ($messages | any {|m|
+        let in_reply_to = $m.headers | get "In-Reply-To"? | default ""
+        let to_addr     = $m.headers | get "To"? | default ""
+        $in_reply_to == $pending_request_id and $to_addr == "coordinator@smolfire.local"
+    })
+
+    if $has_reply {
+        null
+    } else {
+        $dispatches | first
+    }
+}
+
 # dispatching: compose and append an outbound mbox message to the spool,
 # then transition to waiting. Tracks attempt counts with retry-aware headers.
 def state-dispatching [state: record, spool: string, root: string, remaining: int] {
+    let inflight = find-inflight-dispatch $spool $state.pending_request_id
+    if $inflight != null {
+        let inflight_id = msg-id $inflight
+        log-event "dispatch_skipped_inflight" {
+            task_id:             ($state | get pending_task_id? | default "unknown")
+            pending_request_id:  $state.pending_request_id
+            existing_message_id: $inflight_id
+        }
+        log-transition "dispatching" "waiting" "resume-inflight-dispatch" --task-id ($state | get pending_task_id? | default "unknown") --message-id $inflight_id
+        return (tick ($state
+            | update fsm_state          "waiting"
+            | update pending_request_id $inflight_id
+            | update dispatched_at      (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ")
+        ) $spool $root ($remaining - 1))
+    }
+
     let task_id      = $state | get pending_task_id? | default "unknown"
     let attempt_n    = $state.attempt_counts | get -o $task_id | default 0
     let next_attempt = $attempt_n + 1

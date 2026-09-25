@@ -71,10 +71,10 @@ file itself is UNTOUCHED (wrapped, not modified).
 | File | What it is |
 |------|------------|
 | `rtl/dut_uart.v` | Verilog-2001 UART RX/TX (parameterized `CLK_HZ` + `BAUD`, default 50 MHz / 115200) + command-protocol FSM + Avalon-MM-style master bridge into the DUT slave (`avr_*` signals) + 1-cycle soft-reset pulse. |
-| `rtl/dut_top_uart.v` | Top wrapper instantiating `durable_tid_v0` + `dut_uart` (no DUT changes). Divide-by-2: 50 MHz board clock (V22) → 25 MHz fabric via the Gowin `CLKDIV` primitive (clock network, not fabric routing — see hold note below); UART divisor uses the fabric rate. Carries the pin localparams + source comments and the CST snippet for the build host. |
+| `rtl/dut_top_uart.v` | Top wrapper instantiating `durable_tid_v0` + `dut_uart` (no DUT changes). Divide-by-2: 50 MHz board clock (V22) → 25 MHz fabric via a toggle FF feeding a Gowin `BUFG` global buffer (clock network, not fabric routing — see hold note below); UART divisor uses the fabric rate. Carries the pin localparams + source comments and the CST snippet for the build host. |
 | `rtl/dut_uart_tb.sv` | Self-checking testbench driving the DUT *exclusively* through the UART (behavioral host-driver tasks). 43 checks, always-on invariant + monotonicity monitors. See scope note below. |
 
-### Clocking: why a toggle-FF divider failed and CLKDIV fixes it
+### Clocking: why a toggle-FF divider failed and BUFG fixes it
 
 The 25 MHz fabric clock is BOARD_CLK/2. The first attempt (commit
 `4289a5a`) divided with a reset-aware toggle FF in fabric logic. That
@@ -82,12 +82,14 @@ closed SETUP but failed HOLD with 10 violations: a flip-flop output
 used as a clock is routed on general interconnect, so the fabric clock
 arrived with ~1.8 ns skew against ~0.85 ns of logic delay — and HOLD
 IS FREQUENCY-INDEPENDENT, so no divider ratio or target frequency
-fixes it. Only a dedicated clock resource fixes it. `dut_top_uart.v`
-now instantiates the Gowin `CLKDIV` primitive (UG286:
-`CLKOUT = HCLKIN / DIV_MODE`, `DIV_MODE="2"`, `RESETN` active-low;
-`CLKOUT` drives the global clock network), which collapses the clock
-skew and clears the hold violations. Sim portability: icarus has no
-`CLKDIV` model, so the primitive compiles only under `` `ifdef
+fixes it. Only a dedicated clock resource fixes it. The second attempt
+(commits `296c9ff`/`1b264b2`) used the Gowin `CLKDIV` primitive, but
+`CLKDIV` has zero BELs in the OSS (apicula) chipdb and is unplaceable.
+`dut_top_uart.v` now feeds a reset-aware toggle FF into a Gowin `BUFG`
+global buffer (UG286: `BUFG (O, I)`; BEL census confirms `BUFGx1`
+exists): `clk25` fans out on the global clock network, which collapses
+the clock skew and clears the hold violations. Sim portability: icarus
+has no `BUFG` model, so the primitive compiles only under `` `ifdef
 SYNTHESIS `` (also selected by `__YOSYS__`); simulation uses a
 behavioral divide-by-2 with identical phase/timing, and both sim
 suites reproduce byte-identical PASS banners (48 + 43).

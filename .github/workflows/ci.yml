@@ -89,6 +89,37 @@ jobs:
       - name: SMOLFIRE microVM metrics parser tests
         run: nu tests/smolfire-metrics-test.nu
 
+      # bench-record.nu is the single ryanlab.bench.v1 producer (see
+      # https://github.com/ryanmaclean/skills schemas/bench.v1.schema.json +
+      # docs/BENCHMARKING.md — "measure once, project many times"). This step
+      # both unit-tests the parser and emits a real record from the fixture
+      # logs as a schema-shaped CI artifact / Actions summary, matching the
+      # #79 acceptance criteria.
+      - name: ryanlab.bench.v1 record emitter tests
+        run: nu tests/bench-record-test.nu
+
+      - name: emit ryanlab.bench.v1 sample record
+        run: |
+          nu bin/bench-record.nu \
+            --workload one-elf-boot \
+            --filesystem ffs \
+            --out bench-record.json \
+            tests/fixtures/smolfire-metrics-build.log \
+            tests/fixtures/smolfire-metrics-gate.log
+          {
+            echo '### ryanlab.bench.v1 record'
+            echo '```json'
+            cat bench-record.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload ryanlab.bench.v1 record artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-record
+          path: bench-record.json
+
       - name: pkgbase-watch parser tests (fixtures, offline)
         run: nu tests/pkgbase-watch-test.nu
 

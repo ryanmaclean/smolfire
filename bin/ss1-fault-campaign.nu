@@ -108,7 +108,7 @@ def "main fetch" [--host: string = "root@superstation1.local", --alias: string =
         let fs = if ($name | str contains "exfat") or ($name | str starts-with "selftest") { "exfat" } else if ($name | str contains "tmpfs") { "tmpfs" } else { "vfat-loop" }
         (nu bin/bench-record.nu --workload $"durable-fault-($name)" --runtime superstation1-mister-linux-armv7 --filesystem $fs
             --out $"($base)/records/durable-fault-($name).json"
-            --notes $"smolFire #88 software fault injection around the #86 durable-commit writer \(model B, one outstanding op\). superstation1, MiSTer Linux 5.15 armv7l, exFAT on microSD rw,sync,dirsync, SD write_cache=write through. Per-fault trace: raw/($name).jsonl. Times in ns. Process-crash/errno/ENOSPC/EIO only: says nothing about SD-internal buffering under power loss."
+            --notes $"smolFire #88 software fault injection around the #86 durable-commit writer \(model B, one outstanding op\). superstation1, MiSTer Linux 6.18.38 armv7l \(kernel updated by Update All 2026-09-25; #86 baseline was 5.15.1\), exFAT on microSD rw,sync,dirsync, SD write_cache=write through. Per-fault trace: raw/($name).jsonl. Times in ns. Software faults only \(SIGKILL, errno, ENOSPC, loop EIO\): says nothing about SD-internal buffering under power loss."
             $m)
     }
 }

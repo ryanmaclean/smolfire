@@ -1,0 +1,29 @@
+# smolFire #88 — manual reproduction of the fill-vfat-eio acked_lost finding
+# superstation1, Linux 6.18.38-MiSTer armv7l, 2026-09-25 ~07:39-07:41Z
+# setup: tmpfs size=192k at f88/dbg/b; sparse 1 MiB FAT12 image made by
+# `durable_fault_harness mkfat eio.img 1024 sparse`; busybox losetup -> /dev/loop2;
+# mount -t vfat -o sync,dirsync; writer --recsize 3000 --sync-retry
+
+## run A: --ops 400 (writer stops at first error)
+rc=3
+SMOLFIRE_FAULT phase=append errno=28 seq=59 written=0 sync_retry=1 retry_rc=0 retry_errno=0
+fill.log size 177000; backing tmpfs 192/192 KiB used
+before umount (page cache): seq 58 tail at 0x2a780.. = aaab acad ... d8d9, seq 59 header follows
+dmesg: Buffer I/O error on dev loop2, logical block 385..389, lost async page write (25 callbacks suppressed)
+after umount/losetup -d/re-attach/mount: 0x2a780..0x2a7df = all zeros
+
+## run B: --ops 58 (stop right after seq 58 is acknowledged; no failing write follows)
+ops=58 rc=0 (no SMOLFIRE_FAULT: pwrite+fdatasync returned 0 for all 58 records)
+size=174000 tmpfs_used_kb=192
+after remount: recovery_records=57 ; first all-zero 16-byte line inside seq 58 at 0x2a408 (sector 338 = file byte 173056 onward)
+dmesg: Buffer I/O error on dev loop2, logical block 389, lost async page write
+
+## run C: --ops 59
+ops=59 rc=3 SMOLFIRE_FAULT phase=append errno=28 seq=59 ... retry_rc=0
+after remount: recovery_records=57 ; zeros from 0x2a408
+
+## conclusion
+Seq 58 was acknowledged (sync-mounted pwrite returned, fdatasync returned 0) although the
+loop device failed to write its last sectors to the full backing tmpfs; the error was only
+logged by the kernel. Same setup on ubrpi502 (Ubuntu 6.8.0-1051-raspi) returned EIO to the
+writer and lost nothing. teardown verified: 0 dbg mounts, 0 eio.img loop devices.

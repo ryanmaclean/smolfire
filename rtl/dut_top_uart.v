@@ -4,30 +4,26 @@
 // Top for the Tang Console / Mega 138K SOM host-harness path: the DUT file
 // itself is UNTOUCHED; this file only instantiates + wires.
 //
-// Divide-by-2 fabric via a global clock buffer (timing closure,
-// 2026-09-25): dut_top_uart failed timing at the 50 MHz board clock
-// (Fmax 31.6, structural), so the whole fabric (DUT + UART) runs at
-// 25 MHz. First attempt (commit 4289a5a) used a reset-aware toggle FF
-// (clk25) -- that closed SETUP but failed HOLD (10 violations): a FF
-// output driving fabric clock rides general interconnect (~1.8 ns skew
-// vs 0.85 ns logic delay), and hold is FREQUENCY-INDEPENDENT, so no
-// divider ratio fixes it -- only a dedicated clock resource does.
-// Second attempt (commits 296c9ff/1b264b2) used the Gowin CLKDIV
-// primitive, but CLKDIV has zero BELs in the OSS (apicula) chipdb and
-// is unplaceable. This uses a reset-aware toggle FF feeding a Gowin
-// BUFG global buffer (UG286: BUFG (O, I); BEL census confirms BUFGx1
-// exists): the divider still toggles in fabric, but clk25 fans out on
-// the global clock network, collapsing skew vs general interconnect.
-// The UART divisor uses the fabric rate (25000000/115200 = 217
-// cycles/bit); pin clk stays the 50 MHz board clock (V22); UART pins,
-// protocol, and frames are unchanged.
-//
-// Sim portability: icarus has no BUFG model, so the primitive is
-// selected only under `SYNTHESIS (defined by the Gowin/Yosys synth
-// flow; __YOSYS__ added as a belt-and-braces selector in case the flow
-// does not predefine SYNTHESIS); simulation takes the behavioral
-// divide-by-2 branch, which restarts in phase (held at 0 under reset)
-// exactly like the synthesis toggle FF, so TB clock math is unchanged.
+// Clocking (2026-09-25): the fabric runs DIRECTLY on the 50 MHz board
+// clock (pin V22, auto-buffered by the flow onto the global clock
+// network -- the normal case, no extra clock resources). Timing is
+// closed in the LOGIC (pipelined datapath + D-mux enables in
+// durable_tid_v0, commit feat(fpga)); see rtl/README.md.
+// What was tried and why reverted: the DUT failed timing at 50 MHz
+// (Fmax 31.6, structural), so the fabric was first divided to 25 MHz
+// with a reset-aware toggle FF (commit 4289a5a) -- that closed SETUP
+// but failed HOLD (10 violations): a FF output driving fabric clock
+// rides general interconnect (~1.8 ns skew vs 0.85 ns logic delay),
+// and hold is FREQUENCY-INDEPENDENT, so no divider ratio fixes it --
+// only a dedicated clock resource does. Gowin CLKDIV was tried next
+// (commits 296c9ff/1b264b2) but CLKDIV has zero BELs in the OSS
+// (apicula) chipdb and is unplaceable. A toggle FF into a BUFG global
+// buffer (commit 0c17b3d) was the third attempt; it is reverted here
+// because the pipelined LOGIC now closes 50 MHz on the single global
+// clock, so the divided clock, the BUFG primitive, and the ifdef
+// scaffolding are all dead weight -- and the UART divisor is back to
+// the board rate (50000000/115200 = 434 cycles/bit). Pin clk stays the
+// 50 MHz board clock (V22); UART pins, protocol, and frames unchanged.
 //
 // Pin map (GW5AST-LV138PG484A, package PBG484A; research 2026-09-25):
 //   uart_rxd (in)  -> V14  (FPGA RX, driven by BL616 debugger TX)
@@ -80,53 +76,9 @@ module dut_top_uart #(
   localparam UART_TX_PIN = "U15";
   localparam CLK_PIN     = "V22";
 
-  // Fabric clock: divide the 50 MHz board clock by 2 with a toggle FF
-  // feeding a BUFG global buffer (see header: raw toggle-FF dividers
-  // fail HOLD because hold is frequency-independent; the BUFG puts the
-  // divided clock on the clock network; CLKDIV is unplaceable in OSS).
-  // FABRIC_HZ derives the UART divisor: 25000000 at the default board
-  // clock (25000000/115200 = 217 cycles/bit).
-  localparam FABRIC_HZ = CLK_HZ / 2;
-
-`ifdef SYNTHESIS
-`define DUT_TOP_UART_USE_BUFG 1
-`endif
-`ifdef __YOSYS__
-`define DUT_TOP_UART_USE_BUFG 1
-`endif
-`ifdef DUT_TOP_UART_USE_BUFG
-  // Synthesis: reset-aware toggle FF feeding a Gowin BUFG global
-  // buffer (UG286: BUFG (O, I)). clk25 fans out on the global clock
-  // network, so fabric clock skew collapses vs general interconnect.
-  // Held at 0 under reset so the fabric restarts in phase, exactly
-  // like the simulation branch below.
-  reg clk25_pre;
-  wire clk25;
-  always @(posedge clk or negedge reset_n) begin
-    if (!reset_n)
-      clk25_pre <= 1'b0;
-    else
-      clk25_pre <= ~clk25_pre;
-  end
-  BUFG u_clk_bufg (
-    .O (clk25),
-    .I (clk25_pre)
-  );
-`else
-  // Simulation (icarus has no BUFG): behavioral divide-by-2,
-  // reset-aware (held at 0 under reset so the fabric restarts in phase).
-  // Produces a clock identical to the synthesis branch for sim purposes.
-  reg clk25_r;
-  wire clk25;
-  assign clk25 = clk25_r;
-
-  always @(posedge clk or negedge reset_n) begin
-    if (!reset_n)
-      clk25_r <= 1'b0;
-    else
-      clk25_r <= ~clk25_r;
-  end
-`endif
+  // Fabric clock is the 50 MHz board clock directly (auto-buffered;
+  // see header). The UART divisor uses the board rate: 50000000/115200
+  // = 434 cycles/bit.
 
   // Avalon-MM-style link between the UART bridge (master) and the DUT.
   wire [11:0] avr_address;
@@ -140,7 +92,7 @@ module dut_top_uart #(
   durable_tid_v0 #(
     .COMMIT_LATENCY (COMMIT_LATENCY)
   ) u_dut (
-    .clk                (clk25),
+    .clk                (clk),
     .reset_n            (reset_n),
     .fsm_reset_i        (avr_reset),
     .avs_address        (avr_address),
@@ -157,10 +109,10 @@ module dut_top_uart #(
   );
 
   dut_uart #(
-    .CLK_HZ (FABRIC_HZ), // fabric rate: 25000000 at the default board clock
+    .CLK_HZ (CLK_HZ), // board rate: 50000000 at the default board clock
     .BAUD   (BAUD)
   ) u_uart (
-    .clk            (clk25),
+    .clk            (clk),
     .reset_n        (reset_n),
     .uart_rxd       (uart_rxd),
     .uart_txd       (uart_txd),

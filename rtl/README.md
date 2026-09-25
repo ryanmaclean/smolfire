@@ -71,28 +71,63 @@ file itself is UNTOUCHED (wrapped, not modified).
 | File | What it is |
 |------|------------|
 | `rtl/dut_uart.v` | Verilog-2001 UART RX/TX (parameterized `CLK_HZ` + `BAUD`, default 50 MHz / 115200) + command-protocol FSM + Avalon-MM-style master bridge into the DUT slave (`avr_*` signals) + 1-cycle soft-reset pulse. |
-| `rtl/dut_top_uart.v` | Top wrapper instantiating `durable_tid_v0` + `dut_uart` (no DUT changes). Divide-by-2: 50 MHz board clock (V22) → 25 MHz fabric via a toggle FF feeding a Gowin `BUFG` global buffer (clock network, not fabric routing — see hold note below); UART divisor uses the fabric rate. Carries the pin localparams + source comments and the CST snippet for the build host. |
+| `rtl/dut_top_uart.v` | Top wrapper instantiating `durable_tid_v0` + `dut_uart` (no DUT changes). Fabric runs DIRECTLY on the 50 MHz board clock (V22, auto-buffered -- the normal case, no extra clock resources); UART divisor uses the board rate. Carries the pin localparams + source comments and the CST snippet for the build host. |
 | `rtl/dut_uart_tb.sv` | Self-checking testbench driving the DUT *exclusively* through the UART (behavioral host-driver tasks). 43 checks, always-on invariant + monotonicity monitors. See scope note below. |
 
-### Clocking: why a toggle-FF divider failed and BUFG fixes it
+### Clocking: direct 50 MHz, timing closed in the LOGIC
 
-The 25 MHz fabric clock is BOARD_CLK/2. The first attempt (commit
-`4289a5a`) divided with a reset-aware toggle FF in fabric logic. That
-closed SETUP but failed HOLD with 10 violations: a flip-flop output
-used as a clock is routed on general interconnect, so the fabric clock
-arrived with ~1.8 ns skew against ~0.85 ns of logic delay — and HOLD
-IS FREQUENCY-INDEPENDENT, so no divider ratio or target frequency
-fixes it. Only a dedicated clock resource fixes it. The second attempt
-(commits `296c9ff`/`1b264b2`) used the Gowin `CLKDIV` primitive, but
-`CLKDIV` has zero BELs in the OSS (apicula) chipdb and is unplaceable.
-`dut_top_uart.v` now feeds a reset-aware toggle FF into a Gowin `BUFG`
-global buffer (UG286: `BUFG (O, I)`; BEL census confirms `BUFGx1`
-exists): `clk25` fans out on the global clock network, which collapses
-the clock skew and clears the hold violations. Sim portability: icarus
-has no `BUFG` model, so the primitive compiles only under `` `ifdef
-SYNTHESIS `` (also selected by `__YOSYS__`); simulation uses a
-behavioral divide-by-2 with identical phase/timing, and both sim
-suites reproduce byte-identical PASS banners (48 + 43).
+The fabric runs DIRECTLY on the 50 MHz board clock (pin V22,
+auto-buffered by the flow onto the global clock network -- the normal
+case, no extra clock resources). The 50 MHz failure (Fmax 31.6,
+structural: ALU carry + wide read-data/error mux cloud sinking at a
+`DFFCE` CE input, ~11.6 ns gap) is fixed in the LOGIC, commit
+`feat(fpga): pipeline datapath + D-mux enables, close 50MHz`:
+
+- Clock-enable-pin logic moved into D-input muxes (`d = en ? new_val
+  : q`): the next-state block computes every `*_n` temp
+  combinationally with hold defaults and the clocked block assigns
+  UNCONDITIONALLY, so the flow infers plain DFFs (no CE pins) on the
+  datapath and the enable/cloud logic stays in LUTs ahead of D.
+- Read-data/error-mux cloud pipelined in 2 register stages (stage 1
+  registers address+read, stage 2 registers the selected word +
+  `readdatavalid`).
+- CRC-32 combinational depth pipelined over 2 stages (`S_CRC` state:
+  stage 1 registers the half-CRC over bytes 0..7, stage 2 chains bytes
+  8..15 and gates; chained halves are bit-identical to the single
+  16-byte pass -- same polynomial, same LSB-first byte order).
+
+What was tried and why reverted: the 50 MHz failure first motivated a
+divided 25 MHz fabric. Attempt 1 (commit `4289a5a`) divided with a
+reset-aware toggle FF in fabric -- that closed SETUP but failed HOLD
+with 10 violations: a flip-flop output used as a clock rides general
+interconnect (~1.8 ns skew vs ~0.85 ns logic delay), and HOLD IS
+FREQUENCY-INDEPENDENT, so no divider ratio or target frequency fixes
+it -- only a dedicated clock resource does. Attempt 2 (commits
+`296c9ff`/`1b264b2`) used the Gowin `CLKDIV` primitive, but `CLKDIV`
+has zero BELs in the OSS (apicula) chipdb and is unplaceable. Attempt
+3 (commit `0c17b3d`) fed the toggle FF into a Gowin `BUFG` global
+buffer (UG286: `BUFG (O, I)`). All three are REVERTED here: the
+pipelined logic closes 50 MHz on the single global clock, so the
+divider, the `BUFG` primitive, and the `` `ifdef `` scaffolding are
+gone and the UART divisor is back at the board rate.
+
+### Added-latency contract (host-visible behavior UNCHANGED)
+
+The register map, CRC byte order, port names/widths, `tid_last` /
+`durable` / `visible` names, and protocol semantics are EXACTLY
+preserved. Only internal latency grows (the host polls at ms scale):
+
+- Avalon reads complete 2 cycles after the request (was
+  combinational); `avs_readdatavalid` is `avs_read` delayed 2 cycles.
+  The UART bridge absorbs this with one WAIT state on its read paths.
+- Each submit takes 1 extra cycle (new `S_CRC` state between SUBMIT
+  and COMMIT). `FSM_STATE` is now 3 bits (IDLE 0 / SUBMIT 1 / CRC 2 /
+  COMMIT 3 / COMPLETE 4); IDLE is still 0, `busy_o` still means
+  `state != IDLE`.
+- `TEST 6` (reset mid-commit) injection waits 3 posedges after the
+  submit write (not 2) to land in the COMMIT hold window; `mm_read`
+  waits out the registered latency. Both TBs keep their exact check
+  counts (48 + 43, all PASS).
 
 ### Pin table (GW5AST-LV138PG484A, package PBG484A)
 
@@ -115,8 +150,8 @@ No TBDs: pins FOUND. Sources checked 2026-09-25:
   + `gowin_pll/gowin_pll.mod` (50 MHz clock evidence).
 - Baud-divisor error at defaults: 50000000/115200 = 434.03 → 434
   cycles/bit; RX 16x tick truncates 434/16 → 27 (≈115740 baud, +0.47 %).
-  At the divided 25 MHz fabric: 25000000/115200 = 217.01 → 217
-  cycles/bit; RX tick truncates 217/16 → 13 (verified in sim).
+  (Divided-clock era: 25000000/115200 = 217 cycles/bit, tick 13 —
+  reverted with the divider; see Clocking.)
 
 ### Protocol spec (all multi-byte values little-endian)
 
@@ -161,10 +196,10 @@ iverilog -g2012 -o sim_uart dut_top_uart.v dut_uart.v durable_tid_v0.v dut_uart_
 iverilog -g2012 -Wall ...   # lint-clean, no warnings
 ```
 
-The TB drives the 50 MHz board clock and runs at the HARDWARE baud
-(`BAUD=115200`, divisor 217 cycles/bit at the divided 25 MHz fabric) so
+The TB drives the 50 MHz board clock (= fabric clock, direct) and runs at the HARDWARE baud
+(`BAUD=115200`, divisor 434 cycles/bit) so
 the suite exercises the exact hardware timing, including the RX 16x-tick
-truncation (217/16 → 13). It replays the original suite's functional
+truncation (434/16 → 27). It replays the original suite's functional
 cases over serial (8 good submits, duplicate, bad-CRC / reserved-CTRL /
 REQ_HI malformed vectors, idle reset + post-reset submit) plus
 UART-specific coverage (PING/MAGIC+VERSION, WRITE echo, no-response
@@ -175,12 +210,12 @@ after rejection, repeated-submit).
 
 Original TEST 6 (reset mid-commit) and TEST 8 (submit while busy) CANNOT
 be driven through this UART path, by construction: the DUT busy window is
-≤ ~7 fabric cycles (SUBMIT 1 + COMMIT hold + COMPLETE 1; `commit_hold` is a 2-bit
+~6 fabric cycles (SUBMIT 1 + CRC 1 + COMMIT hold + COMPLETE 1; `commit_hold` is a 2-bit
 register so `COMMIT_LATENCY` only takes effect for 0..3 — larger values
-truncate, found during UART-TB bring-up, DUT untouched) = ≤ 280 ns at
-the 25 MHz fabric, while the minimum gap between two executed UART commands is a full
+truncate, found during UART-TB bring-up, DUT untouched) = ≤ 160 ns at
+the 50 MHz fabric, while the minimum gap between two executed UART commands is a full
 frame round trip (9 + 8 bytes = 170 bit times ≈ 1.5 ms at 115200). The ACK of frame N alone exceeds the busy window by
-~2500x. Over serial, a "reset mid-commit" always lands as an idle
+~5800x. Over serial, a "reset mid-commit" always lands as an idle
 reset and a "second submit while busy" always lands idle (demonstrated in
 U8: rejected as DUP, never MALFORMED). Those two sub-microsecond windows
 remain covered by the parallel 48-check suite (still PASS, DUT untouched).

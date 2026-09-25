@@ -13,11 +13,11 @@
 //   (1) TRUSTED_COMPLETE(N) => PERSISTENT(N)
 //   (2) durable / visible never regress.
 //
-// Sim baud is the HARDWARE baud: the TB drives the 50 MHz board clock and
-// the top divides it to the 25 MHz fabric, so with BAUD=115200 the divisor
-// math matches the board (25000000/115200 = 217 cycles/bit). The suite is
-// slower than the old fast-baud version but exercises the exact hardware
-// timing, including the RX 16x-tick truncation (217/16 -> 13).
+// Sim baud is the HARDWARE baud: the TB drives the 50 MHz board clock
+// // and the top runs the fabric on that same net, so with BAUD=115200 the
+// // divisor math matches the board (50000000/115200 = 434 cycles/bit).
+// // The suite exercises the exact hardware timing, including the RX
+// // 16x-tick truncation (434/16 -> 27).
 // The HARDWARE default stays 115200; the protocol is baud-agnostic.
 //   iverilog -g2012 -o sim_uart dut_top_uart.v dut_uart.v durable_tid_v0.v \
 //     dut_uart_tb.sv && ./sim_uart
@@ -27,16 +27,16 @@
 // The original suite's reset-mid-commit (TEST 6) and submit-while-busy
 // (TEST 8) windows CANNOT be driven through this UART path, by
 // construction, and this TB does not pretend otherwise:
-//   - The DUT's commit pipeline is at most ~7 cycles deep (SUBMIT 1 +
+//   - The DUT's commit pipeline is ~6 cycles deep (SUBMIT 1 + CRC 1 +
 //     COMMIT hold + COMPLETE 1; note commit_hold is a 2-bit register, so
 //     the COMMIT_LATENCY parameter only has an effect for values 0..3 --
 //     larger values silently truncate, e.g. 8192 -> 0. Found during
 //     bring-up of this TB; the DUT file itself is untouched).
-//     At the 25 MHz fabric the busy window is <= 280 ns.
+//     At the 50 MHz fabric the busy window is <= 160 ns.
 //   - The minimum gap between two executed UART commands is one full
 //     frame round trip: 9 CMD bytes + 8 RSP bytes = 17 bytes = 170 bit
 //     times ~= 1.5 ms at the hardware 115200 baud. The ACK of frame N
-//     alone (8 bytes ~= 694 us) exceeds the DUT busy window by ~2500x.
+//     alone (8 bytes ~= 694 us) exceeds the DUT busy window by ~5800x.
 //   So by the time any second frame executes, the DUT is long idle: a
 //   "reset mid-commit" over serial always lands as an idle reset, and a
 //   "second submit while busy" always lands as a fresh/DUP submit. Those
@@ -55,15 +55,16 @@
 module dut_uart_tb;
 
   // --- parameters (must match the instantiated top) ---------------------
-  // CLK_HZ is the BOARD clock (pin V22); the top divides it by 2 to the
-  // 25 MHz fabric, so BITC (fabric cycles per serial bit) is FAB_HZ/BAUD
-  // = 217, matching the UART bridge divisor exactly. BITB is the same bit
-  // time counted in board-clock edges (what this TB's driver waits on).
-  localparam CLK_HZ = 50000000; // board clock (pin V22)
-  localparam FAB_HZ = CLK_HZ / 2; // fabric clock (divided inside the top)
+  // CLK_HZ is the BOARD clock (pin V22); the top runs the fabric
+  // DIRECTLY on it (the divide-by-2/BUFG experiment is reverted), so
+  // BITC (fabric cycles per serial bit) is CLK_HZ/BAUD = 434, matching
+  // the UART bridge divisor exactly. BITB is the same bit time counted
+  // in board-clock edges (what this TB's driver waits on); board and
+  // fabric clocks are the same net now, so BITB == BITC.
+  localparam CLK_HZ = 50000000; // board clock (pin V22) == fabric clock
   localparam BAUD   = 115200;   // hardware baud
-  localparam BITC   = FAB_HZ / BAUD; // 217 fabric cycles per serial bit
-  localparam BITB   = BITC * 2; // 434 board-clock edges per serial bit
+  localparam BITC   = CLK_HZ / BAUD; // 434 fabric cycles per serial bit
+  localparam BITB   = BITC; // 434 board-clock edges per serial bit
 
   // --- protocol constants (must match rtl/dut_uart.v) --------------------
   localparam [7:0] M0 = 8'h44;
@@ -130,7 +131,7 @@ module dut_uart_tb;
     .busy_o             (busy_o)
   );
 
-  // 50 MHz board clock (matches CLK_HZ; the fabric divides it to 25 MHz).
+  // 50 MHz board clock (matches CLK_HZ; the fabric runs on it directly).
   initial clk = 1'b0;
   always #10 clk = ~clk;
 
@@ -176,9 +177,9 @@ module dut_uart_tb;
 
   // (1) TRUSTED_COMPLETE(N) => PERSISTENT(N); (2) watermarks never regress.
   // Watermarks are COUNTS (highest durable TID + 1); tid_last is 0-based.
-  // The monitor samples the 50 MHz board clock while the fabric runs at
-  // 25 MHz, so trusted_complete_o pulses are counted on their rising edge
-  // (each fabric-cycle pulse spans two board edges).
+  // The monitor samples the board clock and the fabric runs on that
+  // same net, so trusted_complete_o pulses are counted on their rising
+  // edge (kept from the divided-clock era; still exactly-once).
   always @(posedge clk) begin
     if (mon_armed) begin
       if (trusted_complete_o && !mon_tc_prev) begin
@@ -207,7 +208,7 @@ module dut_uart_tb;
 
   // --- behavioral UART host driver ------------------------------------------
   // Send one byte, LSB first, 8-N-1, BITB board-clock edges per bit
-  // (= BITC fabric cycles; the fabric is the board clock divided by 2).
+  // (= BITC fabric cycles; board and fabric are the same net now).
   task uart_put(input [7:0] b);
     integer i;
     begin
@@ -620,8 +621,8 @@ module dut_uart_tb;
 
     // U8: repeated submit over UART. Op A commits; op B (identical bytes,
     // sent with no poll in between) executes a full frame round trip later
-    // (~37000 fabric cycles: A's 8-byte RSP + B's 9-byte CMD) --
-    // the DUT busy window (~7 fabric cycles) is long closed, so B is
+    // (~74000 fabric cycles: A's 8-byte RSP + B's 9-byte CMD) --
+    // the DUT busy window (~6 fabric cycles) is long closed, so B is
     // rejected as DUP, NOT MALFORMED. This empirically demonstrates the SCOPE NOTE:
     // submit-while-busy is unhittable over serial (original TEST 8 stays
     // a parallel-TB-only window).

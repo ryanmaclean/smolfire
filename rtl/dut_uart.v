@@ -19,11 +19,11 @@
 //     CLK_HZ=50000000 default below. Baud divisor error at 115200:
 //     50000000/115200 = 434.03 -> 434 cycles/bit (0.006 %); RX 16x tick
 //     truncates 434/16 = 27.125 -> 27, i.e. 115740 baud (+0.47 %, < 2 % OK).
-//   Divided 25 MHz fabric operating point (dut_top_uart.v drives this
-//   module at FABRIC_HZ = 25000000): 25000000/115200 = 217.01 -> 217
-//   cycles/bit; RX 16x tick truncates 217/16 = 13.56 -> 13 (receiver bit
-//   window 208 fabric cycles vs 217 transmitted; mid-bit sampling margin
-//   still holds -- verified in sim at hardware baud, see dut_uart_tb.sv).
+//   Divided-clock note (2026-09-25): dut_top_uart ran the fabric at
+//   25 MHz for a while (toggle-FF divider, then BUFG); that experiment
+//   is REVERTED -- the fabric is the 50 MHz board clock again, so the
+//   divisor above (434/27) is the live operating point, verified in
+//   sim at hardware baud (see dut_uart_tb.sv).
 //
 // Protocol (all multi-byte values little-endian, byte0 = bits[7:0]):
 //   CMD frame (host -> FPGA), 9 bytes:
@@ -44,7 +44,9 @@
 //   SILENTLY with no response. The host speaks strict request-response:
 //   exactly one RSP per well-formed CMD; no bytes are sent while busy.
 //
-// Avalon bridge: single-cycle reads/writes (DUT waitrequest is tied 0).
+// Avalon bridge: single-cycle writes; reads complete 2 cycles after
+// the request (DUT avs_readdata is registered -- E_RD/E_RST_RD assert
+// avr_read, one WAIT state, then E_RD_CAP/E_RST_CAP sample the word).
 // WRITE-REG returns after the write cycle (it does NOT wait for commit;
 // the host polls STATUS.BUSY via READ-REG). RESET pulses avr_reset_o for
 // exactly 1 clk cycle (== DUT fsm_reset_i semantics), waits 2 cycles, then
@@ -65,7 +67,7 @@ module dut_uart #(
   // Avalon-MM-style master port into durable_tid_v0 slave.
   output [11:0] avr_address,
   output [31:0] avr_writedata,
-  input  [31:0] avr_readdata,  // DUT read mux is combinational
+  input  [31:0] avr_readdata,  // DUT read data (registered, 2-cycle)
   output        avr_read,
   output        avr_write,
   output [3:0]  avr_byteenable,
@@ -89,8 +91,8 @@ module dut_uart #(
   // Baud timing (integer division; see header note for 115200 error).
   localparam integer BIT_DIV = CLK_HZ / BAUD; // clk cycles per serial bit
   // RX 16x-oversample tick; floor at 1 (exact when BIT_DIV is a multiple
-  // of 16; at the 25 MHz fabric / 115200 operating point BIT_DIV is 217
-  // and the tick truncates to 13 -- see header note).
+  // of 16; at the 50 MHz / 115200 operating point BIT_DIV is 434
+  // and the tick truncates to 27 -- see header note).
   localparam integer OV_DIV  = ((BIT_DIV / 16) == 0) ? 1 : (BIT_DIV / 16);
 
   // ---------------------------------------------------------------- RX ---
@@ -278,13 +280,15 @@ module dut_uart #(
   localparam [3:0] E_WR       = 4'd1; // assert avs_write this cycle
   localparam [3:0] E_WR_END   = 4'd2; // release write, load ACK, start TX
   localparam [3:0] E_RD       = 4'd3; // assert avs_read this cycle
-  localparam [3:0] E_RD_CAP   = 4'd4; // capture readdata, load RSP, start TX
-  localparam [3:0] E_RST      = 4'd5; // assert reset pulse this cycle
-  localparam [3:0] E_RST_GAP  = 4'd6; // release reset, settle
-  localparam [3:0] E_RST_RD   = 4'd7; // read RESET_CNT
-  localparam [3:0] E_RST_CAP  = 4'd8; // capture count, load RSP, start TX
-  localparam [3:0] E_PING     = 4'd9; // load PONG, start TX
-  localparam [3:0] E_TXWAIT   = 4'd10;
+  localparam [3:0] E_RD_WAIT  = 4'd4; // hold read (DUT read latency 2)
+  localparam [3:0] E_RD_CAP   = 4'd5; // capture readdata, load RSP, start TX
+  localparam [3:0] E_RST      = 4'd6; // assert reset pulse this cycle
+  localparam [3:0] E_RST_GAP  = 4'd7; // release reset, settle
+  localparam [3:0] E_RST_RD   = 4'd8; // read RESET_CNT
+  localparam [3:0] E_RST_WAIT = 4'd9; // hold read (DUT read latency 2)
+  localparam [3:0] E_RST_CAP  = 4'd10; // capture count, load RSP, start TX
+  localparam [3:0] E_PING     = 4'd11; // load PONG, start TX
+  localparam [3:0] E_TXWAIT   = 4'd12;
 
   reg [3:0]  p_state;
   reg [7:0]  fbuf [0:8];    // CMD frame bytes
@@ -394,12 +398,17 @@ module dut_uart #(
         end
         E_RD: begin
           avr_read_r <= 1'b1;
-          p_state    <= E_RD_CAP;
+          p_state    <= E_RD_WAIT;
+        end
+        E_RD_WAIT: begin
+          // DUT read latency is 2 cycles: hold the request one more
+          // cycle so E_RD_CAP samples the registered word.
+          p_state <= E_RD_CAP;
         end
         E_RD_CAP: begin
           avr_read_r <= 1'b0;
           rsp_code <= RSP_READ;
-          rsp_data <= avr_readdata; // DUT read mux is combinational
+          rsp_data <= avr_readdata; // DUT read data (registered)
           txbuf[0] <= MAGIC0;
           txbuf[1] <= MAGIC1;
           txbuf[2] <= RSP_READ;
@@ -424,7 +433,12 @@ module dut_uart #(
         end
         E_RST_RD: begin
           avr_read_r <= 1'b1;
-          p_state    <= E_RST_CAP;
+          p_state    <= E_RST_WAIT;
+        end
+        E_RST_WAIT: begin
+          // DUT read latency is 2 cycles: hold the request one more
+          // cycle so E_RST_CAP samples the registered word.
+          p_state <= E_RST_CAP;
         end
         E_RST_CAP: begin
           avr_read_r <= 1'b0;

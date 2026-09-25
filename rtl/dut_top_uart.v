@@ -4,12 +4,25 @@
 // Top for the Tang Console / Mega 138K SOM host-harness path: the DUT file
 // itself is UNTOUCHED; this file only instantiates + wires.
 //
-// Divide-by-2 fabric (timing closure, 2026-09-25): dut_top_uart failed
-// timing at the 50 MHz board clock (Fmax 31.6, structural). The design is
-// a slow register gate, so the whole fabric (DUT + UART) runs at 25 MHz
-// via a single reset-aware toggle FF (clk25). The UART divisor uses the
-// fabric rate (25000000/115200 = 217 cycles/bit); pin clk stays the
+// Divide-by-2 fabric via a proper clock resource (timing closure,
+// 2026-09-25): dut_top_uart failed timing at the 50 MHz board clock
+// (Fmax 31.6, structural), so the whole fabric (DUT + UART) runs at
+// 25 MHz. First attempt (commit 4289a5a) used a reset-aware toggle FF
+// (clk25) -- that closed SETUP but failed HOLD (10 violations): a FF
+// output driving fabric clock rides general interconnect (~1.8 ns skew
+// vs 0.85 ns logic delay), and hold is FREQUENCY-INDEPENDENT, so no
+// divider ratio fixes it -- only a dedicated clock resource does. This
+// uses the Gowin CLKDIV primitive (UG286: CLKOUT = HCLKIN / DIV_MODE on
+// the global clock network; DIV_MODE="2" below). The UART divisor uses
+// the fabric rate (25000000/115200 = 217 cycles/bit); pin clk stays the
 // 50 MHz board clock (V22); UART pins, protocol, and frames are unchanged.
+//
+// Sim portability: icarus has no CLKDIV model, so the primitive is
+// selected only under `SYNTHESIS (defined by the Gowin/Yosys synth
+// flow; __YOSYS__ added as a belt-and-braces selector in case the flow
+// does not predefine SYNTHESIS); simulation takes the behavioral
+// divide-by-2 branch, which restarts in phase (held at 0 under reset)
+// exactly like the toggle FF it replaces, so TB clock math is unchanged.
 //
 // Pin map (GW5AST-LV138PG484A, package PBG484A; research 2026-09-25):
 //   uart_rxd (in)  -> V14  (FPGA RX, driven by BL616 debugger TX)
@@ -62,11 +75,35 @@ module dut_top_uart #(
   localparam UART_TX_PIN = "U15";
   localparam CLK_PIN     = "V22";
 
-  // Fabric clock: divide the 50 MHz board clock by 2. Single toggle FF,
-  // reset-aware (held at 0 under reset so the fabric restarts in phase).
+  // Fabric clock: divide the 50 MHz board clock by 2 on a dedicated
+  // clock resource (see header: toggle-FF dividers fail HOLD because
+  // hold is frequency-independent; only clock-network routing fixes it).
   // FABRIC_HZ derives the UART divisor: 25000000 at the default board
   // clock (25000000/115200 = 217 cycles/bit).
   localparam FABRIC_HZ = CLK_HZ / 2;
+
+`ifdef SYNTHESIS
+`define DUT_TOP_UART_USE_CLKDIV 1
+`endif
+`ifdef __YOSYS__
+`define DUT_TOP_UART_USE_CLKDIV 1
+`endif
+`ifdef DUT_TOP_UART_USE_CLKDIV
+  // Synthesis: Gowin CLKDIV primitive (UG286, ports CLKOUT/HCLKIN/RESETN,
+  // RESETN active-low, DIV_MODE="2" -> 50 MHz in, 25 MHz out). CLKOUT
+  // drives the global clock network, so fabric clock skew collapses vs
+  // general interconnect and the toggle-FF hold violations go away.
+  wire clk25;
+  CLKDIV u_clkdiv (
+    .CLKOUT (clk25),
+    .HCLKIN (clk),
+    .RESETN (reset_n)
+  );
+  defparam u_clkdiv.DIV_MODE = "2";
+`else
+  // Simulation (icarus has no CLKDIV): behavioral divide-by-2,
+  // reset-aware (held at 0 under reset so the fabric restarts in phase).
+  // Produces a clock identical to the synthesis branch for sim purposes.
   reg clk25_r;
   wire clk25;
   assign clk25 = clk25_r;
@@ -77,6 +114,7 @@ module dut_top_uart #(
     else
       clk25_r <= ~clk25_r;
   end
+`endif
 
   // Avalon-MM-style link between the UART bridge (master) and the DUT.
   wire [11:0] avr_address;

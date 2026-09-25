@@ -59,6 +59,119 @@ semantics of the map itself untouched):
   `tid_last + 1`, reset pulses are negedge-driven (a posedge-timed
   deassert raced the DUT sample and the idle-reset pulse was missed).
 
+## UART front-end for the host harness path (`exp/fpga-v0-rtl`)
+
+Gives the running DUT a host-reachable 115200-8-N-1 serial port so the
+future harness can talk to it over the Tang Console / Mega 138K SOM
+debugger UART (USB tty on the host, BL616 debugger on the board). The DUT
+file itself is UNTOUCHED (wrapped, not modified).
+
+### New files
+
+| File | What it is |
+|------|------------|
+| `rtl/dut_uart.v` | Verilog-2001 UART RX/TX (parameterized `CLK_HZ` + `BAUD`, default 50 MHz / 115200) + command-protocol FSM + Avalon-MM-style master bridge into the DUT slave (`avr_*` signals) + 1-cycle soft-reset pulse. |
+| `rtl/dut_top_uart.v` | Top wrapper instantiating `durable_tid_v0` + `dut_uart` (no DUT changes). Carries the pin localparams + source comments and the CST snippet for the build host. |
+| `rtl/dut_uart_tb.sv` | Self-checking testbench driving the DUT *exclusively* through the UART (behavioral host-driver tasks). 43 checks, always-on invariant + monotonicity monitors. See scope note below. |
+
+### Pin table (GW5AST-LV138PG484A, package PBG484A)
+
+| Signal | FPGA pin | Dir | IO | Evidence |
+|--------|----------|-----|----|----------|
+| `uart_rxd` | V14 | in (FPGA RX, from BL616 TX) | LVCMOS33, PULL UP | `ddr3_1v4_hs.cst` + `top.v` (`input uart_rx`) |
+| `uart_txd` | U15 | out (FPGA TX, to BL616 RX) | LVCMOS33, PULL UP, DRIVE 8 | `ddr3_1v4_hs.cst` + `top.v` (`output uart_tx`) |
+| `clk` | V22 | in, 50 MHz onboard osc | LVCMOS33 | `hdmi.cst` + `gowin_pll.mod` (`fclkin 50`) + `uart_top.v` (`CLK_FRE 50`) |
+
+No TBDs: pins FOUND. Sources checked 2026-09-25:
+- <https://wiki.sipeed.com/hardware/en/tang/tang-mega-138k/mega-138k.html>
+  (chip `GW5AST-LV138PG484AC1/I0`, SOM debug interface `JTAG + UART JST SH1.0 8-pins`)
+- <https://wiki.sipeed.com/hardware/en/tang/tang-console/mega-console.html>
+  (Console uses the same Mega 138K SOM, so SOM-level FPGA pins hold)
+- <https://github.com/sipeed/TangMega-138K-example> —
+  `ddr_memory/ddr_memory_test_uart/src/ddr3_1v4_hs.cst`
+  (`IO_LOC "uart_tx" U15; IO_LOC "uart_rx" V14; IO_LOC "clk" V22;`),
+  `.../src/top.v` (port directions), `.../src/uart/uart_top.v`
+  (`CLK_FRE 50, BAUD_RATE 115200`), `hdmi_colorbar/eda_proj/src/hdmi.cst`
+  + `gowin_pll/gowin_pll.mod` (50 MHz clock evidence).
+- Baud-divisor error at defaults: 50000000/115200 = 434.03 → 434
+  cycles/bit; RX 16x tick truncates 434/16 → 27 (≈115740 baud, +0.47 %).
+
+### Protocol spec (all multi-byte values little-endian)
+
+CMD frame, host → FPGA, 9 bytes:
+`[MAGIC0=0x44 'D'][MAGIC1=0x55 'U'][CMD][ADDR][D0..D3 LE][CHK]`,
+`CHK = (CMD + ADDR + D0 + D1 + D2 + D3) mod 256`.
+`CMD`: `0x01` WRITE-REG | `0x02` READ-REG | `0x03` RESET | `0x04` PING.
+`ADDR`: byte offset in the DUT 4 KB window (map tops at `0x058`).
+
+RSP frame, FPGA → host, 8 bytes:
+`[0x44][0x55][RSP][D0..D3 LE][CHK]`, `CHK = (RSP + D0..D3) mod 256`.
+`RSP`: `0x81` WRITE-ACK (echo of written value) |
+`0x82` READ-DATA (register value) |
+`0x83` RESET-DONE (RESET_CNT after the pulse) |
+`0x84` PONG (VERSION `0x00000000`).
+Malformed frames (bad magic/checksum/unknown CMD, framing errors) are
+dropped SILENTLY, no response; strict request-response (one RSP per CMD).
+WRITE-REG ACKs after the write cycle (does NOT wait for commit — the host
+polls `STATUS.BUSY` via READ-REG). RESET pulses `fsm_reset_i` 1 cycle,
+then reads back `RESET_CNT`.
+
+### CST story (build host only — no remote files touched)
+
+`dut.cst` on the Gowin build host must gain exactly these lines
+(full port settings included so synthesis cannot infer wrong IO types):
+
+```text
+IO_LOC "uart_rxd" V14;
+IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "uart_txd" U15;
+IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "clk" V22;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
+```
+
+### UART TB status: PASS (verified 2026-09-25, icarus 13.0)
+
+```sh
+cd rtl
+iverilog -g2012 -o sim_uart dut_top_uart.v dut_uart.v durable_tid_v0.v dut_uart_tb.sv && ./sim_uart
+# checks passed: 43  failed: 0  +  PASS
+iverilog -g2012 -Wall ...   # lint-clean, no warnings
+```
+
+The TB raises sim baud via parameters (`BAUD=3125000` at 50 MHz = exactly
+16 cycles/bit) so the suite runs fast; the hardware default stays 115200
+(protocol is baud-agnostic). It replays the original suite's functional
+cases over serial (8 good submits, duplicate, bad-CRC / reserved-CTRL /
+REQ_HI malformed vectors, idle reset + post-reset submit) plus
+UART-specific coverage (PING/MAGIC+VERSION, WRITE echo, no-response
+rejection of bad-checksum / bad-magic / unknown-CMD frames, link-alive
+after rejection, repeated-submit).
+
+### Scope note: two fault-injection windows stay parallel-TB-only
+
+Original TEST 6 (reset mid-commit) and TEST 8 (submit while busy) CANNOT
+be driven through this UART path, by construction: the DUT busy window is
+≤ ~7 cycles (SUBMIT 1 + COMMIT hold + COMPLETE 1; `commit_hold` is a 2-bit
+register so `COMMIT_LATENCY` only takes effect for 0..3 — larger values
+truncate, found during UART-TB bring-up, DUT untouched) = ≤ 140 ns at
+50 MHz, while the minimum gap between two executed UART commands is a full
+frame round trip (9 + 8 bytes = 170 bit times ≈ 54 µs at sim baud,
+≈ 1.5 ms at 115200). The ACK of frame N alone exceeds the busy window by
+~200x–10000x. Over serial, a "reset mid-commit" always lands as an idle
+reset and a "second submit while busy" always lands idle (demonstrated in
+U8: rejected as DUP, never MALFORMED). Those two sub-microsecond windows
+remain covered by the parallel 48-check suite (still PASS, DUT untouched).
+
+> [!IMPORTANT]
+> **Host-driver language question (owner decision needed).**
+> The future host-side harness driver speaks this UART protocol over a USB
+> serial tty. Nushell cannot do serial-port I/O (no termios/serial support),
+> so the driver will need C (`termios`) or Python (`pyserial`) — an
+> AGENTS.md Nushell-only-policy exception, same class as the `hps/harness.c`
+> precedent above. No host driver is written on this branch (RTL + docs
+> only); owner: please rule C-vs-Python when the harness is scheduled.
+
 ## How the TB runs (once a simulator exists)
 
 ```sh

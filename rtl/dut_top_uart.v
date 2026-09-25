@@ -4,6 +4,13 @@
 // Top for the Tang Console / Mega 138K SOM host-harness path: the DUT file
 // itself is UNTOUCHED; this file only instantiates + wires.
 //
+// Divide-by-2 fabric (timing closure, 2026-09-25): dut_top_uart failed
+// timing at the 50 MHz board clock (Fmax 31.6, structural). The design is
+// a slow register gate, so the whole fabric (DUT + UART) runs at 25 MHz
+// via a single reset-aware toggle FF (clk25). The UART divisor uses the
+// fabric rate (25000000/115200 = 217 cycles/bit); pin clk stays the
+// 50 MHz board clock (V22); UART pins, protocol, and frames are unchanged.
+//
 // Pin map (GW5AST-LV138PG484A, package PBG484A; research 2026-09-25):
 //   uart_rxd (in)  -> V14  (FPGA RX, driven by BL616 debugger TX)
 //   uart_txd (out) -> U15  (FPGA TX, into BL616 debugger RX)
@@ -36,11 +43,11 @@
 `timescale 1ns / 1ps
 
 module dut_top_uart #(
-  parameter CLK_HZ         = 50000000, // must match the board clock (V22)
+  parameter CLK_HZ         = 50000000, // board clock on pin V22 (50 MHz)
   parameter BAUD           = 115200,   // host harness baud, 8-N-1
   parameter COMMIT_LATENCY = 2         // passthrough to durable_tid_v0
 ) (
-  input         clk,               // board pin V22 (50 MHz)
+  input         clk,               // board pin V22 (50 MHz board clock in)
   input         reset_n,           // async assert, sync release
   input         uart_rxd,          // board pin V14 (from debugger TX)
   output        uart_txd,          // board pin U15 (to debugger RX)
@@ -55,6 +62,22 @@ module dut_top_uart #(
   localparam UART_TX_PIN = "U15";
   localparam CLK_PIN     = "V22";
 
+  // Fabric clock: divide the 50 MHz board clock by 2. Single toggle FF,
+  // reset-aware (held at 0 under reset so the fabric restarts in phase).
+  // FABRIC_HZ derives the UART divisor: 25000000 at the default board
+  // clock (25000000/115200 = 217 cycles/bit).
+  localparam FABRIC_HZ = CLK_HZ / 2;
+  reg clk25_r;
+  wire clk25;
+  assign clk25 = clk25_r;
+
+  always @(posedge clk or negedge reset_n) begin
+    if (!reset_n)
+      clk25_r <= 1'b0;
+    else
+      clk25_r <= ~clk25_r;
+  end
+
   // Avalon-MM-style link between the UART bridge (master) and the DUT.
   wire [11:0] avr_address;
   wire [31:0] avr_writedata;
@@ -67,7 +90,7 @@ module dut_top_uart #(
   durable_tid_v0 #(
     .COMMIT_LATENCY (COMMIT_LATENCY)
   ) u_dut (
-    .clk                (clk),
+    .clk                (clk25),
     .reset_n            (reset_n),
     .fsm_reset_i        (avr_reset),
     .avs_address        (avr_address),
@@ -84,10 +107,10 @@ module dut_top_uart #(
   );
 
   dut_uart #(
-    .CLK_HZ (CLK_HZ),
+    .CLK_HZ (FABRIC_HZ), // fabric rate: 25000000 at the default board clock
     .BAUD   (BAUD)
   ) u_uart (
-    .clk            (clk),
+    .clk            (clk25),
     .reset_n        (reset_n),
     .uart_rxd       (uart_rxd),
     .uart_txd       (uart_txd),

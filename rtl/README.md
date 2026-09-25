@@ -71,7 +71,7 @@ file itself is UNTOUCHED (wrapped, not modified).
 | File | What it is |
 |------|------------|
 | `rtl/dut_uart.v` | Verilog-2001 UART RX/TX (parameterized `CLK_HZ` + `BAUD`, default 50 MHz / 115200) + command-protocol FSM + Avalon-MM-style master bridge into the DUT slave (`avr_*` signals) + 1-cycle soft-reset pulse. |
-| `rtl/dut_top_uart.v` | Top wrapper instantiating `durable_tid_v0` + `dut_uart` (no DUT changes). Carries the pin localparams + source comments and the CST snippet for the build host. |
+| `rtl/dut_top_uart.v` | Top wrapper instantiating `durable_tid_v0` + `dut_uart` (no DUT changes). Divide-by-2: 50 MHz board clock (V22) → 25 MHz fabric (timing closure); UART divisor uses the fabric rate. Carries the pin localparams + source comments and the CST snippet for the build host. |
 | `rtl/dut_uart_tb.sv` | Self-checking testbench driving the DUT *exclusively* through the UART (behavioral host-driver tasks). 43 checks, always-on invariant + monotonicity monitors. See scope note below. |
 
 ### Pin table (GW5AST-LV138PG484A, package PBG484A)
@@ -95,6 +95,8 @@ No TBDs: pins FOUND. Sources checked 2026-09-25:
   + `gowin_pll/gowin_pll.mod` (50 MHz clock evidence).
 - Baud-divisor error at defaults: 50000000/115200 = 434.03 → 434
   cycles/bit; RX 16x tick truncates 434/16 → 27 (≈115740 baud, +0.47 %).
+  At the divided 25 MHz fabric: 25000000/115200 = 217.01 → 217
+  cycles/bit; RX tick truncates 217/16 → 13 (verified in sim).
 
 ### Protocol spec (all multi-byte values little-endian)
 
@@ -139,9 +141,10 @@ iverilog -g2012 -o sim_uart dut_top_uart.v dut_uart.v durable_tid_v0.v dut_uart_
 iverilog -g2012 -Wall ...   # lint-clean, no warnings
 ```
 
-The TB raises sim baud via parameters (`BAUD=3125000` at 50 MHz = exactly
-16 cycles/bit) so the suite runs fast; the hardware default stays 115200
-(protocol is baud-agnostic). It replays the original suite's functional
+The TB drives the 50 MHz board clock and runs at the HARDWARE baud
+(`BAUD=115200`, divisor 217 cycles/bit at the divided 25 MHz fabric) so
+the suite exercises the exact hardware timing, including the RX 16x-tick
+truncation (217/16 → 13). It replays the original suite's functional
 cases over serial (8 good submits, duplicate, bad-CRC / reserved-CTRL /
 REQ_HI malformed vectors, idle reset + post-reset submit) plus
 UART-specific coverage (PING/MAGIC+VERSION, WRITE echo, no-response
@@ -152,13 +155,12 @@ after rejection, repeated-submit).
 
 Original TEST 6 (reset mid-commit) and TEST 8 (submit while busy) CANNOT
 be driven through this UART path, by construction: the DUT busy window is
-≤ ~7 cycles (SUBMIT 1 + COMMIT hold + COMPLETE 1; `commit_hold` is a 2-bit
+≤ ~7 fabric cycles (SUBMIT 1 + COMMIT hold + COMPLETE 1; `commit_hold` is a 2-bit
 register so `COMMIT_LATENCY` only takes effect for 0..3 — larger values
-truncate, found during UART-TB bring-up, DUT untouched) = ≤ 140 ns at
-50 MHz, while the minimum gap between two executed UART commands is a full
-frame round trip (9 + 8 bytes = 170 bit times ≈ 54 µs at sim baud,
-≈ 1.5 ms at 115200). The ACK of frame N alone exceeds the busy window by
-~200x–10000x. Over serial, a "reset mid-commit" always lands as an idle
+truncate, found during UART-TB bring-up, DUT untouched) = ≤ 280 ns at
+the 25 MHz fabric, while the minimum gap between two executed UART commands is a full
+frame round trip (9 + 8 bytes = 170 bit times ≈ 1.5 ms at 115200). The ACK of frame N alone exceeds the busy window by
+~2500x. Over serial, a "reset mid-commit" always lands as an idle
 reset and a "second submit while busy" always lands idle (demonstrated in
 U8: rejected as DUP, never MALFORMED). Those two sub-microsecond windows
 remain covered by the parallel 48-check suite (still PASS, DUT untouched).

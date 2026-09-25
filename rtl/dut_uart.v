@@ -19,6 +19,11 @@
 //     CLK_HZ=50000000 default below. Baud divisor error at 115200:
 //     50000000/115200 = 434.03 -> 434 cycles/bit (0.006 %); RX 16x tick
 //     truncates 434/16 = 27.125 -> 27, i.e. 115740 baud (+0.47 %, < 2 % OK).
+//   Divided 25 MHz fabric operating point (dut_top_uart.v drives this
+//   module at FABRIC_HZ = 25000000): 25000000/115200 = 217.01 -> 217
+//   cycles/bit; RX 16x tick truncates 217/16 = 13.56 -> 13 (receiver bit
+//   window 208 fabric cycles vs 217 transmitted; mid-bit sampling margin
+//   still holds -- verified in sim at hardware baud, see dut_uart_tb.sv).
 //
 // Protocol (all multi-byte values little-endian, byte0 = bits[7:0]):
 //   CMD frame (host -> FPGA), 9 bytes:
@@ -84,7 +89,8 @@ module dut_uart #(
   // Baud timing (integer division; see header note for 115200 error).
   localparam integer BIT_DIV = CLK_HZ / BAUD; // clk cycles per serial bit
   // RX 16x-oversample tick; floor at 1 (exact when BIT_DIV is a multiple
-  // of 16, e.g. sim baud 3125000 at 50 MHz -> BIT_DIV 16, tick 1).
+  // of 16; at the 25 MHz fabric / 115200 operating point BIT_DIV is 217
+  // and the tick truncates to 13 -- see header note).
   localparam integer OV_DIV  = ((BIT_DIV / 16) == 0) ? 1 : (BIT_DIV / 16);
 
   // ---------------------------------------------------------------- RX ---

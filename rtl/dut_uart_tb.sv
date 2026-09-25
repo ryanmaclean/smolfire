@@ -13,10 +13,12 @@
 //   (1) TRUSTED_COMPLETE(N) => PERSISTENT(N)
 //   (2) durable / visible never regress.
 //
-// Sim baud is raised via parameters (CLK_HZ=50M, BAUD=3125000 -> exactly
-// 16 clk cycles/bit, matching the bridge 16x RX tick of 1) so the suite
-// runs in reasonable sim time. The HARDWARE default stays 115200; the
-// protocol is baud-agnostic.
+// Sim baud is the HARDWARE baud: the TB drives the 50 MHz board clock and
+// the top divides it to the 25 MHz fabric, so with BAUD=115200 the divisor
+// math matches the board (25000000/115200 = 217 cycles/bit). The suite is
+// slower than the old fast-baud version but exercises the exact hardware
+// timing, including the RX 16x-tick truncation (217/16 -> 13).
+// The HARDWARE default stays 115200; the protocol is baud-agnostic.
 //   iverilog -g2012 -o sim_uart dut_top_uart.v dut_uart.v durable_tid_v0.v \
 //     dut_uart_tb.sv && ./sim_uart
 // Exit banner is `$display PASS/FAIL` + `$finish`.
@@ -30,12 +32,11 @@
 //     the COMMIT_LATENCY parameter only has an effect for values 0..3 --
 //     larger values silently truncate, e.g. 8192 -> 0. Found during
 //     bring-up of this TB; the DUT file itself is untouched).
-//     At 50 MHz the busy window is <= 140 ns.
+//     At the 25 MHz fabric the busy window is <= 280 ns.
 //   - The minimum gap between two executed UART commands is one full
 //     frame round trip: 9 CMD bytes + 8 RSP bytes = 17 bytes = 170 bit
-//     times ~= 54 us at this TB's fast sim baud, ~= 1.5 ms at the
-//     hardware 115200 baud. The ACK of frame N alone (8 bytes) exceeds
-//     the DUT busy window by ~200x (sim baud) to ~10000x (115200).
+//     times ~= 1.5 ms at the hardware 115200 baud. The ACK of frame N
+//     alone (8 bytes ~= 694 us) exceeds the DUT busy window by ~2500x.
 //   So by the time any second frame executes, the DUT is long idle: a
 //   "reset mid-commit" over serial always lands as an idle reset, and a
 //   "second submit while busy" always lands as a fresh/DUP submit. Those
@@ -54,9 +55,15 @@
 module dut_uart_tb;
 
   // --- parameters (must match the instantiated top) ---------------------
-  localparam CLK_HZ = 50000000;
-  localparam BAUD   = 3125000;
-  localparam BITC   = CLK_HZ / BAUD; // 16 clk cycles per serial bit
+  // CLK_HZ is the BOARD clock (pin V22); the top divides it by 2 to the
+  // 25 MHz fabric, so BITC (fabric cycles per serial bit) is FAB_HZ/BAUD
+  // = 217, matching the UART bridge divisor exactly. BITB is the same bit
+  // time counted in board-clock edges (what this TB's driver waits on).
+  localparam CLK_HZ = 50000000; // board clock (pin V22)
+  localparam FAB_HZ = CLK_HZ / 2; // fabric clock (divided inside the top)
+  localparam BAUD   = 115200;   // hardware baud
+  localparam BITC   = FAB_HZ / BAUD; // 217 fabric cycles per serial bit
+  localparam BITB   = BITC * 2; // 434 board-clock edges per serial bit
 
   // --- protocol constants (must match rtl/dut_uart.v) --------------------
   localparam [7:0] M0 = 8'h44;
@@ -123,7 +130,7 @@ module dut_uart_tb;
     .busy_o             (busy_o)
   );
 
-  // 50 MHz clock (matches CLK_HZ).
+  // 50 MHz board clock (matches CLK_HZ; the fabric divides it to 25 MHz).
   initial clk = 1'b0;
   always #10 clk = ~clk;
 
@@ -153,6 +160,7 @@ module dut_uart_tb;
   reg [63:0] mon_last_d;
   reg [63:0] mon_last_v;
   reg         mon_armed;
+  reg         mon_tc_prev; // edge-detect: fabric pulses are 2 board cycles wide
 
   task check(input [8*56-1:0] name, input cond);
     begin
@@ -168,9 +176,12 @@ module dut_uart_tb;
 
   // (1) TRUSTED_COMPLETE(N) => PERSISTENT(N); (2) watermarks never regress.
   // Watermarks are COUNTS (highest durable TID + 1); tid_last is 0-based.
+  // The monitor samples the 50 MHz board clock while the fabric runs at
+  // 25 MHz, so trusted_complete_o pulses are counted on their rising edge
+  // (each fabric-cycle pulse spans two board edges).
   always @(posedge clk) begin
     if (mon_armed) begin
-      if (trusted_complete_o) begin
+      if (trusted_complete_o && !mon_tc_prev) begin
         mon_trusted_cnt = mon_trusted_cnt + 1;
         if (durable_tid_o !== (top.u_dut.tid_last + 64'd1)) begin
           checks_failed = checks_failed + 1;
@@ -190,43 +201,49 @@ module dut_uart_tb;
       end
       mon_last_d = top.u_dut.durable;
       mon_last_v = top.u_dut.visible;
+      mon_tc_prev = trusted_complete_o;
     end
   end
 
   // --- behavioral UART host driver ------------------------------------------
-  // Send one byte, LSB first, 8-N-1, BITC clk cycles per bit.
+  // Send one byte, LSB first, 8-N-1, BITB board-clock edges per bit
+  // (= BITC fabric cycles; the fabric is the board clock divided by 2).
   task uart_put(input [7:0] b);
     integer i;
     begin
       uart_rxd = 1'b0; // start
-      repeat (BITC) @(posedge clk);
+      repeat (BITB) @(posedge clk);
       for (i = 0; i < 8; i = i + 1) begin
         uart_rxd = b[i];
-        repeat (BITC) @(posedge clk);
+        repeat (BITB) @(posedge clk);
       end
       uart_rxd = 1'b1; // stop
-      repeat (BITC) @(posedge clk);
+      repeat (BITB) @(posedge clk);
     end
   endtask
 
   // Receive one byte; ok=0 on start timeout (no response) or bad stop bit.
+  // Start-timeout is 100000 board cycles (~23 byte times at 115200): the
+  // first RSP byte is polled while the CMD is still being transmitted
+  // (see host round-trip note at u_write), so the timeout must exceed the
+  // 9-byte CMD time (9*10*BITB = 39060) plus fabric latency plus margin.
   task uart_get(output [7:0] b, output ok);
     integer i, t;
     begin
       ok = 1'b0;
       b  = 8'h00;
       t  = 0;
-      while (uart_txd !== 1'b0 && t < 20000) begin
+      while (uart_txd !== 1'b0 && t < 100000) begin
         @(posedge clk);
         t = t + 1;
       end
       if (uart_txd === 1'b0) begin
-        repeat (BITC/2) @(posedge clk); // center into start bit
+        repeat (BITB/2) @(posedge clk); // center into start bit
         for (i = 0; i < 8; i = i + 1) begin
-          repeat (BITC) @(posedge clk);
+          repeat (BITB) @(posedge clk);
           b[i] = uart_txd;
         end
-        repeat (BITC) @(posedge clk); // stop bit
+        repeat (BITB) @(posedge clk); // stop bit
         if (uart_txd === 1'b1)
           ok = 1'b1;
       end
@@ -298,47 +315,66 @@ module dut_uart_tb;
   endtask
 
   // WRITE-REG round trip. ok=1 iff ACK rsp + echo match.
+  // The CMD transmit and RSP watch run FORKED: the FPGA's RX completes a
+  // byte ~194 fabric cycles before the TB finishes transmitting its stop
+  // bit, and the protocol block starts the RSP ~5 fabric cycles later --
+  // so the RSP start bit begins ~180 fabric cycles (~0.85 bit times)
+  // BEFORE a sequential caller could start polling. A sequential
+  // host_cmd/host_resp therefore misses the start edge and mis-samples
+  // the whole frame. Watching uart_txd from before the CMD goes out
+  // catches the true start edge (independent lines: uart_rxd vs uart_txd).
   task u_write(input [7:0] addr, input [31:0] data, output ok);
     reg [7:0] rsp;
     reg [31:0] echo;
     reg rok;
     begin
-      host_cmd(CMD_WRITE, addr, data);
-      host_resp(rsp, echo, rok);
+      fork
+        host_cmd(CMD_WRITE, addr, data);
+        host_resp(rsp, echo, rok);
+      join
       ok = rok && (rsp == RSP_WRITE) && (echo == data);
     end
   endtask
 
   // READ-REG round trip. ok=1 iff DATA rsp received; value in rdata.
+  // (Forked CMD/RSP for the same early-RSP reason as u_write.)
   task u_read(input [7:0] addr, output [31:0] rdata, output ok);
     reg [7:0] rsp;
     reg rok;
     begin
-      host_cmd(CMD_READ, addr, 32'h00000000);
-      host_resp(rsp, rdata, rok);
+      fork
+        host_cmd(CMD_READ, addr, 32'h00000000);
+        host_resp(rsp, rdata, rok);
+      join
       ok = rok && (rsp == RSP_READ);
     end
   endtask
 
   // PING round trip. ok=1 iff PONG with VERSION==0.
+  // (Forked CMD/RSP for the same early-RSP reason as u_write.)
   task u_ping(output ok);
     reg [7:0] rsp;
     reg [31:0] ver;
     reg rok;
     begin
-      host_cmd(CMD_PING, 8'h00, 32'h00000000);
-      host_resp(rsp, ver, rok);
+      fork
+        host_cmd(CMD_PING, 8'h00, 32'h00000000);
+        host_resp(rsp, ver, rok);
+      join
       ok = rok && (rsp == RSP_PING) && (ver == 32'h00000000);
     end
   endtask
 
   // RESET round trip. ok=1 iff RESET-DONE rsp received; count in rcnt.
+  // (Forked CMD/RSP for the same early-RSP reason as u_write.)
   task u_reset(output [31:0] rcnt, output ok);
     reg [7:0] rsp;
     reg rok;
     begin
-      host_cmd(CMD_RESET, 8'h00, 32'h00000000);
-      host_resp(rsp, rcnt, rok);
+      fork
+        host_cmd(CMD_RESET, 8'h00, 32'h00000000);
+        host_resp(rsp, rcnt, rok);
+      join
       ok = rok && (rsp == RSP_RESET);
     end
   endtask
@@ -426,6 +462,7 @@ module dut_uart_tb;
     mon_last_d      = 64'h0;
     mon_last_v      = 64'h0;
     mon_armed       = 1'b0;
+    mon_tc_prev     = 1'b0;
     uart_rxd        = 1'b1; // serial line idles high
 
     // Global reset.
@@ -533,6 +570,8 @@ module dut_uart_tb;
     check("U5d no errors", t_ok && t_err == 32'h0);
 
     // U6: malformed UART frames are dropped with NO response.
+    // Sequential cmd/resp is intentional here: silence is expected, and
+    // the uart_get timeout (100000 board cycles) proves it.
     begin
       reg [7:0] rsp;
       reg [31:0] rdata;
@@ -580,9 +619,10 @@ module dut_uart_tb;
     check("U7 tid_last == 9", t_ok && t_rdata == 32'h00000009);
 
     // U8: repeated submit over UART. Op A commits; op B (identical bytes,
-    // sent with no poll in between) executes ~2700 serial cycles later --
-    // the DUT busy window (~7 cycles) is long closed, so B is rejected as
-    // DUP, NOT MALFORMED. This empirically demonstrates the SCOPE NOTE:
+    // sent with no poll in between) executes a full frame round trip later
+    // (~37000 fabric cycles: A's 8-byte RSP + B's 9-byte CMD) --
+    // the DUT busy window (~7 fabric cycles) is long closed, so B is
+    // rejected as DUP, NOT MALFORMED. This empirically demonstrates the SCOPE NOTE:
     // submit-while-busy is unhittable over serial (original TEST 8 stays
     // a parallel-TB-only window).
     begin

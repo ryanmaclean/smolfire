@@ -8,6 +8,10 @@ Companion: `docs/SUPERSTATION-PRE-ASIC-PLAN.md` (SS1-B FPGA DUT section).
 The pre-ASIC plan names SuperStation One as the validation path; the MiSTer
 is the available fit-check platform for the same RTL until SS1-B lands.
 
+> Status 2026-09-25: open question #1 (Quartus build host) is DECIDED —
+> see below. RTL sim status lives on `exp/fpga-v0-rtl` (48 checks PASS,
+> icarus); harness syntax status is a separate lane, unknown to this task.
+
 ## 1. Recon snapshot (2026-09-24, read-only, no anomalies)
 
 | Item | Value |
@@ -97,8 +101,20 @@ cycles, determinism, power, or layer elimination — else no tapeout).
 
 ## OPEN QUESTIONS
 
-1. Quartus build host: where does Quartus Lite run (studio Mac is
-   aarch64 — needs x86 Linux VM/host)? Who owns that builder?
+1. Quartus build host: DECIDED — `7950x4090pop` (`10.0.2.42`): 32 threads,
+   125GB RAM, 361GB free, Pop!_OS 24.04 x86-64, passwordless sudo present,
+   i386 compat libs present, SSH works. Ruled out: this Mac (ARM + ~3GB
+   free), FreeBSD hosts (Linux-only toolchain), ARM Pis.
+   Target files: `QuartusLiteSetup-25.1std.0.1129-linux.run` (~2GB) +
+   `cyclonev-25.1std.0.1129.qdz` (~1.3GB) -> `studio@10.0.2.42:~/quartus-dl/`
+   (exists, empty). Integrity anchors (Intel page + nixpkgs +
+   container_builder cross-validated): installer SHA1
+   `ce0773469eacab5b7035c175484625f4ec3737d1`, cyclonev SHA1
+   `a7225ec1bd36ccfd6826ea6273df5d21dd95633b`.
+   BLOCKER: Intel/Altera edge requires a logged-in session (anonymous 403
+   verified from 2 hosts); no trustworthy mirror exists (archive.org stale,
+   UW Windows-only 17.0, nix/AUR point at the walled CDN, torrents
+   excluded). Awaiting one human browser download.
 2. Bitstream deploy path: `fpga_manager` firmware load vs menu-core slot —
    needs explicit owner approval before any `.rbf` touches the device.
 3. HPS kernel driver: is a minimal UIO/`/dev/mem`-gated helper enough, or

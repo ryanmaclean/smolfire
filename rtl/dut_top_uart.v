@@ -13,7 +13,8 @@
 // vs 0.85 ns logic delay), and hold is FREQUENCY-INDEPENDENT, so no
 // divider ratio fixes it -- only a dedicated clock resource does. This
 // uses the Gowin CLKDIV primitive (UG286: CLKOUT = HCLKIN / DIV_MODE on
-// the global clock network; DIV_MODE="2" below). The UART divisor uses
+// the global clock network; DIV_MODE="2" below; GW5A 4-port variant with
+// CALIB tied to 1'b0/inactive -- see synthesis-branch note). The UART divisor uses
 // the fabric rate (25000000/115200 = 217 cycles/bit); pin clk stays the
 // 50 MHz board clock (V22); UART pins, protocol, and frames are unchanged.
 //
@@ -89,17 +90,23 @@ module dut_top_uart #(
 `define DUT_TOP_UART_USE_CLKDIV 1
 `endif
 `ifdef DUT_TOP_UART_USE_CLKDIV
-  // Synthesis: Gowin CLKDIV primitive (UG286, ports CLKOUT/HCLKIN/RESETN,
-  // RESETN active-low, DIV_MODE="2" -> 50 MHz in, 25 MHz out). CLKOUT
-  // drives the global clock network, so fabric clock skew collapses vs
-  // general interconnect and the toggle-FF hold violations go away.
+  // Synthesis: Gowin CLKDIV primitive (UG286 clock resource; 4-port GW5A
+  // variant HCLKIN/RESETN/CALIB/CLKOUT per YosysHQ/apicula wiki CLKDIV,
+  // which documents this primitive as Apicula-supported with DIV_MODE
+  // default "2"). CLKOUT drives the global clock network, so fabric
+  // clock skew collapses vs general interconnect and the toggle-FF hold
+  // violations go away. CALIB is the IOLOGIC phase-adjust input; tied to
+  // 1'b0 (inactive) since this design uses plain divide-by-2 fabric
+  // clocking with no phase adjustment.
   wire clk25;
-  CLKDIV u_clkdiv (
+  CLKDIV #(
+    .DIV_MODE ("2")
+  ) u_clkdiv (
+    .CALIB  (1'b0),
     .CLKOUT (clk25),
     .HCLKIN (clk),
     .RESETN (reset_n)
   );
-  defparam u_clkdiv.DIV_MODE = "2";
 `else
   // Simulation (icarus has no CLKDIV): behavioral divide-by-2,
   // reset-aware (held at 0 under reset so the fabric restarts in phase).

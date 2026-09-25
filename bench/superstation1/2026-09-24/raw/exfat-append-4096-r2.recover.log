@@ -1,0 +1,7 @@
+SMOLFIRE_METRIC recovery_ns=1121227073
+SMOLFIRE_METRIC recovery_records=5000
+SMOLFIRE_METRIC recovery_bad_tail=0
+SMOLFIRE_METRIC recovery_bytes_scanned=20480000
+SMOLFIRE_METRIC recovery_wall_from_main_ns=1121328812
+{"recovery_ns":1121227073,"durable_seq":5000,"epoch_seen":1,"bad_tail":0,"bytes":20480000}
+restart_wall_ns=1137421461

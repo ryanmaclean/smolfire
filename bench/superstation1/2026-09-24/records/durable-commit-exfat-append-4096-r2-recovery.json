@@ -1,0 +1,23 @@
+{
+  "schema": "ryanlab.bench.v1",
+  "project": "smolfire",
+  "timestamp": "2026-09-24T20:56:37-07:00",
+  "runtime": "superstation1-mister-linux-armv7",
+  "filesystem": "exfat",
+  "workload": "durable-commit-exfat-append-4096-r2-recovery",
+  "commit": "3ab2930",
+  "metrics": {
+    "recovery_ns": 1121227073,
+    "recovery_records": 5000,
+    "recovery_bad_tail": 0,
+    "recovery_bytes_scanned": 20480000,
+    "recovery_wall_from_main_ns": 1121328812,
+    "restart_wall_ns": 1137421461
+  },
+  "tags": {
+    "project": "smolfire",
+    "runtime": "superstation1-mister-linux-armv7",
+    "workload": "durable-commit-exfat-append-4096-r2-recovery"
+  },
+  "notes": "smolFire #86 CPU-only durable-commit baseline, model B, one outstanding op. superstation1 (SuperStation One, Cyclone V HPS 2x Cortex-A9 800MHz, MiSTer Linux 5.15.1 armv7l). exFAT on 64GB microSD mounted rw,sync,dirsync; SD write_cache=write through; HW cycle counter unavailable (perf_event_open failed), cycles_* are 0. Times in ns. Rerun of exfat-append-4096 with correct --recsize on recovery. bench/superstation1/2026-09-24/raw has the logs."
+}

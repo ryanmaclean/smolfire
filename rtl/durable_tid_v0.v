@@ -37,12 +37,14 @@
 //   input  [11:0] avs_address     -- byte address within the 4 KB window
 //                                    (word-aligned; low 2 bits ignored)
 //   input  [31:0] avs_writedata
-//   output [31:0] avs_readdata    -- combinational read mux (fixed latency)
+//   output [31:0] avs_readdata    -- registered read data (2-cycle latency:
+//                                    stage 1 registers address+read, the
+//                                    mux selects, stage 2 registers the word)
 //   input         avs_read
 //   input         avs_write
 //   input  [3:0]  avs_byteenable  -- partial-write mask (merged, not ignored)
 //   output        avs_waitrequest  -- tied 0 (always ready, single cycle)
-//   output        avs_readdatavalid-- registered: avs_read delayed 1 cycle
+//   output        avs_readdatavalid-- registered: avs_read delayed 2 cycles
 //   output        trusted_complete_o -- 1-cycle pulse in COMPLETE state
 //   output [63:0] durable_tid_o   -- persistent watermark (observation)
 //   output        busy_o           -- FSM not in IDLE (backpressure)
@@ -169,11 +171,15 @@ module durable_tid_v0 #(
   localparam [31:0] MAGIC_VAL   = 32'h44555230; // "DUR0"
   localparam [31:0] VERSION_VAL = 32'h00000000; // v0
 
-  // FSM encoding (2 bits suffice; exposed in low 2 bits of FSM_STATE).
-  localparam [1:0] S_IDLE     = 2'd0;
-  localparam [1:0] S_SUBMIT   = 2'd1;
-  localparam [1:0] S_COMMIT   = 2'd2;
-  localparam [1:0] S_COMPLETE = 2'd3;
+  // FSM encoding (3 bits: S_CRC added 2026-09-25 for the pipelined
+  // CRC -- stage 1 registers the first-half CRC in S_SUBMIT, stage 2
+  // chains bytes 8..15 and gates in S_CRC. Exposed in FSM_STATE low 3
+  // bits; IDLE is still 0 so idle/busy checks are unchanged.)
+  localparam [2:0] S_IDLE     = 3'd0;
+  localparam [2:0] S_SUBMIT   = 3'd1;
+  localparam [2:0] S_CRC      = 3'd2;
+  localparam [2:0] S_COMMIT   = 3'd3;
+  localparam [2:0] S_COMPLETE = 3'd4;
 
   // ERROR bit positions.
   localparam E_CRC    = 0;
@@ -191,7 +197,7 @@ module durable_tid_v0 #(
   reg [63:0] durable;     // PERSISTENT watermark (monotonic)
   reg [63:0] visible;     // completion/visible watermark (never regresses)
   reg [63:0] tid_last;    // last committed TID
-  reg [1:0]  state;
+  reg [2:0]  state;       // 3 bits: S_CRC added for the pipelined CRC
   reg [31:0] error;       // sticky, only low 6 bits used
   reg [31:0] progress_cnt;
   reg [31:0] reset_cnt;
@@ -200,19 +206,44 @@ module durable_tid_v0 #(
   reg        crc_ok_last;
   reg [31:0] desc0, desc1, desc_crc;
   reg [31:0] crc_calc;
+  reg [31:0] crc_mid_q;   // registered CRC over descriptor bytes 0..7
   reg [1:0]  commit_hold; // COMMIT latency countdown
+  // Read pipeline: stage 1 registers address+read; the mux below
+  // selects from the STABLE stage-1 address; stage 2 (clocked block)
+  // registers the word into avs_readdata with readdatavalid delayed to
+  // match. Reads complete 2 cycles after the request (host polls at ms
+  // scale; see rtl/README.md).
+  reg [9:0]  rd_addr_q;
+  reg        rd_en_q;
   reg        readdatavalid_q;
   reg        trusted_q;
 
-  // Latched submit image validated in SUBMIT.
+  // Latched submit image validated in SUBMIT/S_CRC.
   reg [31:0] lat_d0, lat_d1, lat_req, lat_ep, lat_crc;
   reg [63:0] lat_tid;
 
-  // Hoisted sequential-block temps (Verilog-2001 has no block-scoped
-  // declarations; single blocking-write use inside the clocked always).
+  // Next-state temps: combinational D-input muxes (`d = en ? new : q`).
+  // The clocked block assigns every register UNCONDITIONALLY from its
+  // *_n temp, so the flow infers plain DFFs (no CE pins) on this
+  // datapath and the enable/cloud logic stays in LUTs ahead of D.
+  // (Timing closure, 2026-09-25: an ALU-carry + wide mux cloud sinking
+  // at a DFFCE CE input was the 50 MHz critical path; see README.)
+  reg [31:0] epoch_n, req_lo_n, req_hi_n;
+  reg [63:0] tid_next_n, pending_n, durable_n, visible_n, tid_last_n;
+  reg [2:0]  state_n;
   reg [31:0] ctrl_n;
   reg [31:0] err_n;
   reg [63:0] req_full;
+  reg [31:0] progress_cnt_n, reset_cnt_n;
+  reg        complete_sticky_n, crc_ok_last_n;
+  reg [31:0] desc0_n, desc1_n, desc_crc_n, crc_calc_n, crc_mid_n;
+  reg [1:0]  commit_hold_n;
+  reg [31:0] readdata_n, rd_mux;
+  reg [9:0]  rd_addr_n;
+  reg        rd_en_n, readdatavalid_n, trusted_n;
+  reg [31:0] lat_d0_n, lat_d1_n, lat_req_n, lat_ep_n, lat_crc_n;
+  reg [63:0] lat_tid_n;
+  reg        soft_rst;
 
   // Byte-enable expanded to a 32-bit write mask.
   reg [31:0] wmask;
@@ -238,13 +269,23 @@ module durable_tid_v0 #(
 
   // CRC-32 (IEEE 802.3): poly 0x04C11DB7 reflected (0xEDB88320),
   // init 0xFFFFFFFF, refin/refout, xorout 0xFFFFFFFF. No SHA anywhere.
-  function [31:0] crc32_ieee;
-    input [127:0] data;
+  //
+  // Pipelined over 2 stages for 50 MHz timing closure (2026-09-25):
+  // crc32_blk processes one 8-byte half with no init/invert; S_SUBMIT
+  // registers the first half (bytes 0..7 = {DESC1,DESC0}) into
+  // crc_mid_q, S_CRC chains the second half (bytes 8..15 =
+  // {EPOCH,REQ_LO}) and compares ~result against DESC_CRC. Chained
+  // halves are bit-identical to the single 16-byte pass (same
+  // polynomial, same LSB-first byte order); only the commit latency
+  // grows by 1 cycle (see rtl/README.md).
+  function [31:0] crc32_blk;
+    input [31:0] crc_in;
+    input [63:0] data;
     reg [31:0] crc;
     integer i, j;
     begin
-      crc = 32'hFFFFFFFF;
-      for (i = 0; i < 16; i = i + 1) begin
+      crc = crc_in;
+      for (i = 0; i < 8; i = i + 1) begin
         crc = crc ^ {24'h000000, data[i*8 +: 8]};
         for (j = 0; j < 8; j = j + 1) begin
           if (crc[0])
@@ -253,48 +294,257 @@ module durable_tid_v0 #(
             crc = (crc >> 1);
         end
       end
-      crc32_ieee = ~crc;
+      crc32_blk = crc;
     end
   endfunction
 
-  wire [127:0] crc_data_lat  = {lat_ep, lat_req, lat_d1, lat_d0};
-  wire [31:0]  crc_lat       = crc32_ieee(crc_data_lat);
+  wire [31:0] crc_mid_comb = crc32_blk(32'hFFFFFFFF, {lat_d1, lat_d0});
+  wire [31:0] crc_fin_comb = crc32_blk(crc_mid_q, {lat_ep, lat_req});
 
   localparam [1:0] COMMIT_HOLD_INIT = COMMIT_LATENCY;
 
-  // Combinational read mux.
+  // Read datapath, registered in 2 stages (timing closure,
+  // 2026-09-25): stage 1 (clocked block) registers address+read; the
+  // mux below selects from the STABLE stage-1 address; stage 2
+  // registers the selected word into avs_readdata with
+  // avs_readdatavalid delayed to match. Map, byte order, and values
+  // are unchanged -- only the latency grows (2 cycles after request).
   always @(*) begin
-    case (widx)
-      W_EPOCH:    avs_readdata = epoch;
-      W_REQ_LO:   avs_readdata = req_lo;
-      W_PEND_LO:  avs_readdata = pending[31:0];
-      W_DUR_LO:   avs_readdata = durable[31:0];
-      W_VIS_LO:   avs_readdata = visible[31:0];
-      W_FSM:      avs_readdata = {30'h00000000, state};
-      W_ERROR:    avs_readdata = error;
-      W_PROG:     avs_readdata = progress_cnt;
-      W_RSTCNT:   avs_readdata = reset_cnt;
-      W_CTRL:     avs_readdata = ctrl;
-      W_STATUS:   avs_readdata = {28'h0000000, busy_o, crc_ok_last,
-                                  complete_sticky, busy_o};
-      W_DESC0:    avs_readdata = desc0;
-      W_DESC1:    avs_readdata = desc1;
-      W_DESC_CRC: avs_readdata = desc_crc;
-      W_CRC_CALC: avs_readdata = crc_calc;
-      W_TID_LO:   avs_readdata = tid_last[31:0];
-      W_TID_HI:   avs_readdata = tid_last[63:32];
-      W_REQ_HI:   avs_readdata = req_hi;
-      W_DUR_HI:   avs_readdata = durable[63:32];
-      W_VIS_HI:   avs_readdata = visible[63:32];
-      W_PEND_HI:  avs_readdata = pending[63:32];
-      W_MAGIC:    avs_readdata = MAGIC_VAL;
-      W_VERSION:  avs_readdata = VERSION_VAL;
-      default:    avs_readdata = 32'h00000000;
+    case (rd_addr_q)
+      W_EPOCH:    rd_mux = epoch;
+      W_REQ_LO:   rd_mux = req_lo;
+      W_PEND_LO:  rd_mux = pending[31:0];
+      W_DUR_LO:   rd_mux = durable[31:0];
+      W_VIS_LO:   rd_mux = visible[31:0];
+      W_FSM:      rd_mux = {29'd0, state};
+      W_ERROR:    rd_mux = error;
+      W_PROG:     rd_mux = progress_cnt;
+      W_RSTCNT:   rd_mux = reset_cnt;
+      W_CTRL:     rd_mux = ctrl;
+      W_STATUS:   rd_mux = {28'h0000000, busy_o, crc_ok_last,
+                            complete_sticky, busy_o};
+      W_DESC0:    rd_mux = desc0;
+      W_DESC1:    rd_mux = desc1;
+      W_DESC_CRC: rd_mux = desc_crc;
+      W_CRC_CALC: rd_mux = crc_calc;
+      W_TID_LO:   rd_mux = tid_last[31:0];
+      W_TID_HI:   rd_mux = tid_last[63:32];
+      W_REQ_HI:   rd_mux = req_hi;
+      W_DUR_HI:   rd_mux = durable[63:32];
+      W_VIS_HI:   rd_mux = visible[63:32];
+      W_PEND_HI:  rd_mux = pending[63:32];
+      W_MAGIC:    rd_mux = MAGIC_VAL;
+      W_VERSION:  rd_mux = VERSION_VAL;
+      default:    rd_mux = 32'h00000000;
     endcase
   end
 
-  // Sequential block. ctrl_n / err_n temps give single-assignment updates
-  // for registers driven from both the write decoder and the FSM.
+  // Next-state block: every *_n temp defaults to HOLD (`d = q`),
+  // then write/FSM logic overrides with new values (`d = new_val`).
+  // Single-assignment temps for registers driven from both the write
+  // decoder and the FSM (ctrl_n / err_n as before, extended to all).
+  always @(*) begin
+    epoch_n           = epoch;
+    req_lo_n          = req_lo;
+    req_hi_n          = req_hi;
+    tid_next_n        = tid_next;
+    pending_n         = pending;
+    durable_n         = durable;
+    visible_n         = visible;
+    tid_last_n        = tid_last;
+    state_n           = state;
+    ctrl_n            = ctrl;
+    err_n             = error;
+    req_full          = {req_hi, req_lo};
+    progress_cnt_n    = progress_cnt;
+    reset_cnt_n       = reset_cnt;
+    complete_sticky_n = complete_sticky;
+    crc_ok_last_n     = crc_ok_last;
+    desc0_n           = desc0;
+    desc1_n           = desc1;
+    desc_crc_n        = desc_crc;
+    crc_calc_n        = crc_calc;
+    crc_mid_n         = crc_mid_q;
+    commit_hold_n     = commit_hold;
+    readdata_n        = avs_readdata;
+    rd_addr_n         = rd_addr_q;
+    rd_en_n           = rd_en_q;
+    readdatavalid_n   = readdatavalid_q;
+    trusted_n         = trusted_q;
+    lat_d0_n          = lat_d0;
+    lat_d1_n          = lat_d1;
+    lat_req_n         = lat_req;
+    lat_ep_n          = lat_ep;
+    lat_crc_n         = lat_crc;
+    lat_tid_n         = lat_tid;
+
+    soft_rst = fsm_reset_i || (ctrl[1] && !wr_ctrl);
+
+    if (soft_rst) begin
+      // --- soft reset: park FSM, drop in-flight, keep history --------
+      // (second term: previously written CTRL.SOFT_RST bit still set).
+      // The read pipeline and pulse outputs HOLD (untouched, as before:
+      // the old clocked branch assigned nothing to them here either).
+      state_n       = S_IDLE;
+      ctrl_n        = 32'h00000000;
+      pending_n     = durable; // in-flight never surfaces as durable
+      reset_cnt_n   = reset_cnt + 32'h00000001;
+      commit_hold_n = 2'd0;
+      if (state == S_SUBMIT || state == S_CRC || state == S_COMMIT) begin
+        err_n[E_RSTMID] = 1'b1;
+        // Revoke the uncommitted TID handed out at accept time so a
+        // resubmit of the dropped descriptor is accepted under the SAME
+        // TID (recovery consistency). No underflow: SUBMIT/S_CRC/COMMIT
+        // are reachable only after an accept, implying tid_next >= 1.
+        tid_next_n = tid_next - 64'h0000000000000001;
+      end
+    end else begin
+      // --- read pipeline advances (frozen under soft reset above) ----
+      rd_addr_n       = widx;
+      rd_en_n         = avs_read;
+      readdata_n      = rd_mux;
+      readdatavalid_n = rd_en_q;
+      trusted_n       = 1'b0; // default: pulse only in COMPLETE
+
+      // --- register writes -------------------------------------------
+      if (wr_en) begin
+        case (widx)
+          W_EPOCH:    epoch_n    = (epoch    & ~wmask) | (avs_writedata & wmask);
+          W_REQ_LO:   req_lo_n   = (req_lo   & ~wmask) | (avs_writedata & wmask);
+          W_REQ_HI:   req_hi_n   = (req_hi   & ~wmask) | (avs_writedata & wmask);
+          W_DESC0:    desc0_n    = (desc0    & ~wmask) | (avs_writedata & wmask);
+          W_DESC1:    desc1_n    = (desc1    & ~wmask) | (avs_writedata & wmask);
+          W_DESC_CRC: desc_crc_n = (desc_crc & ~wmask) | (avs_writedata & wmask);
+          W_CTRL: begin
+            // Reserved bits never stick in the register (masked to the
+            // low 3), but setting them flags MALFORMED.
+            ctrl_n = ((ctrl_n & ~wmask) | (avs_writedata & wmask))
+                     & 32'h00000007;
+            if (|(avs_writedata & wmask & 32'hFFFFFFF8))
+              err_n[E_MALF] = 1'b1; // reserved CTRL bits written
+          end
+          W_ERROR:    err_n = err_n & ~(avs_writedata & wmask); // rw1c
+          default: begin
+            // read-only / unmapped: writes ignored, no side effect.
+          end
+        endcase
+        // NOTE: no same-cycle REQ fixup here on purpose. The HPS protocol
+        // (descriptor words first, CTRL.SUBMIT after) guarantees settled
+        // registers at accept time, and one Avalon write per cycle makes
+        // a same-cycle REQ+SUBMIT collision impossible. Validating the
+        // settled {req_hi,req_lo} keeps a colliding second submit from
+        // corrupting the accept check for the pending op.
+      end
+
+      // --- RECOVER strobe ---------------------------------------------
+      if (ctrl_n[2]) begin
+        complete_sticky_n = 1'b0;
+        ctrl_n[2]         = 1'b0;
+      end
+
+      // --- commit FSM ---------------------------------------------------
+      case (state)
+        S_IDLE: begin
+          if (ctrl[0] || wr_ctrl0) begin
+            // A submit is pending (previously latched) and/or arriving
+            // on this very cycle. Accept at most one; a collision is
+            // queue-full backpressure: accept the pending op, flag the
+            // redundant arrival, in-flight work unaffected.
+            ctrl_n[0] = 1'b0;
+            if (ctrl[0] && wr_ctrl0)
+              err_n[E_MALF] = 1'b1;
+            if (req_hi != tid_next[63:32]) begin
+              err_n[E_MALF] = 1'b1;  // high-half jump: malformed, not gap
+            end else if (req_full != tid_next) begin
+              if (req_full <= durable)
+                err_n[E_DUP] = 1'b1;  // duplicate / replay
+              else if (req_full > tid_next)
+                err_n[E_GAP] = 1'b1;  // same high half, ahead of allocator
+              else
+                err_n[E_DUP] = 1'b1;  // in-flight replay
+            end else if (&tid_next) begin
+              err_n[E_OVF] = 1'b1;    // allocator would wrap
+            end else begin
+              // Latch the submit image; validate in SUBMIT/S_CRC.
+              lat_d0_n  = desc0;
+              lat_d1_n  = desc1;
+              lat_req_n = req_lo;
+              lat_ep_n  = epoch;
+              lat_crc_n = desc_crc;
+              lat_tid_n = tid_next;
+              state_n   = S_SUBMIT;
+            end
+          end
+        end
+        S_SUBMIT: begin
+          // CRC stage 1: register the first-half CRC over bytes 0..7;
+          // the gate completes in S_CRC.
+          crc_mid_n = crc_mid_comb;
+          state_n   = S_CRC;
+          if (ctrl_n[0]) begin
+            ctrl_n[0]     = 1'b0;
+            err_n[E_MALF] = 1'b1; // submit-while-busy: rejected
+          end
+        end
+        S_CRC: begin
+          // CRC stage 2: chain bytes 8..15 and gate on the full CRC.
+          crc_calc_n = ~crc_fin_comb;
+          if (ctrl_n[0]) begin
+            ctrl_n[0]     = 1'b0;
+            err_n[E_MALF] = 1'b1; // submit-while-busy: rejected
+          end
+          if (~crc_fin_comb == lat_crc) begin
+            crc_ok_last_n = 1'b1;
+            // Watermarks are COUNTS (highest durable TID + 1): the accepted
+            // TID lat_tid surfaces as lat_tid+1 in PENDING/DURABLE/VISIBLE,
+            // matching what the HPS harness oracle compares (count of
+            // committed ops). tid_last keeps the 0-based TID (see COMPLETE).
+            pending_n     = lat_tid + 64'h0000000000000001;
+            tid_next_n    = tid_next + 64'h0000000000000001;
+            commit_hold_n = COMMIT_HOLD_INIT;
+            state_n       = S_COMMIT;
+          end else begin
+            crc_ok_last_n = 1'b0;
+            err_n[E_CRC]  = 1'b1;
+            state_n       = S_IDLE;
+          end
+        end
+        S_COMMIT: begin
+          // Persistence barrier model. DURABLE advances here and only
+          // here; a soft reset in this state drops the op instead.
+          if (commit_hold == 2'd0) begin
+            durable_n = pending; // PERSISTENT(N) established
+            state_n   = S_COMPLETE;
+          end else begin
+            commit_hold_n = commit_hold - 2'd1;
+          end
+          if (ctrl_n[0]) begin
+            ctrl_n[0]     = 1'b0;
+            err_n[E_MALF] = 1'b1; // submit-while-busy: rejected
+          end
+        end
+        S_COMPLETE: begin
+          // TRUSTED_COMPLETE(N) asserted only with DURABLE == N already
+          // persistent (written in S_COMMIT the previous cycle(s)).
+          visible_n         = durable;
+          tid_last_n        = lat_tid; // 0-based TID; watermarks hold +1
+          complete_sticky_n = 1'b1;
+          progress_cnt_n    = progress_cnt + 32'h00000001;
+          trusted_n         = 1'b1;
+          state_n           = S_IDLE;
+          if (ctrl_n[0]) begin
+            ctrl_n[0]     = 1'b0;
+            err_n[E_MALF] = 1'b1; // submit-while-busy: rejected
+          end
+        end
+        default: begin
+          state_n = S_IDLE;
+        end
+      endcase
+    end
+  end
+
+  // Clocked block: unconditional D-mux loads ONLY (no inferred CE).
   always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
       epoch           <= 32'h00000000;
@@ -316,7 +566,11 @@ module durable_tid_v0 #(
       desc1           <= 32'h00000000;
       desc_crc        <= 32'h00000000;
       crc_calc        <= 32'h00000000;
+      crc_mid_q       <= 32'h00000000;
       commit_hold     <= 2'd0;
+      avs_readdata    <= 32'h00000000;
+      rd_addr_q       <= 10'h000;
+      rd_en_q         <= 1'b0;
       readdatavalid_q <= 1'b0;
       trusted_q       <= 1'b0;
       lat_d0          <= 32'h00000000;
@@ -326,161 +580,38 @@ module durable_tid_v0 #(
       lat_crc         <= 32'h00000000;
       lat_tid         <= 64'h0000000000000000;
     end else begin
-      // Blocking temps (module scope for Verilog-2001): exactly one
-      // nonblocking update each at block end.
-      ctrl_n   = ctrl;
-      err_n    = error;
-      req_full = {req_hi, req_lo};
-
-      readdatavalid_q <= avs_read;
-      trusted_q       <= 1'b0; // default: pulse only in COMPLETE
-
-      if (fsm_reset_i || (ctrl[1] && !wr_ctrl)) begin
-        // --- soft reset: park FSM, drop in-flight, keep history --------
-        // (second term: previously written CTRL.SOFT_RST bit still set)
-        state           <= S_IDLE;
-        ctrl_n          = 32'h00000000;
-        pending         <= durable; // in-flight never surfaces as durable
-        reset_cnt       <= reset_cnt + 32'h00000001;
-        commit_hold     <= 2'd0;
-        if (state == S_SUBMIT || state == S_COMMIT) begin
-          err_n[E_RSTMID] = 1'b1;
-          // Revoke the uncommitted TID handed out at accept time so a
-          // resubmit of the dropped descriptor is accepted under the SAME
-          // TID (recovery consistency). No underflow: SUBMIT/COMMIT are
-          // reachable only after an accept, which implies tid_next >= 1.
-          tid_next <= tid_next - 64'h0000000000000001;
-        end
-      end else begin
-        // --- register writes -------------------------------------------
-        if (wr_en) begin
-          case (widx)
-            W_EPOCH:    epoch    <= (epoch    & ~wmask) | (avs_writedata & wmask);
-            W_REQ_LO:   req_lo   <= (req_lo   & ~wmask) | (avs_writedata & wmask);
-            W_REQ_HI:   req_hi   <= (req_hi   & ~wmask) | (avs_writedata & wmask);
-            W_DESC0:    desc0    <= (desc0    & ~wmask) | (avs_writedata & wmask);
-            W_DESC1:    desc1    <= (desc1    & ~wmask) | (avs_writedata & wmask);
-            W_DESC_CRC: desc_crc <= (desc_crc & ~wmask) | (avs_writedata & wmask);
-            W_CTRL: begin
-              // Reserved bits never stick in the register (masked to the
-              // low 3), but setting them flags MALFORMED.
-              ctrl_n = ((ctrl_n & ~wmask) | (avs_writedata & wmask))
-                       & 32'h00000007;
-              if (|(avs_writedata & wmask & 32'hFFFFFFF8))
-                err_n[E_MALF] = 1'b1; // reserved CTRL bits written
-            end
-            W_ERROR:    err_n = err_n & ~(avs_writedata & wmask); // rw1c
-            default: begin
-              // read-only / unmapped: writes ignored, no side effect.
-            end
-          endcase
-          // NOTE: no same-cycle REQ fixup here on purpose. The HPS protocol
-          // (descriptor words first, CTRL.SUBMIT after) guarantees settled
-          // registers at accept time, and one Avalon write per cycle makes
-          // a same-cycle REQ+SUBMIT collision impossible. Validating the
-          // settled {req_hi,req_lo} keeps a colliding second submit from
-          // corrupting the accept check for the pending op.
-        end
-
-        // --- RECOVER strobe ---------------------------------------------
-        if (ctrl_n[2]) begin
-          complete_sticky <= 1'b0;
-          ctrl_n[2]        = 1'b0;
-        end
-
-        // --- commit FSM ---------------------------------------------------
-        case (state)
-          S_IDLE: begin
-            if (ctrl[0] || wr_ctrl0) begin
-              // A submit is pending (previously latched) and/or arriving
-              // on this very cycle. Accept at most one; a collision is
-              // queue-full backpressure: accept the pending op, flag the
-              // redundant arrival, in-flight work unaffected.
-              ctrl_n[0] = 1'b0;
-              if (ctrl[0] && wr_ctrl0)
-                err_n[E_MALF] = 1'b1;
-              if (req_hi != tid_next[63:32]) begin
-                err_n[E_MALF] = 1'b1;  // high-half jump: malformed, not gap
-              end else if (req_full != tid_next) begin
-                if (req_full <= durable)
-                  err_n[E_DUP] = 1'b1;  // duplicate / replay
-                else if (req_full > tid_next)
-                  err_n[E_GAP] = 1'b1;  // same high half, ahead of allocator
-                else
-                  err_n[E_DUP] = 1'b1;  // in-flight replay
-              end else if (&tid_next) begin
-                err_n[E_OVF] = 1'b1;    // allocator would wrap
-              end else begin
-                // Latch the submit image; validate in SUBMIT.
-                lat_d0  <= desc0;
-                lat_d1  <= desc1;
-                lat_req <= req_lo;
-                lat_ep  <= epoch;
-                lat_crc <= desc_crc;
-                lat_tid <= tid_next;
-                state   <= S_SUBMIT;
-              end
-            end
-          end
-          S_SUBMIT: begin
-            // Integrity gate: CRC-32/IEEE over the latched descriptor.
-            crc_calc    <= crc_lat;
-            if (ctrl_n[0]) begin
-              ctrl_n[0]     = 1'b0;
-              err_n[E_MALF] = 1'b1; // submit-while-busy: rejected
-            end
-            if (crc_lat == lat_crc) begin
-              crc_ok_last <= 1'b1;
-              // Watermarks are COUNTS (highest durable TID + 1): the accepted
-              // TID lat_tid surfaces as lat_tid+1 in PENDING/DURABLE/VISIBLE,
-              // matching what the HPS harness oracle compares (count of
-              // committed ops). tid_last keeps the 0-based TID (see COMPLETE).
-              pending     <= lat_tid + 64'h0000000000000001;
-              tid_next    <= tid_next + 64'h0000000000000001;
-              commit_hold <= COMMIT_HOLD_INIT;
-              state       <= S_COMMIT;
-            end else begin
-              crc_ok_last <= 1'b0;
-              err_n[E_CRC] = 1'b1;
-              state       <= S_IDLE;
-            end
-          end
-          S_COMMIT: begin
-            // Persistence barrier model. DURABLE advances here and only
-            // here; a soft reset in this state drops the op instead.
-            if (commit_hold == 2'd0) begin
-              durable <= pending; // PERSISTENT(N) established
-              state   <= S_COMPLETE;
-            end else begin
-              commit_hold <= commit_hold - 2'd1;
-            end
-            if (ctrl_n[0]) begin
-              ctrl_n[0]     = 1'b0;
-              err_n[E_MALF] = 1'b1; // submit-while-busy: rejected
-            end
-          end
-          S_COMPLETE: begin
-            // TRUSTED_COMPLETE(N) asserted only with DURABLE == N already
-            // persistent (written in S_COMMIT the previous cycle(s)).
-            visible         <= durable;
-            tid_last        <= lat_tid; // 0-based TID; watermarks hold +1
-            complete_sticky <= 1'b1;
-            progress_cnt    <= progress_cnt + 32'h00000001;
-            trusted_q       <= 1'b1;
-            state           <= S_IDLE;
-            if (ctrl_n[0]) begin
-              ctrl_n[0]     = 1'b0;
-              err_n[E_MALF] = 1'b1; // submit-while-busy: rejected
-            end
-          end
-          default: begin
-            state <= S_IDLE;
-          end
-        endcase
-      end
-
-      ctrl  <= ctrl_n;
-      error <= err_n & 32'h0000003F; // reserved error bits always read 0
+      epoch           <= epoch_n;
+      req_lo          <= req_lo_n;
+      req_hi          <= req_hi_n;
+      tid_next        <= tid_next_n;
+      pending         <= pending_n;
+      durable         <= durable_n;
+      visible         <= visible_n;
+      tid_last        <= tid_last_n;
+      state           <= state_n;
+      error           <= err_n & 32'h0000003F; // reserved bits read 0
+      progress_cnt    <= progress_cnt_n;
+      reset_cnt       <= reset_cnt_n;
+      ctrl            <= ctrl_n;
+      complete_sticky <= complete_sticky_n;
+      crc_ok_last     <= crc_ok_last_n;
+      desc0           <= desc0_n;
+      desc1           <= desc1_n;
+      desc_crc        <= desc_crc_n;
+      crc_calc        <= crc_calc_n;
+      crc_mid_q       <= crc_mid_n;
+      commit_hold     <= commit_hold_n;
+      avs_readdata    <= readdata_n;
+      rd_addr_q       <= rd_addr_n;
+      rd_en_q         <= rd_en_n;
+      readdatavalid_q <= readdatavalid_n;
+      trusted_q       <= trusted_n;
+      lat_d0          <= lat_d0_n;
+      lat_d1          <= lat_d1_n;
+      lat_req         <= lat_req_n;
+      lat_ep          <= lat_ep_n;
+      lat_crc         <= lat_crc_n;
+      lat_tid         <= lat_tid_n;
     end
   end
 

@@ -17,7 +17,9 @@
 // Exit banner is `$display PASS/FAIL` + `$finish`.
 //
 // NOTE: this TB assumes the default COMMIT_LATENCY=2 for the reset
-// mid-commit injection window (see TEST 6).
+// mid-commit injection window (see TEST 6). The pipelined DUT inserts
+// one S_CRC cycle between SUBMIT and COMMIT, so TEST 6 waits three
+// posedges (not two) after the submit write to land in COMMIT hold.
 
 `timescale 1ns / 1ps
 
@@ -162,7 +164,11 @@ module durable_tid_v0_tb;
     end
   end
 
-  // Avalon-MM single-cycle helpers (drive on negedge, DUT samples posedge).
+  // Avalon-MM helpers (drive on negedge, DUT samples posedge).
+  // Reads are REGISTERED (2-cycle latency: address+read registered,
+  // then the word): after deasserting avs_read, wait 3 posedges so the
+  // registered word is stable, then sample (the data register holds,
+  // so no validity race).
   task mm_write(input [11:0] addr, input [31:0] data);
     begin
       @(negedge clk);
@@ -182,7 +188,11 @@ module durable_tid_v0_tb;
       avs_read    = 1'b1;
       @(negedge clk);
       avs_read    = 1'b0;
-      data        = avs_readdata; // mux is combinational; addr still held
+      @(posedge clk);
+      @(posedge clk);
+      @(posedge clk);
+      #1;
+      data        = avs_readdata; // registered word; addr path long settled
     end
   endtask
 
@@ -415,9 +425,12 @@ module durable_tid_v0_tb;
       mm_write(A_REQ_HI, 32'h00000000);
       mm_write(A_DESC_CRC, crc9);
       mm_write(A_CTRL, CTRL_SUBMIT);
-      // Two posedges after the submit write returns: SUBMIT entry, then
-      // COMMIT entry. Assert reset across the next posedge (COMMIT hold).
-      // Negedge-driven so the pulse covers exactly one sampling posedge.
+      // Three posedges after the submit write returns: SUBMIT entry,
+      // S_CRC entry, then COMMIT entry (the pipelined CRC inserts one
+      // S_CRC cycle vs the old SUBMIT->COMMIT path). Assert reset
+      // across the next posedge (COMMIT hold). Negedge-driven so the
+      // pulse covers exactly one sampling posedge.
+      @(posedge clk);
       @(posedge clk);
       @(posedge clk);
       @(negedge clk);

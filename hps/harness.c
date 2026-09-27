@@ -24,6 +24,18 @@
  *   ./harness diff  <N> [seed]  seeded differential mix:
  *                               good/dup/gap/malformed(DUT-level)/reads
  *                               FIRST mismatch stops, dumps transcript.
+ *   Burst path (CMD 0x05 / RSP 0x85, spec in rtl/README.md + dut_uart.v):
+ *   ./harness burst <N> [seed]  seeded burst differential: N total submits
+ *                               in frames of randomized COUNT 1..64, entry
+ *                               mix good/dup/gap/badcrc; per-entry result
+ *                               bytes oracle-checked (CODE + no-cascade
+ *                               continue), FIRST mismatch stops.
+ *   ./harness burstmax          one COUNT=64 all-good max frame (1029 B CMD)
+ *   ./harness burstdrop         one bad-checksum burst: silent drop, link
+ *                               alive, watermark unmoved.
+ *
+ * Single-submit frames stay byte-identical (0x05 is the next free CMD;
+ * RSP keeps the CMD|0x80 convention).
  */
 
 #include <errno.h>
@@ -49,11 +61,15 @@
 #define CMD_READ  0x02u
 #define CMD_RESET 0x03u
 #define CMD_PING  0x04u
+#define CMD_BURST 0x05u
 
 #define RSP_WRITE 0x81u
 #define RSP_READ  0x82u
 #define RSP_RESET 0x83u
 #define RSP_PING  0x84u
+#define RSP_BURST 0x85u
+
+#define BURST_MAX_N 64u
 
 /* ---- DUT byte offsets (must match rtl/durable_tid_v0.v header) ---- */
 #define R_EPOCH    0x00u
@@ -631,6 +647,468 @@ static int vec_read(uint64_t next, unsigned opno)
     return 0;
 }
 
+/* ---- burst path (CMD_BURST 0x05 / RSP_BURST 0x85) ----
+ * Frame builder + RSP parser + batch oracle. The single-submit path above
+ * is untouched (byte-identical frames).
+ *
+ * Entry mix note: a well-formed burst entry carries only
+ * {REQ_LO,DESC0,DESC1,DESC_CRC} -- the bridge pins REQ_HI=0, CTRL=1 and
+ * settles past the commit pipeline per entry, so result CODEs 4
+ * (MALFORMED) and 5 (OVERFLOW) are unreachable by construction. The
+ * generator exercises CODEs 0 (commit) / 1 (CRC_ERR) / 2 (DUP_SEQ) /
+ * 3 (GAP_SEQ); the parser accepts 0..5 and rejects 6..7 + any
+ * COMMITTED/REJECT/CODE inconsistency. */
+
+/* Entry kinds for the burst differential mix. */
+enum {
+    BK_GOOD = 0, /* req == live next, correct CRC -> COMMITTED CODE 0 */
+    BK_DUP = 1, /* req < live next -> REJECT CODE 2 (checked pre-CRC) */
+    BK_GAP = 2, /* req > live next -> REJECT CODE 3 (checked pre-CRC) */
+    BK_BADCRC = 3 /* req == live next, corrupt CRC -> REJECT CODE 1 */
+};
+
+struct b_entry {
+    uint32_t req, d0, d1, crc;
+    int kind;
+};
+
+/* Build a burst CMD frame into out (caller provides 5+16*64 bytes).
+ * Layout: [MAGIC0][MAGIC1][0x05][COUNT] + N x 16 B entries
+ * (REQ_LO,DESC0,DESC1,DESC_CRC, each LE) + [CHK]. Returns frame length. */
+static size_t burst_build(uint8_t n, const struct b_entry *e, uint8_t *out)
+{
+    size_t i, j, k, len;
+    unsigned sum = (unsigned)CMD_BURST + (unsigned)n;
+    out[0] = M_MAGIC0;
+    out[1] = M_MAGIC1;
+    out[2] = CMD_BURST;
+    out[3] = n;
+    for (i = 0; i < n; i++) {
+        uint32_t w[4];
+        w[0] = e[i].req;
+        w[1] = e[i].d0;
+        w[2] = e[i].d1;
+        w[3] = e[i].crc;
+        for (j = 0; j < 4; j++) {
+            for (k = 0; k < 4; k++) {
+                uint8_t b = (uint8_t)((w[j] >> (8 * k)) & 0xFFu);
+                out[4 + i * 16 + j * 4 + k] = b;
+                sum += b;
+            }
+        }
+    }
+    len = (size_t)4 + (size_t)n * 16u;
+    out[len] = (uint8_t)(sum & 0xFFu);
+    return len + 1;
+}
+
+/* Read + validate one BURST-RSP for COUNT n (results holds 64 bytes).
+ * Returns 0 on a fully validated RSP, -1 timeout/short, -2 framing,
+ * -3 checksum, -4 wrong RSP code / COUNT echo, -5 invalid result byte. */
+static int rsp_burst(uint8_t n, uint8_t *results, uint64_t *dur,
+                     unsigned timeout_ms)
+{
+    /* Max RSP: 13 + 64 bytes. */
+    uint8_t f[13 + 64];
+    size_t want = (size_t)13 + (size_t)n, got = 0, i;
+    uint64_t deadline = now_ms() + timeout_ms;
+    uint32_t lo, hi;
+    unsigned sum;
+    while (got < want) {
+        ssize_t r = read(g_fd, f + got, want - got);
+        if (r > 0) {
+            got += (size_t)r;
+            continue;
+        }
+        if (r < 0 && errno != EINTR && errno != EAGAIN) {
+            fprintf(stderr, "harness: uart read: %s\n",
+                    strerror(errno));
+            return -1;
+        }
+        if (now_ms() >= deadline)
+            break;
+        usleep(1000);
+    }
+    if (got != want)
+        return -1;
+    if (f[0] != M_MAGIC0 || f[1] != M_MAGIC1)
+        return -2;
+    if (f[2] != RSP_BURST || f[3] != n)
+        return -4;
+    sum = (unsigned)RSP_BURST + (unsigned)n;
+    for (i = 0; i < n; i++) {
+        uint8_t rb = f[4 + i];
+        unsigned committed = (unsigned)(rb & 1u);
+        unsigned reject = (unsigned)((rb >> 1) & 1u);
+        unsigned code = (unsigned)((rb >> 2) & 7u);
+        if ((rb >> 5) != 0)
+            return -5; /* reserved bits[7:5] must be 0 */
+        if (committed == reject)
+            return -5; /* COMMITTED / REJECT must be complementary */
+        if (code > 5)
+            return -5; /* CODE 6..7 reserved */
+        if ((code == 0) != (committed == 1))
+            return -5; /* CODE 0 iff COMMITTED */
+        sum += rb;
+    }
+    lo = (uint32_t)f[4 + n] | ((uint32_t)f[4 + n + 1] << 8) |
+         ((uint32_t)f[4 + n + 2] << 16) | ((uint32_t)f[4 + n + 3] << 24);
+    hi = (uint32_t)f[4 + n + 4] | ((uint32_t)f[4 + n + 5] << 8) |
+         ((uint32_t)f[4 + n + 6] << 16) | ((uint32_t)f[4 + n + 7] << 24);
+    sum += f[4 + n] + f[4 + n + 1] + f[4 + n + 2] + f[4 + n + 3] +
+           f[4 + n + 4] + f[4 + n + 5] + f[4 + n + 6] + f[4 + n + 7];
+    if ((uint8_t)(sum & 0xFFu) != f[4 + n + 8])
+        return -3;
+    memcpy(results, f + 4, n);
+    *dur = ((uint64_t)hi << 32) | lo;
+    return 0;
+}
+
+/* Send one burst frame, parse the RSP. Timeout scales with COUNT: the CMD
+ * alone is up to 1029 bytes (~90 ms at 115200) plus per-entry fabric feed. */
+static int u_burst(uint8_t n, const struct b_entry *e, uint8_t *results,
+                   uint64_t *dur)
+{
+    static uint8_t tx[5 + 16 * 64];
+    size_t len = burst_build(n, e, tx);
+    unsigned timeout = 2000u + (unsigned)n * 100u;
+    tcflush(g_fd, TCIFLUSH);
+    if (write_all(tx, len) != 0)
+        return -1;
+    return rsp_burst(n, results, dur, timeout);
+}
+
+/* Batch oracle: expected result byte for one burst entry against the live
+ * model (*sw_next = pre-burst durable == tid_next; runs stay < 2^32 so the
+ * high half is 0, matching the bridge-pinned REQ_HI=0).
+ *
+ * Mirrors DUT precedence (durable_tid_v0.v S_IDLE before S_CRC): the REQ
+ * window check precedes the CRC gate, so an off-window entry with a bad
+ * CRC still reports DUP/GAP. Mid-burst rejects record their code and the
+ * model CONTINUES (no cascade): only COMMITTED entries advance *sw_next. */
+static uint8_t burst_expect(uint64_t *sw_next, const struct b_entry *e,
+                            uint32_t epoch)
+{
+    unsigned code;
+    if ((uint64_t)e->req != *sw_next) {
+        /* DUT: req_full <= durable (== tid_next when idle) -> DUP,
+         * req_full > tid_next -> GAP. In-flight replay (between the two)
+         * is unreachable: the engine settles per entry. */
+        code = ((uint64_t)e->req < *sw_next) ? 2u : 3u;
+    } else if (e->crc != desc_crc(e->d0, e->d1, e->req, epoch)) {
+        code = 1u;
+    } else {
+        (*sw_next)++;
+        return 0x01u;
+    }
+    return (uint8_t)(0x02u | (code << 2));
+}
+
+static const char *bkind_name(int k)
+{
+    switch (k) {
+    case BK_GOOD:
+        return "GOOD";
+    case BK_DUP:
+        return "DUP";
+    case BK_GAP:
+        return "GAP";
+    default:
+        return "BADCRC";
+    }
+}
+
+/* ---- burst differential: N total submits in randomized 1..64 frames ---- */
+static int run_burst_diff(unsigned long total, uint32_t seed)
+{
+    static struct b_entry ents[BURST_MAX_N];
+    static uint8_t res[BURST_MAX_N], exp[BURST_MAX_N];
+    uint64_t base = 0, sw_next = 0, oline = 0, d = 0, v = 0, rsp_dur = 0;
+    uint32_t epoch = 0, err = 0;
+    unsigned long done = 0, nb = 0, c_commit = 0, c_code[6] = { 0, 0, 0,
+                                                                0, 0, 0 };
+    uint64_t t0, t1;
+    uint8_t i, n;
+    rng_state = (seed != 0) ? seed : 0x9E3779B9u;
+    if (u_write(R_EPOCH, g_epoch) != 0 || clear_errors() != 0 ||
+        u_read(R_EPOCH, &epoch) != 0 || epoch != g_epoch ||
+        read_durable(&base) != 0 || read_visible(&v) != 0) {
+        fprintf(stderr, "harness: burst diff setup failed\n");
+        return 1;
+    }
+    sw_next = base;
+    printf("harness: burst diff base d=%llu v=%llu epoch=%u seed=%u\n",
+           (unsigned long long)base, (unsigned long long)v, epoch,
+           rng_state);
+    t0 = now_ms();
+    while (done < total) {
+        uint64_t tmp;
+        int rc;
+        n = (uint8_t)(1u + rng_next() % BURST_MAX_N);
+        if ((unsigned long)n > total - done)
+            n = (uint8_t)(total - done);
+        /* Generate the seeded entry mix against a shadow model so GOOD
+         * REQs chain across mid-burst commits exactly like the DUT. */
+        tmp = sw_next;
+        for (i = 0; i < n; i++) {
+            uint32_t r = rng_next() % 100u;
+            uint32_t req;
+            if (r < 60) { /* good */
+                req = (uint32_t)tmp;
+                ents[i].req = req;
+                ents[i].d0 = 0xA0000000u | (req & 0x0FFFFFFFu);
+                ents[i].d1 = 0xB0000000u | (req & 0x0FFFFFFFu);
+                ents[i].crc = desc_crc(ents[i].d0, ents[i].d1, req,
+                                       epoch);
+                ents[i].kind = BK_GOOD;
+                tmp++;
+            } else if (r < 70) { /* dup (CRC value irrelevant: REQ
+                                  * checked first; send correct CRC) */
+                if (tmp == base) { /* no history: emit good instead */
+                    req = (uint32_t)tmp;
+                    ents[i].req = req;
+                    ents[i].d0 = 0xA0000000u | (req & 0x0FFFFFFFu);
+                    ents[i].d1 = 0xB0000000u | (req & 0x0FFFFFFFu);
+                    ents[i].crc = desc_crc(ents[i].d0, ents[i].d1,
+                                           req, epoch);
+                    ents[i].kind = BK_GOOD;
+                    tmp++;
+                } else {
+                    req = (uint32_t)(base +
+                                     (rng_next() %
+                                      (uint32_t)(tmp - base)));
+                    ents[i].req = req;
+                    ents[i].d0 = 0xA0A0A0A0u;
+                    ents[i].d1 = 0xB0B0B0B0u;
+                    ents[i].crc = desc_crc(ents[i].d0, ents[i].d1,
+                                           req, epoch);
+                    ents[i].kind = BK_DUP;
+                }
+            } else if (r < 78) { /* gap */
+                req = (uint32_t)tmp + 1u + (rng_next() % 4u);
+                ents[i].req = req;
+                ents[i].d0 = 0xC0C0C0C0u;
+                ents[i].d1 = 0xD0D0D0D0u;
+                ents[i].crc = desc_crc(ents[i].d0, ents[i].d1, req,
+                                       epoch);
+                ents[i].kind = BK_GAP;
+            } else { /* bad CRC on the live REQ */
+                req = (uint32_t)tmp;
+                ents[i].req = req;
+                ents[i].d0 = 0x11111111u ^ ((uint32_t)tmp << 8);
+                ents[i].d1 = 0x22222222u ^ (uint32_t)tmp;
+                ents[i].crc = ~desc_crc(ents[i].d0, ents[i].d1, req,
+                                        epoch);
+                ents[i].kind = BK_BADCRC;
+            }
+        }
+        /* Independent expectation pass over the software model. */
+        oline = sw_next;
+        for (i = 0; i < n; i++)
+            exp[i] = burst_expect(&oline, &ents[i], epoch);
+        rc = u_burst(n, ents, res, &rsp_dur);
+        if (rc != 0) {
+            fprintf(stderr,
+                    "harness: burst %lu MISMATCH: u_burst n=%u rc=%d"
+                    " (done=%lu base=%llu)\n",
+                    nb, n, rc, done, (unsigned long long)base);
+            tr_dump();
+            return 1;
+        }
+        for (i = 0; i < n; i++) {
+            if (res[i] != exp[i]) {
+                tr_log("burst %lu entry %u FIRST mismatch: kind=%s"
+                       " req=%u got=0x%02x(C=%u,CODE=%u)"
+                       " want=0x%02x(C=%u,CODE=%u)",
+                       nb, i, bkind_name(ents[i].kind), ents[i].req,
+                       res[i], res[i] & 1u, (res[i] >> 2) & 7u, exp[i],
+                       exp[i] & 1u, (exp[i] >> 2) & 7u);
+                fprintf(stderr,
+                        "harness: burst %lu entry %u FIRST mismatch:"
+                        " kind=%s req=%u got=0x%02x want=0x%02x"
+                        " (done=%lu)\n",
+                        nb, i, bkind_name(ents[i].kind), ents[i].req,
+                        res[i], exp[i], done);
+                tr_dump();
+                return 1;
+            }
+            if (res[i] == 0x01u) {
+                c_commit++;
+            } else {
+                unsigned code = (unsigned)((res[i] >> 2) & 7u);
+                if (code < 6)
+                    c_code[code]++;
+            }
+            tr_log("burst %lu entry %u %s req=%u res=0x%02x", nb, i,
+                   bkind_name(ents[i].kind), ents[i].req, res[i]);
+        }
+        if (rsp_dur != oline) {
+            fprintf(stderr,
+                    "harness: burst %lu MISMATCH: RSP watermark %llu,"
+                    " oracle %llu\n",
+                    nb, (unsigned long long)rsp_dur,
+                    (unsigned long long)oline);
+            tr_dump();
+            return 1;
+        }
+        /* Per-entry ERROR stickies are rw1c-cleared by the engine; only
+         * pre-burst stickies (0 here) may survive. */
+        if (u_read(R_ERROR, &err) != 0 || err != 0) {
+            fprintf(stderr,
+                    "harness: burst %lu MISMATCH: ERROR=0x%x after"
+                    " burst, want 0x0\n",
+                    nb, err);
+            tr_dump();
+            return 1;
+        }
+        if (read_durable(&d) != 0 || read_visible(&v) != 0 ||
+            oracle_compare(oline, d, oline, v) != 0) {
+            fprintf(stderr,
+                    "harness: burst %lu MISMATCH: oracle vs d=%llu"
+                    " v=%llu want %llu\n",
+                    nb, (unsigned long long)d,
+                    (unsigned long long)v,
+                    (unsigned long long)oline);
+            tr_dump();
+            return 1;
+        }
+        sw_next = oline;
+        {
+            unsigned long prev = done;
+            done += n;
+            nb++;
+            if (done / 500 != prev / 500)
+                printf("harness: burst diff %lu/%lu submits (%lu frames,"
+                       " %.1f ops/s)\n",
+                       done, total, nb,
+                       (1000.0 * (double)done) /
+                           (double)(now_ms() - t0 + 1));
+        }
+    }
+    t1 = now_ms();
+    if (read_durable(&d) != 0 || read_visible(&v) != 0)
+        return 1;
+    printf("harness: burst diff OK submits=%lu frames=%lu seed=%u"
+           " commit=%lu crc=%lu dup=%lu gap=%lu d=%llu v=%llu"
+           " %.1f ops/s\n",
+           done, nb, seed, c_commit, c_code[1], c_code[2], c_code[3],
+           (unsigned long long)d, (unsigned long long)v,
+           (1000.0 * (double)done) / (double)(t1 - t0 + 1));
+    return (oracle_compare(sw_next, d, sw_next, v) == 0) ? 0 : 1;
+}
+
+/* ---- burstmax: one COUNT=64 all-good max frame (1029-byte CMD) ---- */
+static int run_burst_max(void)
+{
+    static struct b_entry ents[BURST_MAX_N];
+    static uint8_t res[BURST_MAX_N];
+    uint64_t base = 0, d = 0, v = 0, rsp_dur = 0;
+    uint32_t epoch = 0, err = 0;
+    uint8_t i;
+    int rc;
+    if (u_write(R_EPOCH, g_epoch) != 0 || clear_errors() != 0 ||
+        u_read(R_EPOCH, &epoch) != 0 || epoch != g_epoch ||
+        read_durable(&base) != 0) {
+        fprintf(stderr, "harness: burstmax setup failed\n");
+        return 1;
+    }
+    for (i = 0; i < BURST_MAX_N; i++) {
+        uint32_t req = (uint32_t)(base + i);
+        ents[i].req = req;
+        ents[i].d0 = 0xA0000000u | (req & 0x0FFFFFFFu);
+        ents[i].d1 = 0xB0000000u | (req & 0x0FFFFFFFu);
+        ents[i].crc = desc_crc(ents[i].d0, ents[i].d1, req, epoch);
+        ents[i].kind = BK_GOOD;
+    }
+    rc = u_burst(BURST_MAX_N, ents, res, &rsp_dur);
+    if (rc != 0) {
+        fprintf(stderr, "harness: burstmax: u_burst rc=%d\n", rc);
+        return 1;
+    }
+    for (i = 0; i < BURST_MAX_N; i++) {
+        if (res[i] != 0x01u) {
+            fprintf(stderr,
+                    "harness: burstmax: entry %u res=0x%02x, want 0x01\n",
+                    i, res[i]);
+            return 1;
+        }
+    }
+    if (rsp_dur != base + BURST_MAX_N) {
+        fprintf(stderr,
+                "harness: burstmax: RSP watermark %llu, want %llu\n",
+                (unsigned long long)rsp_dur,
+                (unsigned long long)(base + BURST_MAX_N));
+        return 1;
+    }
+    if (u_read(R_ERROR, &err) != 0 || err != 0) {
+        fprintf(stderr, "harness: burstmax: ERROR=0x%x, want 0x0\n",
+                err);
+        return 1;
+    }
+    if (read_durable(&d) != 0 || read_visible(&v) != 0 ||
+        d != base + BURST_MAX_N || v != base + BURST_MAX_N) {
+        fprintf(stderr,
+                "harness: burstmax: d=%llu v=%llu, want %llu\n",
+                (unsigned long long)d, (unsigned long long)v,
+                (unsigned long long)(base + BURST_MAX_N));
+        return 1;
+    }
+    printf("harness: burstmax OK n=64 base=%llu d=%llu v=%llu\n",
+           (unsigned long long)base, (unsigned long long)d,
+           (unsigned long long)v);
+    return 0;
+}
+
+/* ---- burstdrop: one bad-checksum burst commits nothing, link alive ---- */
+static int run_burst_drop(void)
+{
+    static struct b_entry ents[3];
+    static uint8_t tx[5 + 16 * 3], res[3];
+    uint64_t base = 0, d = 0, rsp_dur = 0;
+    uint32_t epoch = 0, pv = 0;
+    uint8_t i;
+    size_t len;
+    int rc;
+    if (u_write(R_EPOCH, g_epoch) != 0 || clear_errors() != 0 ||
+        u_read(R_EPOCH, &epoch) != 0 || read_durable(&base) != 0) {
+        fprintf(stderr, "harness: burstdrop setup failed\n");
+        return 1;
+    }
+    for (i = 0; i < 3; i++) {
+        uint32_t req = (uint32_t)(base + i);
+        ents[i].req = req;
+        ents[i].d0 = 0xA0000000u | (req & 0x0FFFFFFFu);
+        ents[i].d1 = 0xB0000000u | (req & 0x0FFFFFFFu);
+        ents[i].crc = desc_crc(ents[i].d0, ents[i].d1, req, epoch);
+        ents[i].kind = BK_GOOD;
+    }
+    len = burst_build(3, ents, tx);
+    tx[len - 1] = (uint8_t)(tx[len - 1] + 1u); /* corrupt CHK */
+    tcflush(g_fd, TCIFLUSH);
+    if (write_all(tx, len) != 0)
+        return 1;
+    rc = rsp_burst(3, res, &rsp_dur, SILENCE_MS);
+    if (rc == 0) {
+        fprintf(stderr,
+                "harness: burstdrop: bad-checksum burst got a response\n");
+        return 1;
+    }
+    printf("harness: bad-checksum burst silently dropped (rc=%d)\n", rc);
+    if (read_durable(&d) != 0 || d != base) {
+        fprintf(stderr,
+                "harness: burstdrop: durable moved to %llu, want %llu\n",
+                (unsigned long long)d, (unsigned long long)base);
+        return 1;
+    }
+    if (u_ping(&pv) != 0) {
+        fprintf(stderr, "harness: burstdrop: link dead after drop\n");
+        return 1;
+    }
+    printf("harness: burstdrop OK d=%llu link alive\n",
+           (unsigned long long)d);
+    return 0;
+}
+
 /* ---- smoke: N good submits ---- */
 static int run_smoke(unsigned long n)
 {
@@ -752,7 +1230,8 @@ static int run_diff(unsigned long n, uint32_t seed)
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [-t tty] <ping|magic|read|write|reset|smoke|diff>"
+            "usage: %s [-t tty] <ping|magic|read|write|reset|smoke|diff|"
+            "burst|burstmax|burstdrop>"
             " [args...]\n"
             "  ping                  PING round trip (PONG + VERSION 0)\n"
             "  magic                 read MAGIC + VERSION\n"
@@ -762,6 +1241,12 @@ static void usage(const char *argv0)
             "  smoke <N>             N good submits, oracle-checked\n"
             "  diff  <N> [seed]      seeded differential mix (good/dup/gap/\n"
             "                        malformed/reads); FIRST mismatch stops\n"
+            "  burst <N> [seed]      seeded burst differential (N submits in\n"
+            "                        randomized 1..64 frames, good/dup/gap/\n"
+            "                        badcrc entries); FIRST mismatch stops\n"
+            "  burstmax              one COUNT=64 all-good max frame\n"
+            "  burstdrop             one bad-checksum burst: silent drop,\n"
+            "                        watermark held, link alive\n"
             "  default tty: " UART_PATH " @115200-8-N-1\n",
             argv0);
 }
@@ -851,6 +1336,27 @@ int main(int argc, char **argv)
         if (sanity() != 0)
             return 1;
         return run_diff(n, seed);
+    } else if (strcmp(cmd, "burst") == 0) {
+        unsigned long n;
+        uint32_t seed = 0xC0FFEEu;
+        if (ai + 1 >= argc) {
+            usage(argv[0]);
+            return 2;
+        }
+        if (ai + 2 < argc)
+            seed = (uint32_t)strtoul(argv[ai + 2], NULL, 0);
+        n = strtoul(argv[ai + 1], NULL, 0);
+        if (sanity() != 0)
+            return 1;
+        return run_burst_diff(n, seed);
+    } else if (strcmp(cmd, "burstmax") == 0) {
+        if (sanity() != 0)
+            return 1;
+        return run_burst_max();
+    } else if (strcmp(cmd, "burstdrop") == 0) {
+        if (sanity() != 0)
+            return 1;
+        return run_burst_drop();
     } else {
         usage(argv[0]);
         return 2;

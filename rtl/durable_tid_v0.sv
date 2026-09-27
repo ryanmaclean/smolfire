@@ -106,12 +106,10 @@
 // Reset semantics: hard reset (reset_n) zeroes everything. Soft reset
 // (fsm_reset_i or CTRL.SOFT_RST) parks the FSM in IDLE, sets
 // PENDING=DURABLE (in-flight dropped, never surfaced as durable), preserves
-// EPOCH/DURABLE/VISIBLE, and REVOKES the uncommitted TID (tid_next - 1):
-// the allocator had already handed that TID out at accept time, but since
-// the op never reached DURABLE the TID is returned so that resubmitting
-// the interrupted descriptor commits under the SAME TID (recovery
-// consistency, same-TID resubmit). No-op while IDLE/COMPLETE (no TID
-// outstanding there).
+// EPOCH/DURABLE/VISIBLE. In COMMIT it REVOKES the allocated, uncommitted
+// TID (tid_next - 1). In SUBMIT/S_CRC allocation has not advanced yet, so
+// tid_next is preserved. In either case the interrupted descriptor can
+// retry under the SAME TID. Allocation is unchanged in IDLE/COMPLETE.
 // ---------------------------------------------------------------------------
 
 `timescale 1ns / 1ps
@@ -384,11 +382,13 @@ module durable_tid_v0 #(
       commit_hold_n = 2'd0;
       if (state == S_SUBMIT || state == S_CRC || state == S_COMMIT) begin
         err_n[E_RSTMID] = 1'b1;
-        // Revoke the uncommitted TID handed out at accept time so a
-        // resubmit of the dropped descriptor is accepted under the SAME
-        // TID (recovery consistency). No underflow: SUBMIT/S_CRC/COMMIT
-        // are reachable only after an accept, implying tid_next >= 1.
-        tid_next_n = tid_next - 64'h0000000000000001;
+        // Allocation advances only on CRC success, entering COMMIT.
+        // SUBMIT/S_CRC have not allocated: decrementing there would
+        // retreat an existing ID or underflow the first operation's 0.
+        // Revoke only the allocated, not-yet-durable COMMIT operation
+        // so its identical retry retains the same TID.
+        if (state == S_COMMIT)
+          tid_next_n = tid_next - 64'h0000000000000001;
       end
     end else begin
       // --- read pipeline advances (frozen under soft reset above) ----

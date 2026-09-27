@@ -19,9 +19,33 @@
  *
  * Output: SMOLFIRE_METRIC key=value lines (integers) for bin/bench-record.nu,
  * then a JSON object with the same numbers on stdout.
+ *
+ * Fault-injection hooks (#88, driven by hps/durable_fault_harness.c). All are
+ * off by default; with none given the timed loop is the #86 loop.
+ *   --ack-fd N        after publish, write the 8-byte seq to fd N (the
+ *                     "acknowledged as durable" channel the controller trusts)
+ *   --phase-fd N      mmap fd N (memfd) and store {phase, chunk, seq} at every
+ *                     phase boundary (plain stores, async-signal-safe) so the
+ *                     controller can attribute an external SIGKILL to a phase
+ *   --stop-at P:OP[:C] raise(SIGSTOP) at boundary P of op OP (0-based, this run),
+ *                     after chunk C for P=append-mid; the controller then
+ *                     sends SIGKILL, i.e. kill -9 at an exact boundary
+ *   --split K         write each record in K pwrite() chunks (torn-write window)
+ *   --fail P:OP:ERRNO pretend the append (after writing half the record) or
+ *                     durable syscall of op OP failed with ERRNO
+ *   --sync-retry      after an append/durable error, call fdatasync() again and
+ *                     report its result (fsyncgate probe), then exit 3
+ *   --repair          after recovery, truncate the log to durable_seq*recsize
+ *                     and fsync, so no torn/partial bytes remain past it
+ *   --mutate M        deliberately broken writer, used only to prove the #88
+ *                     oracle catches bugs: ack-early (ack before the append),
+ *                     no-repair (--repair becomes a no-op)
+ * On an I/O error the writer prints one SMOLFIRE_FAULT line to stderr, never
+ * acks the failed seq, and exits 3.
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdint.h>
@@ -65,6 +89,43 @@ static inline uint64_t now_ns(clockid_t c)
     struct timespec ts;
     clock_gettime(c, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* --- fault-injection hooks (#88); inert unless enabled on the command line --- */
+enum { PH_START, PH_RECOVER, PH_CONSTRUCT, PH_CONSTRUCT_MID, PH_APPEND, PH_APPEND_MID,
+       PH_DURABLE, PH_PUBLISH, PH_ACK, PH_DONE, PH_N };
+static const char *const ph_name[PH_N] = { "start", "recover", "construct", "construct-mid", "append",
+    "append-mid", "durable", "publish", "ack", "done" };
+struct phase_page { uint32_t phase, chunk; uint64_t seq, acked; };
+static struct phase_page *pp;            /* NULL unless --phase-fd */
+static int stop_ph = -1, fail_ph = -1, fail_errno = 0;
+static long stop_op = -1, stop_chunk = 1, fail_op = -1, cur_op = -1;
+
+static inline void at(int ph, uint32_t chunk, uint64_t seq)
+{
+    if (pp) {
+        __atomic_store_n(&pp->seq, seq, __ATOMIC_RELAXED);
+        __atomic_store_n(&pp->chunk, chunk, __ATOMIC_RELAXED);
+        __atomic_store_n(&pp->phase, (uint32_t)ph, __ATOMIC_RELEASE);
+    }
+    if (ph == stop_ph && cur_op == stop_op && (ph != PH_APPEND_MID || (long)chunk == stop_chunk))
+        raise(SIGSTOP); /* async-signal-safe; controller SIGKILLs us while stopped */
+}
+
+static int ph_lookup(const char *s, size_t n)
+{
+    for (int i = 0; i < PH_N; i++)
+        if (strlen(ph_name[i]) == n && !strncmp(ph_name[i], s, n)) return i;
+    return -1;
+}
+
+static void fault_exit(const char *phase, int err, uint64_t seq, size_t written, int fd, int sync_retry)
+{
+    int rr = 0, re = 0;
+    if (sync_retry) { rr = fdatasync(fd); re = rr ? errno : 0; }
+    fprintf(stderr, "SMOLFIRE_FAULT phase=%s errno=%d seq=%" PRIu64 " written=%zu sync_retry=%d retry_rc=%d retry_errno=%d\n",
+            phase, err, seq, written, sync_retry, rr, re);
+    exit(3);
 }
 
 static int cmp_u64(const void *a, const void *b)
@@ -157,7 +218,8 @@ static uint64_t recover(int fd, size_t recsize, uint32_t *epoch, uint64_t *bad)
 
 static void usage(const char *p)
 {
-    fprintf(stderr, "usage: %s --log PATH --ops N --recsize B [--mode append|prealloc] [--epoch E] [--recover-only] [--no-sync]\n", p);
+    fprintf(stderr, "usage: %s --log PATH --ops N --recsize B [--mode append|prealloc] [--epoch E] [--recover-only] [--no-sync]\n"
+            "       [--mutate ack-early|no-repair] [--ack-fd N] [--phase-fd N] [--stop-at PHASE:OP[:CHUNK]] [--split K] [--fail PHASE:OP:ERRNO] [--sync-retry] [--repair]\n", p);
     exit(2);
 }
 
@@ -165,6 +227,8 @@ int main(int argc, char **argv)
 {
     const char *log = NULL, *mode = "append";
     long ops = 0; size_t recsize = 64; uint32_t epoch = 1; int recover_only = 0, do_sync = 1;
+    int ack_fd = -1, phase_fd = -1, split = 1, sync_retry = 0, repair = 0;
+    int mut_ack_early = 0, mut_no_repair = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--log") && i + 1 < argc) log = argv[++i];
         else if (!strcmp(argv[i], "--ops") && i + 1 < argc) ops = atol(argv[++i]);
@@ -173,15 +237,43 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--epoch") && i + 1 < argc) epoch = (uint32_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "--recover-only")) recover_only = 1;
         else if (!strcmp(argv[i], "--no-sync")) do_sync = 0;
+        else if (!strcmp(argv[i], "--ack-fd") && i + 1 < argc) ack_fd = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--phase-fd") && i + 1 < argc) phase_fd = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--split") && i + 1 < argc) split = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sync-retry")) sync_retry = 1;
+        else if (!strcmp(argv[i], "--repair")) repair = 1;
+        else if (!strcmp(argv[i], "--mutate") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "ack-early")) mut_ack_early = 1; else if (!strcmp(m, "no-repair")) mut_no_repair = 1; else usage(argv[0]);
+        }
+        else if (!strcmp(argv[i], "--stop-at") && i + 1 < argc) {
+            const char *s = argv[++i], *c = strchr(s, ':');
+            if (!c || (stop_ph = ph_lookup(s, (size_t)(c - s))) < 0) usage(argv[0]);
+            char *e; stop_op = strtol(c + 1, &e, 10);
+            if (*e == ':') stop_chunk = strtol(e + 1, NULL, 10);
+        } else if (!strcmp(argv[i], "--fail") && i + 1 < argc) {
+            const char *s = argv[++i], *c = strchr(s, ':');
+            if (!c || (fail_ph = ph_lookup(s, (size_t)(c - s))) < 0) usage(argv[0]);
+            char *e; fail_op = strtol(c + 1, &e, 10);
+            if (*e != ':') usage(argv[0]);
+            fail_errno = atoi(e + 1);
+        }
         else usage(argv[0]);
     }
     if (!log || recsize < sizeof(struct hdr) + 8) usage(argv[0]);
+    if (split < 1 || (size_t)split > recsize) usage(argv[0]);
+    if (phase_fd >= 0) {
+        pp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, phase_fd, 0);
+        if (pp == MAP_FAILED) { perror("mmap phase-fd"); return 1; }
+    }
+    at(PH_START, 0, 0);
 
     uint64_t t_start = now_ns(CLOCK_MONOTONIC);
     int fd = open(log, O_RDWR | O_CREAT, 0644);
     if (fd < 0) { perror("open"); return 1; }
 
     /* --- recovery --- */
+    at(PH_RECOVER, 0, 0);
     uint64_t rec0 = now_ns(CLOCK_MONOTONIC), bad = 0; uint32_t seen_epoch = 0;
     uint64_t durable_seq = recover(fd, recsize, &seen_epoch, &bad);
     uint64_t rec_ns = now_ns(CLOCK_MONOTONIC) - rec0;
@@ -190,6 +282,14 @@ int main(int argc, char **argv)
     printf("SMOLFIRE_METRIC recovery_records=%" PRIu64 "\n", durable_seq);
     printf("SMOLFIRE_METRIC recovery_bad_tail=%" PRIu64 "\n", bad);
     printf("SMOLFIRE_METRIC recovery_bytes_scanned=%lld\n", (long long)st.st_size);
+    uint64_t repaired = 0;
+    if (repair && !mut_no_repair && (uint64_t)st.st_size > durable_seq * recsize) {
+        repaired = (uint64_t)st.st_size - durable_seq * recsize;
+        if (ftruncate(fd, (off_t)(durable_seq * recsize)) != 0 || fsync(fd) != 0) { perror("repair"); return 1; }
+        st.st_size = (off_t)(durable_seq * recsize);
+    }
+    printf("SMOLFIRE_METRIC recovery_repaired_bytes=%" PRIu64 "\n", repaired);
+    printf("SMOLFIRE_METRIC recovery_epoch=%u\n", seen_epoch);
     printf("SMOLFIRE_METRIC recovery_wall_from_main_ns=%" PRIu64 "\n", now_ns(CLOCK_MONOTONIC) - t_start);
     if (recover_only) {
         printf("{\"recovery_ns\":%" PRIu64 ",\"durable_seq\":%" PRIu64 ",\"epoch_seen\":%u,\"bad_tail\":%" PRIu64 ",\"bytes\":%lld}\n",
@@ -232,31 +332,60 @@ int main(int argc, char **argv)
 
     for (long i = 0; i < ops; i++) {
         uint64_t seq = durable_seq + 1; /* model B: exactly durable_seq+1 */
+        cur_op = i;
+        at(PH_CONSTRUCT, 0, seq);
         uint64_t a = now_ns(CLOCK_MONOTONIC);
         /* construct */
         struct hdr h = { MAGIC, epoch, seq, (uint32_t)plen, 0 };
         memcpy(rec, &h, sizeof h);
         for (size_t k = 0; k < plen; k++) rec[sizeof h + k] = (uint8_t)(seq + k);
+        at(PH_CONSTRUCT_MID, 0, seq);
         h.crc = crc32_ieee(rec, recsize, 0);
         memcpy(rec, &h, sizeof h);
+        if (mut_ack_early && ack_fd >= 0 && write(ack_fd, &seq, sizeof seq) != (ssize_t)sizeof seq) return 1; /* BUG on purpose */
+        at(PH_APPEND, 0, seq);
         uint64_t b = now_ns(CLOCK_MONOTONIC);
-        /* append */
+        /* append: K chunks (K=1 is the #86 single pwrite). Short writes are
+         * continued; a failed write is a fault and that seq is never acked. */
         off_t off = (off_t)(seq - 1) * (off_t)recsize;
-        if (pwrite(fd, rec, recsize, off) != (ssize_t)recsize) { perror("pwrite"); return 1; }
+        size_t done = 0;
+        for (int k = 0; k < split; k++) {
+            size_t end = (k == split - 1) ? recsize : (recsize * (size_t)(k + 1)) / (size_t)split;
+            if (fail_ph == PH_APPEND && cur_op == fail_op) {
+                size_t half = recsize / 2;
+                if (pwrite(fd, rec, half, off) != (ssize_t)half) fault_exit("append", errno, seq, 0, fd, sync_retry);
+                fault_exit("append", fail_errno, seq, half, fd, sync_retry);
+            }
+            while (done < end) {
+                ssize_t w = pwrite(fd, rec + done, end - done, off + (off_t)done);
+                if (w < 0) { if (errno == EINTR) continue; fault_exit("append", errno, seq, done, fd, sync_retry); }
+                if (w == 0) fault_exit("append", EIO, seq, done, fd, sync_retry);
+                done += (size_t)w;
+            }
+            if (k < split - 1) at(PH_APPEND_MID, (uint32_t)(k + 1), seq);
+        }
+        at(PH_DURABLE, 0, seq);
         uint64_t c = now_ns(CLOCK_MONOTONIC);
         /* durable */
+        if (fail_ph == PH_DURABLE && cur_op == fail_op) fault_exit("durable", fail_errno, seq, recsize, fd, sync_retry);
         if (do_sync) {
             if (fdatasync(fd) != 0) {
-                if (errno == EINVAL) { sync_fallback = 1; if (fsync(fd) != 0) { perror("fsync"); return 1; } }
-                else { perror("fdatasync"); return 1; }
+                if (errno == EINVAL) { sync_fallback = 1; if (fsync(fd) != 0) fault_exit("durable", errno, seq, recsize, fd, sync_retry); }
+                else fault_exit("durable", errno, seq, recsize, fd, sync_retry);
             }
         }
+        at(PH_PUBLISH, 0, seq);
         uint64_t d = now_ns(CLOCK_MONOTONIC);
         /* publish */
         durable_seq = seq;
         __atomic_store_n(visible, seq, __ATOMIC_RELEASE);
         uint64_t e = now_ns(CLOCK_MONOTONIC);
         t_con[i] = b - a; t_app[i] = c - b; t_dur[i] = d - c; t_pub[i] = e - d; t_tot[i] = e - a;
+        /* acknowledge (untimed): only from here may a client rely on seq */
+        at(PH_ACK, 0, seq);
+        if (!mut_ack_early && ack_fd >= 0 && write(ack_fd, &seq, sizeof seq) != (ssize_t)sizeof seq) { perror("ack"); return 1; }
+        if (pp) __atomic_store_n(&pp->acked, seq, __ATOMIC_RELEASE);
+        at(PH_DONE, 0, seq);
     }
     uint64_t wall = now_ns(CLOCK_MONOTONIC) - wall0;
     uint64_t cpu = now_ns(CLOCK_PROCESS_CPUTIME_ID) - cpu0;

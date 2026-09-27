@@ -59,10 +59,10 @@ No SHA-256, no DMA engine, no RISC-V soft-CPU, no NVMe stack, no
 filesystem, no networking, no generic ring, no BRAM queue. HPS/FPGA
 interfaces used only for control/status of the gate itself.
 
-## 4. Bridge / register-map sketch (offsets TBD pending RTL)
+## 4. Bridge / register-map sketch (RESOLVED — see `rtl/README.md` for the authoritative map)
 
 ```
-HPS view (offsets relative to OUR peripheral base — TBD after Qsys build):
+HPS view (offsets relative to OUR peripheral base — concrete since 2026-09-25):
   +0x00  EPOCH            (rw)  current epoch, HPS-set on recovery
   +0x04  REQUEST_SEQ      (rw)  next submittable sequence number
   +0x08  PENDING_SEQ      (ro)  highest accepted-but-undurable seq
@@ -74,8 +74,7 @@ HPS view (offsets relative to OUR peripheral base — TBD after Qsys build):
   +0x20  RESET_CNT        (ro)  HPS-driven reset counter
 ```
 
-All addresses TBD until the Qsys system assigns the peripheral span.
-`0xFF200000` (bridge control) is NEVER mapped, NEVER written.
+All addresses concrete in `rtl/README.md` (23-register live map incl. MAGIC/VERSION/CRC_CALC/TID, verified against silicon). `0xFF200000` (bridge control) is NEVER mapped, NEVER written.
 
 ## 5. Fault-injection hook point (#88)
 

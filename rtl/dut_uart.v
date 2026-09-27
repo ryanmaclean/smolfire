@@ -227,6 +227,8 @@ module dut_uart #(
   localparam [2:0] T_NEXT  = 3'd4;
   localparam [2:0] T_DONE  = 3'd5;
 
+  // TX engine state only. tx_len/txbuf/tx_start are owned SOLELY by the
+  // protocol FSM below (reset + all updates there); this block reads them.
   reg [7:0] txbuf [0:79]; // loaded by the protocol block (RSP bytes)
   reg       tx_start;      // 1-cycle pulse from protocol block
   reg       tx_done;       // 1-cycle pulse to protocol block
@@ -242,7 +244,7 @@ module dut_uart #(
       uart_txd_r <= 1'b1;
       tx_done    <= 1'b0;
       tx_state   <= T_IDLE;
-      tx_len     <= 7'd8;
+      // NOTE: tx_len reset lives in the protocol FSM (sole driver).
       tx_idx     <= 7'd0;
       tx_bit     <= 3'd0;
       tx_cur     <= 8'h00;
@@ -439,6 +441,7 @@ module dut_uart #(
       avr_write_r    <= 1'b0;
       avr_reset_r    <= 1'b0;
       tx_start       <= 1'b0;
+      tx_len         <= 7'd8; // sole driver: legacy idle length
     end else begin
       tx_start <= 1'b0; // default: single-cycle pulse only where set
       case (p_state)

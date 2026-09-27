@@ -40,6 +40,33 @@
 //          0x82 READ-DATA (DATA = register value)
 //          0x83 RESET-DONE (DATA = RESET_CNT after the reset pulse)
 //          0x84 PONG (DATA = VERSION 0x00000000)
+//   BURST frame (host -> FPGA), variable 5+16*N bytes, N = COUNT (1..64):
+//     [0] MAGIC0  [1] MAGIC1  [2] CMD_BURST_SUBMIT = 0x05  [3] COUNT
+//     [4..4+16*N-1] N entries, 16 bytes each, all words little-endian:
+//       per entry: REQ_LO[0..3] DESC0[0..3] DESC1[0..3] DESC_CRC[0..3]
+//       (same LE byte order and same CRC input tuple {EPOCH,REQ_LO,
+//       DESC1,DESC0} as the single-submit register path; REQ_HI is
+//       implicitly 0, written by the bridge per entry)
+//     [4+16*N] CHK = (CMD + COUNT + all 16*N entry bytes) mod 256
+//   BURST-RSP frame (FPGA -> host), variable 13+N bytes:
+//     [0] MAGIC0  [1] MAGIC1  [2] RSP_BURST = 0x85  [3] COUNT (= N)
+//     [4..4+N-1] per-entry result bytes R0..R{N-1}:
+//       bit0 COMMITTED (1 = entry committed, durable advanced)
+//       bit1 REJECT (= ~COMMITTED)
+//       bits[4:2] CODE: 0 none  1 CRC_ERR  2 DUP_SEQ  3 GAP_SEQ
+//                       4 MALFORMED  5 OVERFLOW (6..7 reserved)
+//       bits[7:5] reserved 0
+//     [4+N..7+N] DURABLE_LO (LE)  [8+N..11+N] DURABLE_HI (LE)
+//     [12+N] CHK = (RSP + COUNT + R0..R{N-1} + 8 watermark bytes) mod 256
+//   Burst execution: the bridge buffers the whole frame, validates the
+//   checksum FIRST, then feeds entries internally one per DUT commit
+//   (EPOCH/REQ_LO/REQ_HI/DESC0/DESC1/DESC_CRC + CTRL.SUBMIT per entry,
+//   EPOCH pinned to its frame-start value for all N). Each entry is
+//   validated against the LIVE allocator at feed time, so a mid-burst
+//   reject does NOT cascade: the code is recorded, sticky ERROR bits
+//   from the entry are cleared, and the rest CONTINUE (never stall).
+//   Pre-existing sticky ERROR bits (set before the burst) are preserved,
+//   never cleared by the burst engine.
 //   Malformed frames (bad magic, bad checksum, unknown CMD) are dropped
 //   SILENTLY with no response. The host speaks strict request-response:
 //   exactly one RSP per well-formed CMD; no bytes are sent while busy.
@@ -81,10 +108,15 @@ module dut_uart #(
   localparam [7:0] CMD_READ   = 8'h02;
   localparam [7:0] CMD_RESET  = 8'h03;
   localparam [7:0] CMD_PING   = 8'h04;
+  // CMD_BURST_SUBMIT = 0x05: next free CMD value (0x01..0x04 taken), so
+  // all existing single-submit frames keep working byte-identically; the
+  // RSP keeps the CMD|0x80 convention (0x05|0x80 = 0x85). 0x06+ reserved.
+  localparam [7:0] CMD_BURST  = 8'h05;
   localparam [7:0] RSP_WRITE  = 8'h81;
   localparam [7:0] RSP_READ   = 8'h82;
   localparam [7:0] RSP_RESET  = 8'h83;
   localparam [7:0] RSP_PING   = 8'h84;
+  localparam [7:0] RSP_BURST  = 8'h85;
   localparam [7:0] A_RSTCNT   = 8'h20; // RESET_CNT byte offset (response data)
   localparam [31:0] VERSION_VAL = 32'h00000000; // v0 (matches DUT A_VERSION)
 
@@ -180,9 +212,11 @@ module dut_uart #(
   end
 
   // ---------------------------------------------------------------- TX ---
-  // Byte-serial transmitter: protocol block loads txbuf[0..7] and pulses
-  // tx_start; this block shifts start + 8 data (LSB first) + stop per byte
-  // and pulses tx_done after the 8th stop bit. Line idles high.
+  // Byte-serial transmitter: protocol block loads txbuf[0..tx_len-1] and
+  // pulses tx_start; this block shifts start + 8 data (LSB first) + stop
+  // per byte and pulses tx_done after the last stop bit. Line idles high.
+  // txbuf holds up to 80 bytes: 8-byte legacy RSPs + 77-byte max
+  // BURST-RSP (13 + 64 results).
   reg        uart_txd_r;
   assign uart_txd = uart_txd_r;
 
@@ -193,11 +227,12 @@ module dut_uart #(
   localparam [2:0] T_NEXT  = 3'd4;
   localparam [2:0] T_DONE  = 3'd5;
 
-  reg [7:0] txbuf [0:7];   // loaded by the protocol block (8 RSP bytes)
+  reg [7:0] txbuf [0:79]; // loaded by the protocol block (RSP bytes)
   reg       tx_start;      // 1-cycle pulse from protocol block
   reg       tx_done;       // 1-cycle pulse to protocol block
+  reg [6:0] tx_len;        // RSP length in bytes (8 legacy, 13+N burst)
   reg [2:0] tx_state;
-  reg [3:0] tx_idx;        // byte index 0..7
+  reg [6:0] tx_idx;        // byte index 0..tx_len-1
   reg [2:0] tx_bit;        // bit index 0..7
   reg [7:0] tx_cur;
   reg [31:0] tx_cnt;       // bit-period counter (wide: BIT_DIV up to 434+)
@@ -207,7 +242,8 @@ module dut_uart #(
       uart_txd_r <= 1'b1;
       tx_done    <= 1'b0;
       tx_state   <= T_IDLE;
-      tx_idx     <= 3'd0;
+      tx_len     <= 7'd8;
+      tx_idx     <= 7'd0;
       tx_bit     <= 3'd0;
       tx_cur     <= 8'h00;
       tx_cnt     <= 32'd0;
@@ -218,7 +254,7 @@ module dut_uart #(
           uart_txd_r <= 1'b1;
           tx_cnt     <= 32'd0;
           if (tx_start) begin
-            tx_idx   <= 3'd0;
+            tx_idx   <= 7'd0;
             tx_cur   <= txbuf[0];
             tx_state <= T_START;
           end
@@ -256,11 +292,11 @@ module dut_uart #(
           end
         end
         T_NEXT: begin
-          if (tx_idx == 4'd7) begin
+          if (tx_idx == tx_len - 7'd1) begin
             tx_state <= T_DONE;
           end else begin
-            tx_idx   <= tx_idx + 4'd1;
-            tx_cur   <= txbuf[tx_idx + 4'd1];
+            tx_idx   <= tx_idx + 7'd1;
+            tx_cur   <= txbuf[tx_idx + 7'd1];
             tx_state <= T_START;
           end
         end
@@ -275,30 +311,89 @@ module dut_uart #(
 
   // ---------------------------------------------------------- PROTOCOL ---
   // Collects 9-byte CMD frames, validates (magic + checksum + known CMD),
-  // executes one Avalon transaction, loads the 7-byte RSP, transmits it.
-  localparam [3:0] E_RX       = 4'd0;
-  localparam [3:0] E_WR       = 4'd1; // assert avs_write this cycle
-  localparam [3:0] E_WR_END   = 4'd2; // release write, load ACK, start TX
-  localparam [3:0] E_RD       = 4'd3; // assert avs_read this cycle
-  localparam [3:0] E_RD_WAIT  = 4'd4; // hold read (DUT read latency 2)
-  localparam [3:0] E_RD_CAP   = 4'd5; // capture readdata, load RSP, start TX
-  localparam [3:0] E_RST      = 4'd6; // assert reset pulse this cycle
-  localparam [3:0] E_RST_GAP  = 4'd7; // release reset, settle
-  localparam [3:0] E_RST_RD   = 4'd8; // read RESET_CNT
-  localparam [3:0] E_RST_WAIT = 4'd9; // hold read (DUT read latency 2)
-  localparam [3:0] E_RST_CAP  = 4'd10; // capture count, load RSP, start TX
-  localparam [3:0] E_PING     = 4'd11; // load PONG, start TX
-  localparam [3:0] E_TXWAIT   = 4'd12;
+  // executes one Avalon transaction, loads the RSP, transmits it.
+  // BURST frames (CMD 0x05) carry COUNT + N 16-byte entries; the whole
+  // frame is buffered and checksum-validated BEFORE dispatch, then each
+  // entry is fed through the same single-submit register sequence.
+  localparam [4:0] E_RX       = 5'd0;
+  localparam [4:0] E_WR       = 5'd1; // assert avs_write this cycle
+  localparam [4:0] E_WR_END   = 5'd2; // release write, load ACK, start TX
+  localparam [4:0] E_RD       = 5'd3; // assert avs_read this cycle
+  localparam [4:0] E_RD_WAIT  = 5'd4; // hold read (DUT read latency 2)
+  localparam [4:0] E_RD_CAP   = 5'd5; // capture readdata, load RSP, start TX
+  localparam [4:0] E_RST      = 5'd6; // assert reset pulse this cycle
+  localparam [4:0] E_RST_GAP  = 5'd7; // release reset, settle
+  localparam [4:0] E_RST_RD   = 5'd8; // read RESET_CNT
+  localparam [4:0] E_RST_WAIT = 5'd9; // hold read (DUT read latency 2)
+  localparam [4:0] E_RST_CAP  = 5'd10; // capture count, load RSP, start TX
+  localparam [4:0] E_PING     = 5'd11; // load PONG, start TX
+  localparam [4:0] E_TXWAIT   = 5'd12;
+  // Burst engine (CMD_BURST): buffer -> validate -> feed N entries.
+  localparam [4:0] E_BST_RX     = 5'd13; // collect 16*N payload bytes + CHK
+  localparam [4:0] E_BST_EP_RD  = 5'd14; // read EPOCH (latch for all N)
+  localparam [4:0] E_BST_EP_WT  = 5'd15;
+  localparam [4:0] E_BST_EP_CAP = 5'd16;
+  localparam [4:0] E_BST_EB_RD  = 5'd17; // read ERROR base (pre-existing)
+  localparam [4:0] E_BST_EB_WT  = 5'd18;
+  localparam [4:0] E_BST_EB_CAP = 5'd19;
+  localparam [4:0] E_BST_WR     = 5'd20; // per-entry writes (wr_ph 0..6)
+  localparam [4:0] E_BST_WR_END = 5'd21;
+  localparam [4:0] E_BST_WAIT   = 5'd22; // settle past the commit pipeline
+  localparam [4:0] E_BST_ER_RD  = 5'd23; // sample ERROR for this entry
+  localparam [4:0] E_BST_ER_WT  = 5'd24;
+  localparam [4:0] E_BST_ER_CAP = 5'd25;
+  localparam [4:0] E_BST_CLR    = 5'd26; // rw1c-clear entry errors
+  localparam [4:0] E_BST_CLR_END = 5'd27; // release clear, stage DUR addr
+  localparam [4:0] E_BST_D_RD   = 5'd28; // read DURABLE_LO/HI (d_phase)
+  localparam [4:0] E_BST_D_WT   = 5'd29;
+  localparam [4:0] E_BST_D_CAP  = 5'd30;
+  localparam [4:0] E_BST_TX     = 5'd31; // load BURST-RSP, start TX
 
-  reg [3:0]  p_state;
+  // Burst register addresses (byte offsets in the DUT window).
+  localparam [7:0] B_EPOCH   = 8'h00;
+  localparam [7:0] B_REQ_LO  = 8'h04;
+  localparam [7:0] B_DUR_LO  = 8'h0C;
+  localparam [7:0] B_ERROR   = 8'h18;
+  localparam [7:0] B_CTRL    = 8'h24;
+  localparam [7:0] B_DESC0   = 8'h2C;
+  localparam [7:0] B_DESC1   = 8'h30;
+  localparam [7:0] B_DESC_CRC = 8'h34;
+  localparam [7:0] B_REQ_HI  = 8'h44;
+  localparam [7:0] B_DUR_HI  = 8'h48;
+
+  reg [4:0]  p_state;
   reg [7:0]  fbuf [0:8];    // CMD frame bytes
   reg [3:0]  fidx;          // next fill position 0..8
   reg [7:0]  p_cmd, p_addr;
   reg [31:0] p_data;        // CMD DATA payload
   reg [7:0]  rsp_code;
   reg [31:0] rsp_data;
-  // Blocking temps (module scope, Verilog-2001): response checksum byte.
+  // Burst engine registers.
+  reg [7:0]  burst_buf [0:1023]; // entry payload (16 bytes x up to 64)
+  reg [7:0]  burst_res [0:63];   // per-entry result bytes
+  reg [6:0]  burst_n;            // COUNT 1..64
+  reg [6:0]  burst_i;            // entry index under feed
+  reg [10:0] burst_j;            // payload byte counter in E_BST_RX
+  reg [7:0]  burst_acc;          // running frame checksum (mod 256)
+  reg [7:0]  res_sum;            // running sum of result bytes (RSP CHK)
+  reg [31:0] burst_ep;           // EPOCH latched at frame start
+  reg [31:0] err_base;           // ERROR bits pre-existing the burst
+  reg [31:0] clr_bits;           // this entry's new ERROR bits (to clear)
+  reg [31:0] dur_lo, dur_hi;     // final watermark for the BURST-RSP
+  reg [2:0]  wr_ph;              // per-entry write phase 0..6
+  reg [4:0]  wait_cnt;           // commit-pipeline settle counter
+  reg        d_phase;            // 0 = DURABLE_LO, 1 = DURABLE_HI
+  integer    bi;                 // TX-fill loop index (E_BST_TX)
+  // Blocking temps (module scope, Verilog-2001).
   reg [7:0] chk_b;
+  reg [10:0] need_tmp;           // 16*N expected payload bytes
+  reg [10:0] eb_tmp;             // byte base of entry burst_i
+  reg [8:0]  acc_tmp;            // checksum accumulate (take [7:0])
+  reg [31:0] nb_tmp;             // this entry's new ERROR bits
+  reg [2:0]  code_tmp;           // reject CODE for bits[4:2]
+  reg [7:0]  res_tmp;            // result byte under construction
+  reg [7:0]  sum_tmp;            // BURST-RSP checksum accumulate
+  reg [6:0]  di_tmp;             // txbuf index of DURABLE_LO byte 0
 
   reg [11:0] avr_address_r;
   reg [31:0] avr_writedata_r;
@@ -325,6 +420,19 @@ module dut_uart #(
       p_data         <= 32'h00000000;
       rsp_code       <= 8'h00;
       rsp_data       <= 32'h00000000;
+      burst_n        <= 7'd0;
+      burst_i        <= 7'd0;
+      burst_j        <= 11'd0;
+      burst_acc      <= 8'h00;
+      res_sum        <= 8'h00;
+      burst_ep       <= 32'h00000000;
+      err_base       <= 32'h00000000;
+      clr_bits       <= 32'h00000000;
+      dur_lo         <= 32'h00000000;
+      dur_hi         <= 32'h00000000;
+      wr_ph          <= 3'd0;
+      wait_cnt       <= 5'd0;
+      d_phase        <= 1'b0;
       avr_address_r  <= 12'h000;
       avr_writedata_r <= 32'h00000000;
       avr_read_r     <= 1'b0;
@@ -338,7 +446,21 @@ module dut_uart #(
           if (rx_ferr) begin
             fidx <= 4'd0; // framing error: drop partial frame, resync
           end else if (rx_valid) begin
-            if (fidx == 4'd8) begin
+            if (fidx == 4'd3 && fbuf[0] == MAGIC0 && fbuf[1] == MAGIC1
+                && fbuf[2] == CMD_BURST) begin
+              // 4th byte of a burst frame is COUNT (1..64). Anything
+              // else (bad magic handled below, COUNT 0 or >64) is a
+              // malformed frame: silent drop, no response.
+              if (rx_byte >= 8'd1 && rx_byte <= 8'd64) begin
+                burst_n   <= rx_byte[6:0];
+                burst_j   <= 11'd0;
+                burst_acc <= CMD_BURST + rx_byte; // running CHK seed
+                fidx      <= 4'd0;
+                p_state   <= E_BST_RX;
+              end else begin
+                fidx <= 4'd0; // bad COUNT: drop, resync on next magic
+              end
+            end else if (fidx == 4'd8) begin
               // 9th byte arrives in rx_byte; bytes 0..7 are in fbuf.
               // Blocking checksum over CMD+ADDR+D0..D3; valid iff it
               // EQUALS the received CHK byte (CHK is the payload sum,
@@ -393,6 +515,7 @@ module dut_uart #(
           chk_b = RSP_WRITE + p_data[7:0] + p_data[15:8]
                 + p_data[23:16] + p_data[31:24];
           txbuf[7] <= chk_b;
+          tx_len <= 7'd8; // legacy 8-byte RSP
           tx_start <= 1'b1;
           p_state  <= E_TXWAIT;
         end
@@ -419,6 +542,7 @@ module dut_uart #(
           chk_b = RSP_READ + avr_readdata[7:0] + avr_readdata[15:8]
                 + avr_readdata[23:16] + avr_readdata[31:24];
           txbuf[7] <= chk_b;
+          tx_len <= 7'd8; // legacy 8-byte RSP
           tx_start <= 1'b1;
           p_state  <= E_TXWAIT;
         end
@@ -454,6 +578,7 @@ module dut_uart #(
           chk_b = RSP_RESET + avr_readdata[7:0] + avr_readdata[15:8]
                 + avr_readdata[23:16] + avr_readdata[31:24];
           txbuf[7] <= chk_b;
+          tx_len <= 7'd8; // legacy 8-byte RSP
           tx_start <= 1'b1;
           p_state  <= E_TXWAIT;
         end
@@ -470,8 +595,304 @@ module dut_uart #(
           chk_b = RSP_PING + VERSION_VAL[7:0] + VERSION_VAL[15:8]
                 + VERSION_VAL[23:16] + VERSION_VAL[31:24];
           txbuf[7] <= chk_b;
+          tx_len <= 7'd8; // legacy 8-byte RSP
           tx_start <= 1'b1;
           p_state  <= E_TXWAIT;
+        end
+        E_BST_RX: begin
+          // Collect 16*N entry bytes + trailing CHK into burst_buf.
+          // The checksum is accumulated incrementally (mod 256); only a
+          // fully-validated frame dispatches (no partial commit on CHK
+          // failure -- E_TXWAIT hardware reality: no streaming output).
+          if (rx_ferr) begin
+            fidx    <= 4'd0;
+            p_state <= E_RX; // framing error: drop, resync
+          end else if (rx_valid) begin
+            need_tmp = {burst_n, 4'b0000}; // 16*N payload bytes
+            if (burst_j == need_tmp) begin
+              // Trailing CHK byte: valid iff it equals the payload sum.
+              fidx <= 4'd0;
+              if (burst_acc == rx_byte) begin
+                burst_i <= 7'd0;
+                res_sum <= 8'h00;
+                // Stage the EPOCH address a full cycle before the read
+                // asserts (same convention as the legacy E_RX -> E_RD
+                // handoff: the DUT samples address+read together, so the
+                // address must already be stable).
+                avr_address_r <= {4'h0, B_EPOCH};
+                p_state <= E_BST_EP_RD; // dispatch: latch EPOCH first
+              end else begin
+                p_state <= E_RX; // bad checksum: silent drop, no response
+              end
+            end else begin
+              burst_buf[burst_j] <= rx_byte;
+              acc_tmp = {1'b0, burst_acc} + {1'b0, rx_byte};
+              burst_acc <= acc_tmp[7:0];
+              burst_j   <= burst_j + 11'd1;
+            end
+          end
+        end
+        E_BST_EP_RD: begin
+          // Address already staged in E_BST_RX; assert read only.
+          avr_read_r    <= 1'b1;
+          p_state       <= E_BST_EP_WT;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_EP_WT: begin
+          // DUT read latency is 2 cycles: hold the request one more
+          // cycle so E_BST_EP_CAP samples the registered word.
+          p_state <= E_BST_EP_CAP;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_EP_CAP: begin
+          avr_read_r <= 1'b0;
+          burst_ep   <= avr_readdata; // latched at frame start, all N
+          // Stage the ERROR address for the base read below.
+          avr_address_r <= {4'h0, B_ERROR};
+          p_state    <= E_BST_EB_RD;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_EB_RD: begin
+          // Address already staged in E_BST_EP_CAP; assert read only.
+          avr_read_r    <= 1'b1;
+          p_state       <= E_BST_EB_WT;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_EB_WT: begin
+          p_state <= E_BST_EB_CAP;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_EB_CAP: begin
+          avr_read_r <= 1'b0;
+          err_base   <= avr_readdata; // pre-existing stickies: preserved
+          wr_ph      <= 3'd0;
+          burst_i    <= 7'd0;
+          p_state    <= E_BST_WR;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_WR: begin
+          // One Avalon write per phase: EPOCH (pinned) / DESC0 / DESC1 /
+          // REQ_LO / REQ_HI=0 / DESC_CRC / CTRL.SUBMIT -- the exact
+          // single-submit register sequence, driven internally.
+          eb_tmp = {burst_i, 4'b0000}; // byte base of entry burst_i
+          case (wr_ph)
+            3'd0: begin
+              avr_address_r   <= {4'h0, B_EPOCH};
+              avr_writedata_r <= burst_ep;
+            end
+            3'd1: begin
+              avr_address_r   <= {4'h0, B_DESC0};
+              avr_writedata_r <= {burst_buf[eb_tmp + 11'd7],
+                                  burst_buf[eb_tmp + 11'd6],
+                                  burst_buf[eb_tmp + 11'd5],
+                                  burst_buf[eb_tmp + 11'd4]};
+            end
+            3'd2: begin
+              avr_address_r   <= {4'h0, B_DESC1};
+              avr_writedata_r <= {burst_buf[eb_tmp + 11'd11],
+                                  burst_buf[eb_tmp + 11'd10],
+                                  burst_buf[eb_tmp + 11'd9],
+                                  burst_buf[eb_tmp + 11'd8]};
+            end
+            3'd3: begin
+              avr_address_r   <= {4'h0, B_REQ_LO};
+              avr_writedata_r <= {burst_buf[eb_tmp + 11'd3],
+                                  burst_buf[eb_tmp + 11'd2],
+                                  burst_buf[eb_tmp + 11'd1],
+                                  burst_buf[eb_tmp]};
+            end
+            3'd4: begin
+              avr_address_r   <= {4'h0, B_REQ_HI};
+              avr_writedata_r <= 32'h00000000;
+            end
+            3'd5: begin
+              avr_address_r   <= {4'h0, B_DESC_CRC};
+              avr_writedata_r <= {burst_buf[eb_tmp + 11'd15],
+                                  burst_buf[eb_tmp + 11'd14],
+                                  burst_buf[eb_tmp + 11'd13],
+                                  burst_buf[eb_tmp + 11'd12]};
+            end
+            default: begin
+              avr_address_r   <= {4'h0, B_CTRL};
+              avr_writedata_r <= 32'h00000001; // CTRL.SUBMIT
+            end
+          endcase
+          avr_write_r <= 1'b1;
+          p_state     <= E_BST_WR_END;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_WR_END: begin
+          avr_write_r <= 1'b0;
+          if (wr_ph == 3'd6) begin
+            wait_cnt <= 5'd0;
+            // Stage the ERROR address now so the post-settle sample
+            // reads the settled word (legacy convention).
+            avr_address_r <= {4'h0, B_ERROR};
+            p_state  <= E_BST_WAIT;
+          end else begin
+            wr_ph   <= wr_ph + 3'd1;
+            p_state <= E_BST_WR;
+          end
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_WAIT: begin
+          // Settle past the DUT commit pipeline (SUBMIT 1 + CRC 1 +
+          // COMMIT hold <= 3 + COMPLETE 1; rejects return to IDLE even
+          // faster). 16 cycles of margin; the next feed always finds
+          // the DUT idle, so entries never collide (no MALFORMED from
+          // submit-while-busy inside a burst).
+          if (wait_cnt == 5'd16) begin
+            // Address already staged in E_BST_WR_END; assert read only.
+            avr_read_r    <= 1'b1;
+            p_state       <= E_BST_ER_RD;
+          end else begin
+            wait_cnt <= wait_cnt + 5'd1;
+          end
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_ER_RD: begin
+          p_state <= E_BST_ER_WT;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_ER_WT: begin
+          p_state <= E_BST_ER_CAP;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_ER_CAP: begin
+          avr_read_r <= 1'b0;
+          // New sticky bits from THIS entry only (pre-existing base
+          // excluded). No new bits <=> the entry committed.
+          nb_tmp = avr_readdata & ~err_base;
+          clr_bits <= nb_tmp;
+          if (nb_tmp == 32'h00000000) begin
+            code_tmp = 3'd0;
+          end else if (nb_tmp[0]) begin
+            code_tmp = 3'd1; // CRC_ERR
+          end else if (nb_tmp[1]) begin
+            code_tmp = 3'd2; // DUP_SEQ
+          end else if (nb_tmp[2]) begin
+            code_tmp = 3'd3; // GAP_SEQ
+          end else if (nb_tmp[3] || nb_tmp[4]) begin
+            code_tmp = 3'd4; // MALFORMED (RSTMID unreachable: no reset
+                             // is ever asserted mid-burst; mapped here)
+          end else begin
+            code_tmp = 3'd5; // OVERFLOW
+          end
+          // Blocking result byte (nonblocking regs still stale).
+          // bit0 COMMITTED, bit1 REJECT, bits[4:2] CODE, bits[7:5] 0.
+          if (nb_tmp == 32'h00000000)
+            res_tmp = 8'h01;                    // COMMITTED, CODE 0
+          else
+            res_tmp = {3'b000, code_tmp, 2'b10}; // REJECT + CODE
+          burst_res[burst_i] <= res_tmp;
+          acc_tmp = {1'b0, res_sum} + {1'b0, res_tmp};
+          res_sum <= acc_tmp[7:0];
+          p_state <= E_BST_CLR;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_CLR: begin
+          // rw1c-clear ONLY this entry's bits (pre-existing stickies
+          // survive), then CONTINUE with the next entry -- never stall.
+          // NOTE: the clear write and the next address stage cannot share
+          // a cycle (one addr register), so the last entry exits through
+          // E_BST_CLR_END, which releases the write AND stages DUR_LO.
+          if (clr_bits != 32'h00000000) begin
+            avr_address_r   <= {4'h0, B_ERROR};
+            avr_writedata_r <= clr_bits;
+            avr_write_r     <= 1'b1;
+          end
+          if (burst_i + 7'd1 == burst_n) begin
+            p_state <= E_BST_CLR_END;
+          end else begin
+            burst_i <= burst_i + 7'd1;
+            wr_ph   <= 3'd0;
+            p_state <= E_BST_WR;
+          end
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_CLR_END: begin
+          avr_write_r   <= 1'b0; // release the clear write above
+          d_phase       <= 1'b0;
+          // Stage DURABLE_LO a full cycle before E_BST_D_RD asserts
+          // its read (legacy convention).
+          avr_address_r <= {4'h0, B_DUR_LO};
+          p_state       <= E_BST_D_RD;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_D_RD: begin
+          avr_write_r   <= 1'b0; // release a possible E_BST_CLR write
+          // Address already staged (E_BST_CLR / E_BST_D_CAP); read only.
+          avr_read_r    <= 1'b1;
+          p_state       <= E_BST_D_WT;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_D_WT: begin
+          p_state <= E_BST_D_CAP;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_D_CAP: begin
+          avr_read_r <= 1'b0;
+          if (d_phase == 1'b0) begin
+            dur_lo  <= avr_readdata;
+            d_phase <= 1'b1;
+            // Stage DURABLE_HI for the second watermark read.
+            avr_address_r <= {4'h0, B_DUR_HI};
+            p_state <= E_BST_D_RD;
+          end else begin
+            dur_hi  <= avr_readdata;
+            p_state <= E_BST_TX;
+          end
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
+        end
+        E_BST_TX: begin
+          rsp_code <= RSP_BURST;
+          txbuf[0] <= MAGIC0;
+          txbuf[1] <= MAGIC1;
+          txbuf[2] <= RSP_BURST;
+          txbuf[3] <= {1'b0, burst_n};
+          for (bi = 0; bi < 64; bi = bi + 1) begin
+            if (bi[6:0] < burst_n)
+              txbuf[4 + bi] <= burst_res[bi[5:0]];
+          end
+          di_tmp = 7'd4 + burst_n; // DURABLE_LO byte 0 index
+          txbuf[di_tmp]       <= dur_lo[7:0];
+          txbuf[di_tmp + 7'd1] <= dur_lo[15:8];
+          txbuf[di_tmp + 7'd2] <= dur_lo[23:16];
+          txbuf[di_tmp + 7'd3] <= dur_lo[31:24];
+          txbuf[di_tmp + 7'd4] <= dur_hi[7:0];
+          txbuf[di_tmp + 7'd5] <= dur_hi[15:8];
+          txbuf[di_tmp + 7'd6] <= dur_hi[23:16];
+          txbuf[di_tmp + 7'd7] <= dur_hi[31:24];
+          // Blocking checksum over the NEW payload (nonblocking
+          // txbuf/dur regs still hold stale values this cycle).
+          sum_tmp = RSP_BURST + {1'b0, burst_n} + res_sum
+                  + dur_lo[7:0] + dur_lo[15:8]
+                  + dur_lo[23:16] + dur_lo[31:24]
+                  + dur_hi[7:0] + dur_hi[15:8]
+                  + dur_hi[23:16] + dur_hi[31:24];
+          txbuf[di_tmp + 7'd8] <= sum_tmp;
+          tx_len   <= 7'd13 + burst_n; // 13 + N bytes total
+          tx_start <= 1'b1;
+          p_state  <= E_TXWAIT;
+          if (rx_valid || rx_ferr)
+            fidx <= 4'd0;
         end
         E_TXWAIT: begin
           if (tx_done)

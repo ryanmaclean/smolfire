@@ -173,6 +173,84 @@ WRITE-REG ACKs after the write cycle (does NOT wait for commit — the host
 polls `STATUS.BUSY` via READ-REG). RESET pulses `fsm_reset_i` 1 cycle,
 then reads back `RESET_CNT`.
 
+### Counted-batch multi-submit: `CMD_BURST_SUBMIT` (Jev-unanimous)
+
+One CMD frame carries N descriptors; the DUT processes them sequentially
+and returns compact per-submit results — no N round trips, no streaming
+output (streaming violates the `E_TXWAIT` hardware reality: exactly one
+RSP per CMD, sent after execution).
+
+**CMD value choice:** `CMD_BURST_SUBMIT = 0x05`, `RSP_BURST = 0x85`.
+`0x05` is the next free CMD value (`0x01..0x04` taken), so every existing
+single-submit frame keeps working byte-identically; the RSP keeps the
+`CMD|0x80` convention (`0x05|0x80 = 0x85`). `0x06+` reserved. The DUT
+register map is UNCHANGED and the single-submit path is untouched (the
+48 + 43 suites reproduce identical banners).
+
+**BURST frame, host → FPGA, `5 + 16*N` bytes (`COUNT = N`, 1 byte,
+1..64; max frame 1029 bytes):**
+`[MAGIC0=0x44][MAGIC1=0x55][CMD=0x05][COUNT]`
++ N entries × 16 bytes, all words little-endian —
+per entry: `REQ_LO[0..3] DESC0[0..3] DESC1[0..3] DESC_CRC[0..3]`
+(same LE byte order and same CRC input tuple `{EPOCH,REQ_LO,DESC1,DESC0}`
+as the single-submit register path; `REQ_HI` is implicitly 0, written by
+the bridge per entry)
++ `[CHK]`, `CHK = (CMD + COUNT + all 16*N entry bytes) mod 256`.
+
+Entries carry an explicit `REQ_LO` (not an implied sequence) so that every
+entry goes through the EXACT single-submit accept check — dup/gap rejects
+stay reachable and testable. An implied-sequential REQ would make rejects
+unexpressible and the continue-on-reject rule untestable.
+
+**BURST-RSP frame, FPGA → host, `13 + N` bytes (max 77):**
+`[0x44][0x55][RSP=0x85][COUNT=N]`
++ N result bytes `R0..R{N-1}`: `bit0` COMMITTED (1 = entry committed,
+durable advanced) | `bit1` REJECT (`= ~COMMITTED`) | `bits[4:2]` CODE
+(`0` none, `1` CRC_ERR, `2` DUP_SEQ, `3` GAP_SEQ, `4` MALFORMED,
+`5` OVERFLOW, `6..7` reserved) | `bits[7:5]` reserved 0
++ `DURABLE_LO` (4 B LE) + `DURABLE_HI` (4 B LE, final watermark =
+committed count added to the pre-burst watermark)
++ `[CHK]`, `CHK = (RSP + COUNT + R0..R{N-1} + 8 watermark bytes) mod 256`.
+
+**Execution semantics (bridge-internal, fabric cycles):** the whole frame
+is buffered and checksum-validated BEFORE dispatch (a CHK failure commits
+nothing — no partial commit). Then, per entry: write
+`EPOCH` (pinned to the frame-start value for all N) / `DESC0` / `DESC1` /
+`REQ_LO` / `REQ_HI=0` / `DESC_CRC` / `CTRL.SUBMIT`, settle past the commit
+pipeline, sample `ERROR`. Each entry is validated against the LIVE
+allocator at feed time, so a mid-burst reject does NOT cascade: the code
+is recorded, that entry's sticky `ERROR` bits are rw1c-cleared (required
+for per-entry isolation — otherwise entry i+1 would inherit entry i's
+bits), and the rest CONTINUE, never stall. Pre-existing sticky `ERROR`
+bits (set before the burst) are never cleared — only the entry's new bits
+are. The host derives every per-submit outcome from the result bytes.
+
+**Resync rule:** `COUNT` 0 or >64 is a malformed frame (silent drop, no
+RSP). The DUT cannot know an invalid frame's length, so the rejected
+frame's trailing bytes linger as a partial-frame prefix; after a
+COUNT-reject timeout the host resyncs by sending 8 dummy bytes
+(completing a 9-byte legacy attempt that fails magic and drops), then
+resumes (verify with PING). Length-known rejects (bad magic/checksum on a
+9-byte frame, bad burst CHK) consume exactly and stay aligned.
+
+### Burst TB status: PASS (42 checks, icarus 13.0)
+
+```sh
+cd rtl
+iverilog -g2012 -o sim_burst dut_top_uart.v dut_uart.v durable_tid_v0.v dut_uart_burst_tb.sv && ./sim_burst
+# checks passed: 42  failed: 0  +  PASS
+iverilog -g2012 -Wall ...   # lint-clean, no warnings
+```
+
+`rtl/dut_uart_burst_tb.sv` (new; `dut_uart_tb.sv` untouched, still 43):
+B0 N=1 / B1 N=2 good; B2 mid-burst DUP (`C/DUP/C`, watermark +2, no
+cascade); B3 mid-burst CRC-bad (`C/CRC/C`, +2); B4 mid-burst GAP
+(`C/GAP`, +1) + pre-existing-sticky preservation (planted MALFORMED
+survives); B5 N=64 max-length frame (1029-byte CMD, 77-byte RSP, all 64
+commit, watermark +64); B6 malformed (`COUNT=0`, bad CHK → silent drop,
+resync-flush, link alive); B7 error-clear / IDLE / visible==durable.
+Same always-on monitors (trusted ⇒ persistent, watermarks monotonic).
+
 ### CST story (build host only — no remote files touched)
 
 `dut.cst` on the Gowin build host must gain exactly these lines

@@ -115,7 +115,12 @@ gone and the UART divisor is back at the board rate.
 
 The register map, CRC byte order, port names/widths, `tid_last` /
 `durable` / `visible` names, and protocol semantics are EXACTLY
-preserved. Only internal latency grows (the host polls at ms scale):
+preserved. Only internal latency grows (the host polls at ms scale).
+Driver warning (learned live 2026-09-26): 64-bit halves are NOT
+contiguous — `DUR_LO=0x0C` but `DUR_HI=0x48` (same for VIS/REQ/PEND).
+A generic `read64(lo)=read(lo)+read(lo+4)` helper silently returns
+garbage (observed phantom `d=0x100000001`); always use the explicit
+per-register HI addresses from the map below.
 
 - Avalon reads complete 2 cycles after the request (was
   combinational); `avs_readdatavalid` is `avs_read` delayed 2 cycles.

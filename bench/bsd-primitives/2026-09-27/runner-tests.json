@@ -1,0 +1,5 @@
+{
+  "stdout": "{\n  \"schema\": \"smolfire.bsd-primitives-runner-tests/v1\",\n  \"synthetic_contract_cases\": 16,\n  \"failed\": 0\n}\n",
+  "stderr": "",
+  "exit_code": 0
+}

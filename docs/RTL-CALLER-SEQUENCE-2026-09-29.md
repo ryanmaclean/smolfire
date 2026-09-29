@@ -34,7 +34,8 @@ carry cases are exercised only through the Avalon register testbench.
 
 The source-only testbench adds reset in SUBMIT and CRC, full-width gap,
 terminal overflow, and forced-state high-half/carry arithmetic controls;
-its existing COMMIT reset, duplicate,
-gap, CRC and monotonicity controls remain. It can be compiled with either
+it retains the merged PR113 SUBMIT/S_CRC zero/one-count reset controls,
+adapted to durable-count semantics, as well as COMMIT reset, duplicate,
+gap, CRC and monotonicity controls. It can be compiled with either
 RTL variant, but no simulator was run under the current MIT/BSD/Apache-only
 tool policy. No resource/timing result or bitstream is implied.

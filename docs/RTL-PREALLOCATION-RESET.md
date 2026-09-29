@@ -1,5 +1,10 @@
 # Soft reset before allocation
 
+> Historical PR113 allocator fix. The caller-supplied sequence candidate in
+> [RTL-CALLER-SEQUENCE-2026-09-29.md](RTL-CALLER-SEQUENCE-2026-09-29.md)
+> removes `tid_next` entirely. Its testbench retains the zero/one-count
+> SUBMIT/S_CRC reset controls with the next request derived from durable count.
+
 Source review found that soft reset decremented `tid_next` in SUBMIT, CRC and
 COMMIT, although allocation advances only on a successful CRC edge into COMMIT.
 Before that edge, decrementing retreats an existing ID; the first operation

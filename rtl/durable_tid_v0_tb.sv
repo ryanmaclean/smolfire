@@ -4,7 +4,8 @@
 // Covers: N good submits, duplicate, replay of an old seq, gap seq,
 // malformed vectors (bad CRC, reserved CTRL bits), 64-bit gap/overflow,
 // submit-while-busy backpressure, reset mid-commit (in COMMIT hold window),
-// reset while idle, and recovery resubmit under the same TID.
+// reset while idle, SUBMIT/S_CRC resets at durable counts zero and one,
+// and recovery resubmit under the same TID.
 //
 // Always-on monitors assert the two load-bearing properties:
 //   (1) TRUSTED_COMPLETE(N) => PERSISTENT(N): on every trusted_complete_o
@@ -265,6 +266,66 @@ module durable_tid_v0_tb;
       fsm_reset_i = 1'b1;
       @(negedge clk);
       fsm_reset_i = 1'b0;
+    end
+  endtask
+
+  // Retain the merged preallocation-reset coverage at durable counts zero
+  // and one. With no allocator, the durable count itself is the next valid
+  // 0-based request; SUBMIT/S_CRC reset must preserve it for an exact retry.
+  task reset_before_crc(input [2:0] target_state, input [31:0] req);
+    reg hit;
+    integer cycle;
+    integer old_pulses;
+    reg [31:0] old_resets, errs, lo, hi;
+    reg [63:0] d, v;
+    reg idle;
+    begin
+      mm_read(A_RSTCNT, old_resets);
+      old_pulses = mon_trusted_cnt;
+      submit_one(req, 32'hABCD0000 ^ req, 32'h12340000 ^ req, 32'h1, 1'b0);
+      begin : find_precrc_phase
+        hit = 1'b0;
+        for (cycle = 0; cycle < 8; cycle = cycle + 1) begin
+          if (dut.state === target_state) begin
+            hit = 1'b1;
+            disable find_precrc_phase;
+          end
+          @(negedge clk);
+        end
+      end
+      check("T13 requested pre-CRC phase reached", hit);
+      if (hit) begin
+        check("T13 durable count still names next request", dut.durable == {32'h0, req});
+        // At a negedge: keep reset stable across exactly one posedge.
+        fsm_reset_i = 1'b1;
+        @(negedge clk);
+        fsm_reset_i = 1'b0;
+        wait_idle(idle);
+        check("T13 reset returns to idle", idle);
+        read_durable(d);
+        read_visible(v);
+        check("T13 durable and visible history preserved", d == {32'h0, req} && v == d);
+        mm_read(A_PEND_LO, lo);
+        mm_read(A_PEND_HI, hi);
+        check("T13 pending parked at durable", {hi, lo} == d);
+        check("T13 dropped operation emitted no completion", mon_trusted_cnt == old_pulses);
+        mm_read(A_ERROR, errs);
+        check("T13 pre-CRC reset flags only RSTMID", errs == (32'h1 << E_RSTMID));
+        mm_read(A_RSTCNT, lo);
+        check("T13 reset counter increments once", lo == old_resets + 1);
+        clear_errors;
+        submit_one(req, 32'hABCD0000 ^ req, 32'h12340000 ^ req, 32'h1, 1'b0);
+        wait_idle(idle);
+        check("T13 identical retry returns to idle", idle);
+        read_durable(d);
+        read_visible(v);
+        check("T13 identical retry advances exactly once", d == ({32'h0, req} + 64'd1) && v == d);
+        mm_read(A_TID_LO, lo);
+        check("T13 retry commits original TID", lo == req);
+        mm_read(A_ERROR, errs);
+        check("T13 retry has no errors", errs == 0);
+        check("T13 retry emits exactly one completion", mon_trusted_cnt == old_pulses + 1);
+      end
     end
   endtask
 
@@ -610,6 +671,27 @@ module durable_tid_v0_tb;
           dut.lat_tid == 64'h0000000100000000 &&
           dut.pending == 64'h0000000100000001);
     release dut.durable;
+
+    // TEST 13: preserve the merged PR113 zero/one reset controls, now
+    // stated against durable count rather than an internal allocator.
+    // Hard reset between pairs starts a new epoch; monotonic monitors stay
+    // armed through each tested soft reset and exact retry.
+    for (k = 0; k < 2; k = k + 1) begin
+      @(negedge clk);
+      mon_armed = 1'b0;
+      reset_n = 1'b0;
+      repeat (2) @(negedge clk);
+      reset_n = 1'b1;
+      repeat (2) @(negedge clk);
+      mon_last_d = 64'h0;
+      mon_last_v = 64'h0;
+      mon_trusted_cnt = 0;
+      mon_armed = 1'b1;
+      mm_write(A_EPOCH, 32'h1);
+      reset_before_crc(k == 0 ? 3'd1 : 3'd2, 32'd0);
+      reset_before_crc(k == 0 ? 3'd2 : 3'd1, 32'd1);
+      check("T13 pair committed only the two retries", mon_trusted_cnt == 2);
+    end
 
     $display("----------------------------------------");
     $display("checks passed: %0d  failed: %0d", checks_passed, checks_failed);

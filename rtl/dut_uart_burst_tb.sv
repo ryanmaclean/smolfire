@@ -442,7 +442,7 @@ module dut_uart_burst_tb;
     check("B1 two trusted pulses", mon_trusted_cnt == pulses_before + 2);
 
     // B2: mid-burst DUP -- [req3 good][req1 replay -> DUP][req4 good].
-    // Entry 2 uses the LIVE tid_next (4), proving no index cascade.
+    // Entry 2 uses the live durable count (4), proving no index cascade.
     b_req[0] = 32'h00000003;
     b_d0[0]  = 32'hC0000003;
     b_d1[0]  = 32'hD0000003;
@@ -488,7 +488,7 @@ module dut_uart_burst_tb;
     b_req[0] = 32'h00000007;
     b_d0[0]  = 32'h11111107;
     b_d1[0]  = 32'h22222207;
-    b_req[1] = 32'h0000000C; // ahead of allocator -> GAP
+    b_req[1] = 32'h0000000C; // ahead of durable count -> GAP
     b_d0[1]  = 32'h1111110C;
     b_d1[1]  = 32'h2222220C;
     pulses_before = mon_trusted_cnt;

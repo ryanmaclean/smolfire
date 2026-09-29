@@ -2,10 +2,9 @@
 // durable_tid_v0_tb.sv -- self-checking testbench for durable_tid_v0.
 //
 // Covers: N good submits, duplicate, replay of an old seq, gap seq,
-// malformed vectors (bad CRC, reserved CTRL bits, REQ_HI mismatch),
+// malformed vectors (bad CRC, reserved CTRL bits), 64-bit gap/overflow,
 // submit-while-busy backpressure, reset mid-commit (in COMMIT hold window),
-// reset while idle, SUBMIT/S_CRC resets at zero and nonzero next IDs,
-// and recovery resubmit under the same TID.
+// reset while idle, and recovery resubmit under the same TID.
 //
 // Always-on monitors assert the two load-bearing properties:
 //   (1) TRUSTED_COMPLETE(N) => PERSISTENT(N): on every trusted_complete_o
@@ -55,7 +54,7 @@ module durable_tid_v0_tb;
   localparam CTRL_RECOVER = 32'h00000004;
 
   // ERROR bits (must match DUT).
-  localparam E_CRC = 0, E_DUP = 1, E_GAP = 2, E_MALF = 3, E_RSTMID = 4;
+  localparam E_CRC = 0, E_DUP = 1, E_GAP = 2, E_MALF = 3, E_RSTMID = 4, E_OVF = 5;
 
   reg         clk;
   reg         reset_n;
@@ -269,67 +268,6 @@ module durable_tid_v0_tb;
     end
   endtask
 
-  // Inject before allocation at the actual internal phase, rather than
-  // assuming a fixed number of MMIO cycles. Every wait is bounded and a
-  // missed phase fails the case. Both RTL variants expose this same state.
-  task reset_before_allocation(input [2:0] target_state, input [31:0] req);
-    reg hit;
-    integer cycle;
-    integer old_pulses;
-    reg [31:0] old_resets, errs, lo, hi;
-    reg [63:0] d, v;
-    reg idle;
-    begin
-      mm_read(A_RSTCNT, old_resets);
-      old_pulses = mon_trusted_cnt;
-      submit_one(req, 32'hABCD0000 ^ req, 32'h12340000 ^ req, 32'h1, 1'b0);
-      begin : find_preallocation_phase
-        hit = 1'b0;
-        for (cycle = 0; cycle < 8; cycle = cycle + 1) begin
-          if (dut.state === target_state) begin
-            hit = 1'b1;
-            disable find_preallocation_phase;
-          end
-          @(negedge clk);
-        end
-      end
-      check("T10 requested preallocation phase reached", hit);
-      if (hit) begin
-        check("T10 allocation has not advanced", dut.tid_next == {32'h0, req});
-        // At a negedge: keep reset stable across exactly one posedge.
-        fsm_reset_i = 1'b1;
-        @(negedge clk);
-        fsm_reset_i = 1'b0;
-        wait_idle(idle);
-        check("T10 reset returns to idle", idle);
-        check("T10 next ID preserved without underflow/retreat", dut.tid_next == {32'h0, req});
-        read_durable(d);
-        read_visible(v);
-        check("T10 durable and visible history preserved", d == {32'h0, req} && v == d);
-        mm_read(A_PEND_LO, lo);
-        mm_read(A_PEND_HI, hi);
-        check("T10 pending parked at durable", {hi, lo} == d);
-        check("T10 dropped operation emitted no completion", mon_trusted_cnt == old_pulses);
-        mm_read(A_ERROR, errs);
-        check("T10 preallocation reset flags only RSTMID", errs == (32'h1 << E_RSTMID));
-        mm_read(A_RSTCNT, lo);
-        check("T10 reset counter increments once", lo == old_resets + 1);
-        clear_errors;
-        submit_one(req, 32'hABCD0000 ^ req, 32'h12340000 ^ req, 32'h1, 1'b0);
-        wait_idle(idle);
-        check("T10 identical retry returns to idle", idle);
-        read_durable(d);
-        read_visible(v);
-        check("T10 identical retry advances exactly once", d == ({32'h0, req} + 64'd1) && v == d);
-        mm_read(A_TID_LO, lo);
-        check("T10 retry commits original TID", lo == req);
-        mm_read(A_ERROR, errs);
-        check("T10 retry has no errors", errs == 0);
-        check("T10 retry emits exactly one completion", mon_trusted_cnt == old_pulses + 1);
-      end
-    end
-  endtask
-
   // Test temporaries (module scope: tasks cannot declare them portably).
   reg [31:0] t_lo, t_hi, t_err, t_st, t_fsm, t_magic, t_ver, t_crc;
   reg [63:0] t_d, t_v;
@@ -451,7 +389,7 @@ module durable_tid_v0_tb;
     check("T5b durable held at 8", t_d == 64'h8);
     clear_errors;
 
-    // TEST 5c: REQ_HI mismatch -> MALFORMED.
+    // TEST 5c: a full-width request ahead of durable -> GAP.
     mm_write(A_REQ_LO, 32'h00000008);
     mm_write(A_REQ_HI, 32'hDEADBEEF);
     mm_write(A_DESC0, 32'h11111111);
@@ -461,7 +399,7 @@ module durable_tid_v0_tb;
     mm_write(A_CTRL, CTRL_SUBMIT);
     wait_idle(t_ok);
     mm_read(A_ERROR, t_err);
-    check("T5c REQ_HI mismatch flagged MALFORMED", t_err[E_MALF] == 1'b1);
+    check("T5c high-half gap flagged GAP", t_err[E_GAP] == 1'b1);
     read_durable(t_d);
     check("T5c durable held at 8", t_d == 64'h8);
     clear_errors;
@@ -476,8 +414,8 @@ module durable_tid_v0_tb;
 
     // TEST 6: reset mid-commit. Submit seq 9, then hit fsm_reset_i for
     // exactly 1 cycle while the FSM sits in the COMMIT hold window
-    // (COMMIT_LATENCY=2). The op must NOT become durable; the allocator
-    // must be preserved so a resubmit commits under the same TID.
+    // (COMMIT_LATENCY=2). The op must NOT become durable; the caller
+    // must be able to resubmit the same TID from the durable count.
     begin
       reg [31:0] crc9;
       crc9 = tb_crc32({32'h00000001, 32'h00000009, 32'hB0000009, 32'hA0000009});
@@ -512,7 +450,7 @@ module durable_tid_v0_tb;
       check("T6 reset counter incremented", t_lo == 32'h00000001);
       clear_errors;
       // Recovery: resubmit the identical descriptor; it must commit as
-      // TID 9 (allocator preserved across soft reset).
+      // TID 9 (durable count preserved across soft reset).
       mm_write(A_DESC0, 32'hA0000009);
       mm_write(A_DESC1, 32'hB0000009);
       mm_write(A_REQ_LO, 32'h00000009);
@@ -582,25 +520,57 @@ module durable_tid_v0_tb;
     check("T9 trusted pulse count == completed ops",
           mon_trusted_cnt == 15);
 
-    // TEST 10: cover each preallocation phase at both next-ID zero and
-    // next-ID one. Hard reset between pairs is an explicit new epoch;
-    // monotonicity monitors stay armed through every tested soft reset.
-    for (k = 0; k < 2; k = k + 1) begin
-      @(negedge clk);
-      mon_armed = 1'b0;
-      reset_n = 1'b0;
-      repeat (2) @(negedge clk);
-      reset_n = 1'b1;
-      repeat (2) @(negedge clk);
-      mon_last_d = 64'h0;
-      mon_last_v = 64'h0;
-      mon_trusted_cnt = 0;
-      mon_armed = 1'b1;
-      mm_write(A_EPOCH, 32'h1);
-      reset_before_allocation(k == 0 ? 3'd1 : 3'd2, 32'd0);
-      reset_before_allocation(k == 0 ? 3'd2 : 3'd1, 32'd1);
-      check("T10 pair committed only the two retries", mon_trusted_cnt == 2);
-    end
+    // TEST 10: reset before CRC/commit never consumes a caller TID.
+    // submit_one returns at the negedge after the accepting posedge, while
+    // the FSM is in SUBMIT. Assert reset immediately for the next posedge.
+    submit_one(32'h0000000F, 32'hA000000F, 32'hB000000F,
+               32'h00000001, 1'b0);
+    check("T10a reached SUBMIT", dut.state == 3'd1);
+    fsm_reset_i = 1'b1;
+    @(negedge clk);
+    fsm_reset_i = 1'b0;
+    wait_idle(t_ok);
+    read_durable(t_d);
+    check("T10a SUBMIT reset holds count 15", t_ok && t_d == 64'hF);
+    mm_read(A_PEND_LO, t_lo);
+    check("T10a pending parked at 15", t_lo == 32'hF);
+    mm_read(A_ERROR, t_err);
+    check("T10a reset flagged", t_err[E_RSTMID] == 1'b1);
+    clear_errors;
+
+    // One normal edge after acceptance enters S_CRC; reset there too.
+    submit_one(32'h0000000F, 32'hA000000F, 32'hB000000F,
+               32'h00000001, 1'b0);
+    @(negedge clk);
+    check("T10b reached CRC", dut.state == 3'd2);
+    fsm_reset_i = 1'b1;
+    @(negedge clk);
+    fsm_reset_i = 1'b0;
+    wait_idle(t_ok);
+    read_durable(t_d);
+    check("T10b CRC reset holds count 15", t_ok && t_d == 64'hF);
+    mm_read(A_ERROR, t_err);
+    check("T10b reset flagged", t_err[E_RSTMID] == 1'b1);
+    clear_errors;
+    submit_one(32'h0000000F, 32'hA000000F, 32'hB000000F,
+               32'h00000001, 1'b0);
+    wait_idle(t_ok);
+    read_durable(t_d);
+    check("T10c same TID commits after early resets", t_ok && t_d == 64'h10);
+
+    // TEST 11: model the 64-bit terminal count directly; billions of
+    // submits are not needed to test overflow arithmetic. Turn off the
+    // monotonic monitor only for this forced terminal-state fixture.
+    mon_armed = 1'b0;
+    force dut.durable = 64'hFFFFFFFFFFFFFFFF;
+    mm_write(A_REQ_LO, 32'hFFFFFFFF);
+    mm_write(A_REQ_HI, 32'hFFFFFFFF);
+    mm_write(A_CTRL, CTRL_SUBMIT);
+    wait_idle(t_ok);
+    mm_read(A_ERROR, t_err);
+    check("T11 max count flags overflow", t_ok && t_err[E_OVF] == 1'b1);
+    check("T11 no wrapped pending", dut.pending == 64'h10);
+    release dut.durable;
 
     $display("----------------------------------------");
     $display("checks passed: %0d  failed: %0d", checks_passed, checks_failed);

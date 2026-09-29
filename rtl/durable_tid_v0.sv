@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // durable_tid_v0.sv -- register-only durable completion gate (issue #87, v0).
 //
-// Smallest FPGA experiment: a monotonic TID allocator + commit FSM that
+// Smallest FPGA experiment: a caller-sequenced commit FSM that
 // enforces the invariant
 //
 //    TRUSTED_COMPLETE(N) => PERSISTENT(N)
@@ -24,7 +24,7 @@
 //   input  fsm_reset_i         -- explicit synchronous soft-reset input
 //                                (HPS fault-injection / recovery; hold
 //                                exactly 1 clk cycle). Preserves EPOCH,
-//                                DURABLE, VISIBLE and the TID allocator;
+//                                DURABLE and VISIBLE count watermarks;
 //                                drops in-flight work, increments RESET_CNT,
 //                                flags ERROR.RESET_MIDCOMMIT if asserted in
 //                                SUBMIT/COMMIT.
@@ -60,14 +60,13 @@
 //   +0x014 FSM_STATE    (ro)  commit-FSM encoding (low 3 bits).
 //   +0x018 ERROR        (rw1c) sticky error bits, write-1-to-clear:
 //                             [0] CRC_ERR          descriptor CRC mismatch
-//                             [1] DUP_SEQ          duplicate/replay (req<=durable
-//                                                  or in-flight replay)
-//                             [2] GAP_SEQ          req ahead of allocator
+//                             [1] DUP_SEQ          req below durable count
+//                             [2] GAP_SEQ          req ahead of durable count
 //                             [3] MALFORMED        submit-while-busy/pending,
 //                                                  reserved CTRL bits, or
-//                                                  REQ_HI mismatch
+//                                                  invalid write
 //                             [4] RESET_MIDCOMMIT  soft reset hit SUBMIT/COMMIT
-//                             [5] OVERFLOW         TID allocator wrapped
+//                             [5] OVERFLOW         durable count cannot advance
 //                             [31:6] reserved (read 0).
 //   +0x01C PROGRESS_CNT (ro)  accepted-and-completed ops counter.
 //   +0x020 RESET_CNT    (ro)  soft-reset counter.
@@ -90,8 +89,7 @@
 //   +0x038 CRC_CALC     (ro)  locally computed CRC-32 (debug compare).
 //   +0x03C TID_LO       (ro)  last committed TID, low 32.
 //   +0x040 TID_HI       (ro)  last committed TID, high 32.
-//   +0x044 REQ_HI       (rw)  requested sequence, high 32 bits (must equal
-//                             allocator high half; else MALFORMED).
+//   +0x044 REQ_HI       (rw)  requested 0-based TID, high 32 bits.
 //   +0x048 DURABLE_HI   (ro)  durable watermark (count), high 32.
 //   +0x04C VISIBLE_HI   (ro)  visible watermark (count), high 32.
 //   +0x050 PENDING_HI   (ro)  pending watermark (count), high 32.
@@ -105,11 +103,11 @@
 //
 // Reset semantics: hard reset (reset_n) zeroes everything. Soft reset
 // (fsm_reset_i or CTRL.SOFT_RST) parks the FSM in IDLE, sets
-// PENDING=DURABLE (in-flight dropped, never surfaced as durable), preserves
-// EPOCH/DURABLE/VISIBLE. In COMMIT it REVOKES the allocated, uncommitted
-// TID (tid_next - 1). In SUBMIT/S_CRC allocation has not advanced yet, so
-// tid_next is preserved. In either case the interrupted descriptor can
-// retry under the SAME TID. Allocation is unchanged in IDLE/COMPLETE.
+// PENDING=DURABLE (in-flight dropped, never surfaced as durable) and preserves
+// EPOCH/DURABLE/VISIBLE. The caller may resubmit the same 0-based TID because
+// the next accepted TID is always the durable COUNT. A duplicate below that
+// count has no hardware side effect; re-ack requires a host comparison with
+// the persisted payload, which this register-only DUT cannot perform.
 // ---------------------------------------------------------------------------
 
 `timescale 1ns / 1ps
@@ -184,7 +182,6 @@ module durable_tid_v0 #(
   // State.
   logic [31:0] epoch;
   logic [31:0] req_lo, req_hi;
-  logic [63:0] tid_next;    // monotonic allocator: next TID to hand out
   logic [63:0] pending;     // accepted but not yet durable
   logic [63:0] durable;     // PERSISTENT watermark (monotonic)
   logic [63:0] visible;     // completion/visible watermark (never regresses)
@@ -221,7 +218,7 @@ module durable_tid_v0 #(
   // (Timing closure, 2026-09-25: an ALU-carry + wide mux cloud sinking
   // at a DFFCE CE input was the 50 MHz critical path; see README.)
   logic [31:0] epoch_n, req_lo_n, req_hi_n;
-  logic [63:0] tid_next_n, pending_n, durable_n, visible_n, tid_last_n;
+  logic [63:0] pending_n, durable_n, visible_n, tid_last_n;
   logic [2:0]  state_n;
   logic [31:0] ctrl_n;
   logic [31:0] err_n;
@@ -337,7 +334,6 @@ module durable_tid_v0 #(
     epoch_n           = epoch;
     req_lo_n          = req_lo;
     req_hi_n          = req_hi;
-    tid_next_n        = tid_next;
     pending_n         = pending;
     durable_n         = durable;
     visible_n         = visible;
@@ -382,13 +378,8 @@ module durable_tid_v0 #(
       commit_hold_n = 2'd0;
       if (state == S_SUBMIT || state == S_CRC || state == S_COMMIT) begin
         err_n[E_RSTMID] = 1'b1;
-        // Allocation advances only on CRC success, entering COMMIT.
-        // SUBMIT/S_CRC have not allocated: decrementing there would
-        // retreat an existing ID or underflow the first operation's 0.
-        // Revoke only the allocated, not-yet-durable COMMIT operation
-        // so its identical retry retains the same TID.
-        if (state == S_COMMIT)
-          tid_next_n = tid_next - 64'h0000000000000001;
+        // No allocation to revoke: durable remains the next valid 0-based
+        // request TID until the persistence barrier advances it.
       end
     end else begin
       // --- read pipeline advances (frozen under soft reset above) ----
@@ -445,17 +436,12 @@ module durable_tid_v0 #(
             ctrl_n[0] = 1'b0;
             if (ctrl[0] && wr_ctrl0)
               err_n[E_MALF] = 1'b1;
-            if (req_hi != tid_next[63:32]) begin
-              err_n[E_MALF] = 1'b1;  // high-half jump: malformed, not gap
-            end else if (req_full != tid_next) begin
-              if (req_full <= durable)
-                err_n[E_DUP] = 1'b1;  // duplicate / replay
-              else if (req_full > tid_next)
-                err_n[E_GAP] = 1'b1;  // same high half, ahead of allocator
-              else
-                err_n[E_DUP] = 1'b1;  // in-flight replay
-            end else if (&tid_next) begin
-              err_n[E_OVF] = 1'b1;    // allocator would wrap
+            if (req_full < durable) begin
+              err_n[E_DUP] = 1'b1;  // host verifies persisted payload to re-ack
+            end else if (req_full > durable) begin
+              err_n[E_GAP] = 1'b1;
+            end else if (&durable) begin
+              err_n[E_OVF] = 1'b1; // req+1 would wrap the count watermark
             end else begin
               // Latch the submit image; validate in SUBMIT/S_CRC.
               lat_d0_n  = desc0;
@@ -463,7 +449,7 @@ module durable_tid_v0 #(
               lat_req_n = req_lo;
               lat_ep_n  = epoch;
               lat_crc_n = desc_crc;
-              lat_tid_n = tid_next;
+              lat_tid_n = req_full;
               state_n   = S_SUBMIT;
             end
           end
@@ -492,7 +478,6 @@ module durable_tid_v0 #(
             // matching what the HPS harness oracle compares (count of
             // committed ops). tid_last keeps the 0-based TID (see COMPLETE).
             pending_n     = lat_tid + 64'h0000000000000001;
-            tid_next_n    = tid_next + 64'h0000000000000001;
             commit_hold_n = COMMIT_HOLD_INIT;
             state_n       = S_COMMIT;
           end else begin
@@ -542,7 +527,6 @@ module durable_tid_v0 #(
       epoch           <= 32'h00000000;
       req_lo          <= 32'h00000000;
       req_hi          <= 32'h00000000;
-      tid_next        <= 64'h0000000000000000;
       pending         <= 64'h0000000000000000;
       durable         <= 64'h0000000000000000;
       visible         <= 64'h0000000000000000;
@@ -575,7 +559,6 @@ module durable_tid_v0 #(
       epoch           <= epoch_n;
       req_lo          <= req_lo_n;
       req_hi          <= req_hi_n;
-      tid_next        <= tid_next_n;
       pending         <= pending_n;
       durable         <= durable_n;
       visible         <= visible_n;

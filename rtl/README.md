@@ -1,10 +1,19 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # durable_tid_v0 — register-only durable completion gate (issue #87)
 
-v0 FPGA experiment: monotonic TID allocator + commit FSM enforcing
+v0 FPGA experiment: caller-supplied 0-based TID + commit FSM enforcing
 `TRUSTED_COMPLETE(N) => PERSISTENT(N)`. No BRAM queue, DMA engine, SHA,
 RISC-V softcore, NVMe stack, filesystem, networking, or generic ring —
 per #87 exclusions. Integrity is CRC-32 (IEEE 802.3).
+
+> **Source-only #87 revision:** the DUT no longer allocates TIDs. `REQ` is a
+> caller-supplied 0-based TID, while PENDING/DURABLE/VISIBLE remain *counts*;
+> the next valid request equals the durable count. A duplicate below the
+> durable count is rejected without a side effect. This register-only DUT
+> cannot compare a retry payload with persisted media, so the host must do
+> that before re-acknowledging an identical operation. This revision has not
+> passed an approved simulator, fitter, or same-board FPGA run. Historical
+> PASS counts later in this file belong to earlier source, not these bytes.
 
 ## Files
 
@@ -222,8 +231,8 @@ is buffered and checksum-validated BEFORE dispatch (a CHK failure commits
 nothing — no partial commit). Then, per entry: write
 `EPOCH` (pinned to the frame-start value for all N) / `DESC0` / `DESC1` /
 `REQ_LO` / `REQ_HI=0` / `DESC_CRC` / `CTRL.SUBMIT`, settle past the commit
-pipeline, sample `ERROR`. Each entry is validated against the LIVE
-allocator at feed time, so a mid-burst reject does NOT cascade: the code
+pipeline, sample `ERROR`. Each entry is validated against the live durable
+count at feed time, so a mid-burst reject does NOT cascade: the code
 is recorded, that entry's sticky `ERROR` bits are rw1c-cleared (required
 for per-entry isolation — otherwise entry i+1 would inherit entry i's
 bits), and the rest CONTINUE, never stall. Pre-existing sticky `ERROR`

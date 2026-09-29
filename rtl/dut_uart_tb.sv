@@ -546,7 +546,7 @@ module dut_uart_tb;
     check("U5b durable held at 8", t_ok2 && t_d == 64'h8);
     clear_errors_uart(t_ok);
 
-    // U5c: REQ_HI mismatch -> MALFORMED.
+    // U5c: full-width request ahead of durable -> GAP.
     u_write(A_REQ_LO, 32'h00000008, t_ok);
     u_write(A_REQ_HI, 32'hDEADBEEF, t_ok2);
     u_write(A_DESC0, 32'h11111111, t_ok);
@@ -556,8 +556,8 @@ module dut_uart_tb;
     u_write(A_CTRL, CTRL_SUBMIT, t_ok);
     wait_idle_uart(t_ok2);
     u_read(A_ERROR, t_err, t_ok);
-    check("U5c REQ_HI mismatch flagged MALFORMED",
-          t_ok && t_ok2 && t_err[E_MALF] == 1'b1);
+    check("U5c high-half gap flagged GAP",
+          t_ok && t_ok2 && t_err[E_GAP] == 1'b1);
     read_durable_uart(t_d, t_ok);
     check("U5c durable held at 8", t_ok && t_d == 64'h8);
     clear_errors_uart(t_ok);

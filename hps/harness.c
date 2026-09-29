@@ -22,7 +22,7 @@
  *   ./harness reset             RESET round trip (counter++, history kept)
  *   ./harness smoke <N>         N good submits, oracle-checked vs model
  *   ./harness diff  <N> [seed]  seeded differential mix:
- *                               good/dup/gap/malformed(DUT-level)/reads
+ *                               good/dup/gap/invalid(DUT-level)/reads
  *                               FIRST mismatch stops, dumps transcript.
  *   Burst path (CMD 0x05 / RSP 0x85, spec in rtl/README.md + dut_uart.v):
  *   ./harness burst <N> [seed]  seeded burst differential: N total submits
@@ -545,7 +545,7 @@ static int vec_gap(uint64_t next, unsigned opno)
     return (clear_errors() == 0) ? 0 : -1;
 }
 
-static int vec_malformed(uint64_t next, unsigned opno)
+static int vec_invalid(uint64_t next, unsigned opno)
 {
     uint32_t kind = rng_next() % 3u;
     uint32_t err = 0;
@@ -570,7 +570,7 @@ static int vec_malformed(uint64_t next, unsigned opno)
                    err);
             return -1;
         }
-    } else { /* REQ_HI mismatch */
+    } else { /* high-half request ahead of the durable count */
         uint32_t req = (uint32_t)next;
         uint32_t crc = desc_crc(0x11111111u, 0x22222222u, req, g_epoch);
         if (u_write(R_REQ_LO, req) != 0 ||
@@ -579,24 +579,24 @@ static int vec_malformed(uint64_t next, unsigned opno)
             u_write(R_DESC1, 0x22222222u) != 0 ||
             u_write(R_DESC_CRC, crc) != 0 ||
             u_write(R_CTRL, CTRL_SUBMIT) != 0 || wait_idle(30) != 0) {
-            tr_log("op %u MALF-reqhi: submit failed", opno);
+            tr_log("op %u GAP-reqhi: submit failed", opno);
             return -1;
         }
         if (u_write(R_REQ_HI, 0) != 0) { /* restore for later good ops */
-            tr_log("op %u MALF-reqhi: REQ_HI restore failed", opno);
+            tr_log("op %u GAP-reqhi: REQ_HI restore failed", opno);
             return -1;
         }
-        if (u_read(R_ERROR, &err) != 0 || err != ERR_MALF) {
-            tr_log("op %u MALF-reqhi: ERROR=0x%x, want MALF", opno, err);
+        if (u_read(R_ERROR, &err) != 0 || err != ERR_GAP) {
+            tr_log("op %u GAP-reqhi: ERROR=0x%x, want GAP", opno, err);
             return -1;
         }
     }
     if (read_durable(&d) != 0 || d != next) {
-        tr_log("op %u MALF kind=%u: durable moved to %llu", opno, kind,
+        tr_log("op %u INVALID kind=%u: durable moved to %llu", opno, kind,
                (unsigned long long)d);
         return -1;
     }
-    tr_log("op %u MALF kind=%u held d=%llu", opno, kind,
+    tr_log("op %u INVALID kind=%u held d=%llu", opno, kind,
            (unsigned long long)d);
     return (clear_errors() == 0) ? 0 : -1;
 }
@@ -779,7 +779,7 @@ static int u_burst(uint8_t n, const struct b_entry *e, uint8_t *results,
 }
 
 /* Batch oracle: expected result byte for one burst entry against the live
- * model (*sw_next = pre-burst durable == tid_next; runs stay < 2^32 so the
+ * model (*sw_next = pre-burst durable count; runs stay < 2^32 so the
  * high half is 0, matching the bridge-pinned REQ_HI=0).
  *
  * Mirrors DUT precedence (durable_tid_v0.v S_IDLE before S_CRC): the REQ
@@ -791,9 +791,8 @@ static uint8_t burst_expect(uint64_t *sw_next, const struct b_entry *e,
 {
     unsigned code;
     if ((uint64_t)e->req != *sw_next) {
-        /* DUT: req_full <= durable (== tid_next when idle) -> DUP,
-         * req_full > tid_next -> GAP. In-flight replay (between the two)
-         * is unreachable: the engine settles per entry. */
+        /* DUT: req_full < durable count -> DUP, req_full > durable
+         * count -> GAP. The engine settles each entry before the next. */
         code = ((uint64_t)e->req < *sw_next) ? 2u : 3u;
     } else if (e->crc != desc_crc(e->d0, e->d1, e->req, epoch)) {
         code = 1u;
@@ -1196,7 +1195,7 @@ static int run_diff(unsigned long n, uint32_t seed)
             if (rc == 0)
                 c_gap++;
         } else if (r < 88) {
-            rc = vec_malformed(next, (unsigned)i);
+            rc = vec_invalid(next, (unsigned)i);
             if (rc == 0)
                 c_malf++;
         } else {
@@ -1240,7 +1239,7 @@ static void usage(const char *argv0)
             "  reset                 RESET round trip\n"
             "  smoke <N>             N good submits, oracle-checked\n"
             "  diff  <N> [seed]      seeded differential mix (good/dup/gap/\n"
-            "                        malformed/reads); FIRST mismatch stops\n"
+            "                        invalid/reads); FIRST mismatch stops\n"
             "  burst <N> [seed]      seeded burst differential (N submits in\n"
             "                        randomized 1..64 frames, good/dup/gap/\n"
             "                        badcrc entries); FIRST mismatch stops\n"

@@ -15,7 +15,7 @@
  *
  * Build (both hosts):  cc -O2 -Wall -Wextra -o /tmp/harness hps/harness.c
  *
- *   ./harness ping              PING round trip (expect PONG + VERSION 0)
+ *   ./harness ping              PING round trip (expect PONG + VERSION 1)
  *   ./harness magic             read MAGIC + VERSION identity registers
  *   ./harness read  <addr>      READ-REG one round trip
  *   ./harness write <addr> <v>  WRITE-REG one round trip (echo-checked)
@@ -90,6 +90,7 @@
 #define R_VIS_HI   0x4Cu
 #define R_MAGIC    0x54u
 #define R_VERSION  0x58u
+#define PROTOCOL_VERSION 1u /* caller-supplied TID ABI; reject old hardware */
 
 #define CTRL_SUBMIT 0x00000001u
 
@@ -424,16 +425,20 @@ static int sanity(void)
         fprintf(stderr, "harness: sanity: PING failed\n");
         return -1;
     }
+    if (v != PROTOCOL_VERSION) {
+        fprintf(stderr, "harness: sanity: PONG VERSION mismatch 0x%08x\n", v);
+        return -1;
+    }
     printf("harness: ping ok (PONG version=%u)\n", v);
     if (u_read(R_MAGIC, &m) != 0 || m != 0x44555230u) {
         fprintf(stderr, "harness: sanity: MAGIC mismatch 0x%08x\n", m);
         return -1;
     }
-    if (u_read(R_VERSION, &v2) != 0 || v2 != 0) {
+    if (u_read(R_VERSION, &v2) != 0 || v2 != PROTOCOL_VERSION) {
         fprintf(stderr, "harness: sanity: VERSION mismatch 0x%08x\n", v2);
         return -1;
     }
-    printf("harness: magic DUR0 + version v0 ok\n");
+    printf("harness: magic DUR0 + version v1 ok\n");
     /* UART-level malformed frame (bad checksum) must get NO response;
      * then the link must still be alive (TB U6 analogue). */
     bad[0] = M_MAGIC0;
@@ -452,7 +457,7 @@ static int sanity(void)
         return -1;
     }
     printf("harness: bad-checksum frame silently dropped (rc=%d)\n", rc);
-    if (u_ping(&v) != 0) {
+    if (u_ping(&v) != 0 || v != PROTOCOL_VERSION) {
         fprintf(stderr, "harness: sanity: link dead after rejection\n");
         return -1;
     }
@@ -635,7 +640,7 @@ static int vec_read(uint64_t next, unsigned opno)
         }
         break;
     case R_VERSION:
-        if (v != 0) {
+        if (v != PROTOCOL_VERSION) {
             tr_log("op %u READ VERSION=0x%x", opno, v);
             return -1;
         }
@@ -1232,7 +1237,7 @@ static void usage(const char *argv0)
             "usage: %s [-t tty] <ping|magic|read|write|reset|smoke|diff|"
             "burst|burstmax|burstdrop>"
             " [args...]\n"
-            "  ping                  PING round trip (PONG + VERSION 0)\n"
+            "  ping                  PING round trip (PONG + VERSION 1)\n"
             "  magic                 read MAGIC + VERSION\n"
             "  read  <addr>          READ-REG one round trip\n"
             "  write <addr> <val>    WRITE-REG one round trip (echo-checked)\n"
@@ -1273,13 +1278,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "harness: PING failed\n");
             return 1;
         }
+        if (val != PROTOCOL_VERSION) {
+            fprintf(stderr, "harness: PONG VERSION mismatch 0x%08x\n", val);
+            return 1;
+        }
         printf("harness: PONG version=%u\n", val);
     } else if (strcmp(cmd, "magic") == 0) {
         uint32_t m = 0, version = 0;
         if (u_read(R_MAGIC, &m) != 0 || u_read(R_VERSION, &version) != 0)
             return 1;
         printf("harness: MAGIC=0x%08x VERSION=0x%08x\n", m, version);
-        if (m != 0x44555230u || version != 0)
+        if (m != 0x44555230u || version != PROTOCOL_VERSION)
             return 1;
     } else if (strcmp(cmd, "read") == 0) {
         uint32_t a;

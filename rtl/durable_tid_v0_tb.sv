@@ -300,7 +300,7 @@ module durable_tid_v0_tb;
     mm_read(A_MAGIC, t_magic);
     check("T0 magic reads DUR0", t_magic == 32'h44555230);
     mm_read(A_VERSION, t_ver);
-    check("T0 version is v0", t_ver == 32'h00000000);
+    check("T0 version is v1", t_ver == 32'h00000001);
     read_durable(t_d);
     check("T0 durable zero after reset", t_d == 64'h0);
     mm_read(A_ERROR, t_err);
@@ -557,6 +557,7 @@ module durable_tid_v0_tb;
     wait_idle(t_ok);
     read_durable(t_d);
     check("T10c same TID commits after early resets", t_ok && t_d == 64'h10);
+    check("T10c trusted pulse count advanced", mon_trusted_cnt == 16);
 
     // TEST 11: model the 64-bit terminal count directly; billions of
     // submits are not needed to test overflow arithmetic. Turn off the
@@ -570,6 +571,44 @@ module durable_tid_v0_tb;
     mm_read(A_ERROR, t_err);
     check("T11 max count flags overflow", t_ok && t_err[E_OVF] == 1'b1);
     check("T11 no wrapped pending", dut.pending == 64'h10);
+    release dut.durable;
+
+    // TEST 12: forced-state arithmetic ONLY, not a reachable 2^32-op run.
+    // It covers both the low-word carry in req+1 and equality when REQ_HI
+    // is nonzero. The UART bridge pins REQ_HI=0, so this is MMIO-path only.
+    // No persistence or trusted-completion conclusion follows from force.
+    clear_errors;
+    force dut.durable = 64'h00000000FFFFFFFF;
+    mm_write(A_DESC0, 32'h12345678);
+    mm_write(A_DESC1, 32'h87654321);
+    mm_write(A_REQ_LO, 32'hFFFFFFFF);
+    mm_write(A_REQ_HI, 32'h00000000);
+    mm_write(A_DESC_CRC, tb_crc32({32'h00000001, 32'hFFFFFFFF,
+                                   32'h87654321, 32'h12345678}));
+    mm_write(A_CTRL, CTRL_SUBMIT);
+    wait_idle(t_ok);
+    mm_read(A_ERROR, t_err);
+    check("T12a low-word carry accepted",
+          t_ok && t_err == 32'h0 &&
+          dut.lat_tid == 64'h00000000FFFFFFFF &&
+          dut.pending == 64'h0000000100000000);
+    release dut.durable;
+
+    clear_errors;
+    force dut.durable = 64'h0000000100000000;
+    mm_write(A_DESC0, 32'hABCDEF01);
+    mm_write(A_DESC1, 32'h10FEDCBA);
+    mm_write(A_REQ_LO, 32'h00000000);
+    mm_write(A_REQ_HI, 32'h00000001);
+    mm_write(A_DESC_CRC, tb_crc32({32'h00000001, 32'h00000000,
+                                   32'h10FEDCBA, 32'hABCDEF01}));
+    mm_write(A_CTRL, CTRL_SUBMIT);
+    wait_idle(t_ok);
+    mm_read(A_ERROR, t_err);
+    check("T12b high-half exact request accepted",
+          t_ok && t_err == 32'h0 &&
+          dut.lat_tid == 64'h0000000100000000 &&
+          dut.pending == 64'h0000000100000001);
     release dut.durable;
 
     $display("----------------------------------------");

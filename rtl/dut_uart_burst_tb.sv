@@ -262,7 +262,7 @@ module dut_uart_burst_tb;
         host_cmd(8'h04, 8'h00, 32'h00000000);
         host_resp(rsp, ver, rok);
       join
-      ok = rok && (rsp == 8'h84) && (ver == 32'h00000000);
+      ok = rok && (rsp == 8'h84) && (ver == 32'h00000001);
     end
   endtask
 

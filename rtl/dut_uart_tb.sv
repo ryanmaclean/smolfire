@@ -351,7 +351,7 @@ module dut_uart_tb;
     end
   endtask
 
-  // PING round trip. ok=1 iff PONG with VERSION==0.
+  // PING round trip. ok=1 iff PONG with caller-TID ABI VERSION==1.
   // (Forked CMD/RSP for the same early-RSP reason as u_write.)
   task u_ping(output ok);
     reg [7:0] rsp;
@@ -362,7 +362,7 @@ module dut_uart_tb;
         host_cmd(CMD_PING, 8'h00, 32'h00000000);
         host_resp(rsp, ver, rok);
       join
-      ok = rok && (rsp == RSP_PING) && (ver == 32'h00000000);
+      ok = rok && (rsp == RSP_PING) && (ver == 32'h00000001);
     end
   endtask
 
@@ -481,7 +481,7 @@ module dut_uart_tb;
     u_read(A_MAGIC, t_rdata, t_ok);
     check("U1 magic reads DUR0 over UART", t_ok && t_rdata == 32'h44555230);
     u_read(A_VERSION, t_rdata, t_ok);
-    check("U1 version is v0 over UART", t_ok && t_rdata == 32'h00000000);
+    check("U1 version is v1 over UART", t_ok && t_rdata == 32'h00000001);
 
     // U2: WRITE-REG round trip + readback.
     u_write(A_EPOCH, 32'h00000001, t_ok);

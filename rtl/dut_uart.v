@@ -39,7 +39,7 @@
 //     RSP: 0x81 WRITE-ACK (DATA = echo of written value)
 //          0x82 READ-DATA (DATA = register value)
 //          0x83 RESET-DONE (DATA = RESET_CNT after the reset pulse)
-//          0x84 PONG (DATA = VERSION 0x00000000)
+//          0x84 PONG (DATA = VERSION 0x00000001)
 //   BURST frame (host -> FPGA), variable 5+16*N bytes, N = COUNT (1..64):
 //     [0] MAGIC0  [1] MAGIC1  [2] CMD_BURST_SUBMIT = 0x05  [3] COUNT
 //     [4..4+16*N-1] N entries, 16 bytes each, all words little-endian:
@@ -62,7 +62,7 @@
 //   checksum FIRST, then feeds entries internally one per DUT commit
 //   (EPOCH/REQ_LO/REQ_HI/DESC0/DESC1/DESC_CRC + CTRL.SUBMIT per entry,
 //   EPOCH pinned to its frame-start value for all N). Each entry is
-//   validated against the LIVE allocator at feed time, so a mid-burst
+//   validated against the LIVE durable count at feed time, so a mid-burst
 //   reject does NOT cascade: the code is recorded, sticky ERROR bits
 //   from the entry are cleared, and the rest CONTINUE (never stall).
 //   Pre-existing sticky ERROR bits (set before the burst) are preserved,
@@ -118,7 +118,7 @@ module dut_uart #(
   localparam [7:0] RSP_PING   = 8'h84;
   localparam [7:0] RSP_BURST  = 8'h85;
   localparam [7:0] A_RSTCNT   = 8'h20; // RESET_CNT byte offset (response data)
-  localparam [31:0] VERSION_VAL = 32'h00000000; // v0 (matches DUT A_VERSION)
+  localparam [31:0] VERSION_VAL = 32'h00000001; // matches DUT A_VERSION
 
   // Baud timing (integer division; see header note for 115200 error).
   localparam integer BIT_DIV = CLK_HZ / BAUD; // clk cycles per serial bit

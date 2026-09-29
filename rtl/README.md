@@ -180,7 +180,11 @@ RSP frame, FPGA → host, 8 bytes:
 `RSP`: `0x81` WRITE-ACK (echo of written value) |
 `0x82` READ-DATA (register value) |
 `0x83` RESET-DONE (RESET_CNT after the pulse) |
-`0x84` PONG (VERSION `0x00000000`).
+`0x84` PONG (VERSION `0x00000001`, caller-supplied TID ABI).
+The HPS harness requires PONG and the VERSION register to both equal 1
+before smoke/differential/burst runs; a VERSION 0 allocator bitstream is
+rejected. The UART bridge still pins `REQ_HI=0` for single and burst
+submits, so full-width carry/high-half checks are Avalon-testbench-only.
 Malformed frames (bad magic/checksum/unknown CMD, framing errors) are
 dropped SILENTLY, no response; strict request-response (one RSP per CMD).
 WRITE-REG ACKs after the write cycle (does NOT wait for commit — the host

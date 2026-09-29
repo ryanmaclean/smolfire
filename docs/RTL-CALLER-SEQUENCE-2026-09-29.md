@@ -3,7 +3,10 @@
 
 This isolated candidate removes the 64-bit `tid_next` allocator register
 from both RTL variants. It keeps the existing Avalon map and UART frame
-bytes: `REQ_{HI,LO}` is a 0-based TID; `PENDING`, `DURABLE`, and `VISIBLE`
+layout, but increments the register `VERSION` and UART PONG value from 0
+to 1 so the HPS harness rejects an old allocator-based bitstream before
+differential runs. `MAGIC` remains `DUR0`. `REQ_{HI,LO}` is a 0-based TID;
+`PENDING`, `DURABLE`, and `VISIBLE`
 are counts (highest committed 0-based TID + 1). The first valid request is
 0. After durable count N, the next valid request is N. The HPS software
 oracle's 1-based `seq=N+1` maps to RTL request `seq-1=N`.
@@ -25,9 +28,13 @@ bit **alone must not be reported as a successful idempotent re-ack**.
 The 16-byte descriptor CRC covers the low request word and payload as in
 the existing frame; the full-width equality check against durable count
 keeps an altered high word from being accepted as the next request.
+The UART single-submit and burst paths still pin `REQ_HI=0`, and the HPS
+oracle uses a 32-bit request value. The high-half acceptance and low-word
+carry cases are exercised only through the Avalon register testbench.
 
 The source-only testbench adds reset in SUBMIT and CRC, full-width gap,
-and terminal overflow controls; its existing COMMIT reset, duplicate,
+terminal overflow, and forced-state high-half/carry arithmetic controls;
+its existing COMMIT reset, duplicate,
 gap, CRC and monotonicity controls remain. It can be compiled with either
 RTL variant, but no simulator was run under the current MIT/BSD/Apache-only
 tool policy. No resource/timing result or bitstream is implied.

@@ -94,7 +94,7 @@
 //   +0x04C VISIBLE_HI   (ro)  visible watermark (count), high 32.
 //   +0x050 PENDING_HI   (ro)  pending watermark (count), high 32.
 //   +0x054 MAGIC        (ro)  0x44555230 ("DUR0").
-//   +0x058 VERSION      (ro)  0x00000000 (v0).
+//   +0x058 VERSION      (ro)  0x00000001 (caller-supplied TID ABI).
 //
 // Submit protocol (HPS side): write DESC0/DESC1/REQ_LO/REQ_HI/DESC_CRC, then
 // write CTRL.SUBMIT=1. Poll STATUS.BUSY==0, then read DURABLE/VISIBLE/ERROR.
@@ -159,7 +159,7 @@ module durable_tid_v0 #(
   localparam integer W_VERSION  = 12'h058 >> 2;
 
   localparam logic [31:0] MAGIC_VAL   = 32'h44555230; // "DUR0"
-  localparam logic [31:0] VERSION_VAL = 32'h00000000; // v0
+  localparam logic [31:0] VERSION_VAL = 32'h00000001; // caller-supplied TID ABI
 
   // FSM encoding (3 bits: S_CRC added 2026-09-25 for the pipelined
   // CRC -- stage 1 registers the first-half CRC in S_SUBMIT, stage 2

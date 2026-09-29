@@ -1,15 +1,13 @@
 # #86 ARM-only durable-commit baseline — superstation1, 2026-09-29
 
-> **DEVIATION NOTE (prominent, read first):** issue #86 says "no Linux target",
-> but the box (`superstation1`, reachable at `10.0.3.136`) runs
-> **Linux 6.18.38-MiSTer** (upgraded since the 2026-09-24 run, which saw
-> 5.15.1-MiSTer). There is no BSD / bare-metal / RISC-V target available on
-> this hardware today, so this baseline was **measured as-is on the resident
+> **PLATFORM RULING (owner, 2026-09-29): Linux is ACCEPTED on DE10-Nano-class
+> devices — there is no working BSD for them yet.** Issue #86 says "no Linux
+> target", but the box (`superstation1`, `10.0.3.136`) runs
+> **Linux 6.18.38-MiSTer**, so this baseline was **measured as-is on the resident
 > Linux**: single-outstanding-op append + fsync + recovery, CPU-only, no FPGA,
-> no ring/queue optimization. The BSD-semantics path (fsync vs. flush
-> equivalents, alternate rootfs) is **left open** — re-running this workload
-> under a BSD target is follow-on work, and the `ryanlab.bench.v1` shape used
-> here is deliberately identical so the comparison will be direct.
+> no ring/queue optimization. A BSD-semantics rerun remains possible later;
+> the `ryanlab.bench.v1` shape used here is deliberately identical so any
+> future comparison will be direct.
 
 ## Method
 

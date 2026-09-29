@@ -32,4 +32,31 @@ let r = (do { nu bin/tslog-phases.nu --dir $tmp } | complete)
 if $r.exit_code == 0 { fail "missing EXIT start_init must fail" }
 if not ($r.stderr | str contains "TSLOGSIZE") { fail "overflow error should name TSLOGSIZE" }
 ^rm -rf $tmp
+
+# The cross-clock split must reject impossible alignment, not clamp it to
+# an apparent speedup. Guest durations and measured wall time stay intact.
+# These execute the actual analyzer on altered copies of the known fixture.
+let capture = open --raw tests/fixtures/tslog/tslog-run1.log
+for case in [
+    {name: ready_after_wall, wall: 400, valid: false, vmm: null, first: null}
+    {name: first_after_wall, wall: 50, valid: false, vmm: null, first: null}
+    {name: zero_vmm_boundary, wall: 500, valid: true, vmm: 0.0, first: 100.0}
+] {
+    let dir = (^mktemp -d | str trim)
+    $capture | str replace 'TIME_TO_READY=600ms' $"TIME_TO_READY=($case.wall)ms"
+        | save $"($dir)/tslog-run1.log"
+    let result = (do { nu bin/tslog-phases.nu --dir $dir } | complete)
+    ^rm -rf $dir
+    if $result.exit_code != 0 { fail $"($case.name): analyzer failed: ($result.stderr)" }
+    let actual = $result.stdout | from json
+    let sample = $actual.runs | first
+    if $sample.epoch_vm_relative != $case.valid { fail $"($case.name): epoch consistency verdict" }
+    if $sample.phases_ms.vmm_to_vcpu != $case.vmm { fail $"($case.name): invalid VMM phase" }
+    if $sample.phases_ms.vcpu_to_kernel != $case.first { fail $"($case.name): invalid vCPU phase" }
+    if $sample.phases_ms.wall_to_ready != $case.wall { fail $"($case.name): measured wall was changed" }
+    if $sample.phases_ms.kernel_first_to_ready != 400.0 { fail $"($case.name): guest duration was changed" }
+    let aggregate = $actual.phases | where phase == vmm_to_vcpu | first
+    let expected_n = if $case.valid { 1 } else { 0 }
+    if $aggregate.n != $expected_n or $aggregate.median != $case.vmm { fail $"($case.name): aggregate includes rejected split" }
+}
 print "tslog-phases-test: ok"

@@ -15,8 +15,9 @@
 #   VMM exec → vCPU TSC 0  =  wall(READY) − tsc(READY)
 # where tsc(READY) is the exit stamp of the /rescue/echo that printed
 # SMOLFIRE_READY (debug.tslog_user). The epoch assumption is checked: if the
-# first kernel record is later than the wall-clock READY, the pre-kernel
-# split is reported as null instead of a wrong number.
+# first kernel record or READY anchor cannot fit in the wall-clock window,
+# the pre-kernel split is reported as null instead of a wrong number.
+# This is a consistency check, not proof that the two clocks share an epoch.
 #
 # Kernel phase boundaries (TSLOG ENTER/EXIT records):
 #   first record (hammer_time) → mi_startup → start_init{ vfs_mountroot } →
@@ -119,8 +120,13 @@ def analyze-run [path: string] {
 
     let ready_ms = do $ms $t_ready
     let first_ms = do $ms $t_first
-    let epoch_ok = $wall != null and $first_ms < ($wall | into int)
     let wall_ms = if $wall == null { null } else { $wall | into int }
+    # A first kernel stamp inside the window is insufficient: the later
+    # READY anchor can still exceed wall READY and imply negative VMM time.
+    # Preserve the measured wall/guest times; do not clamp the difference.
+    let epoch_ok = if $wall_ms == null { false } else {
+        $first_ms >= 0 and $first_ms <= $ready_ms and $ready_ms <= $wall_ms
+    }
     let d = {|a, b| if $a == null or $b == null { null } else { (do $ms $b) - (do $ms $a) } }
     let mount_ms = do $d $t_mr $t_mre
     let phases = {

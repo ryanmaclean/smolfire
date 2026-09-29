@@ -76,6 +76,19 @@
       "passes": true,
       "status": "passing",
       "evidence": "coord-fsm-tests.nu 9/9 pass incl. determinism assertions; wired into run-all.sh and qualityChecks. coord-tick.nu routes every FSM transition/verdict through log-transition/log-verdict (single telemetry-record constructor, schema_version v1: schema_version,ts,event,state_from,state_to,task_id,verdict,attempt,reason,message_id). Tests 6-9 assert identical ordered columns per event kind, closed enums for state_from/state_to/verdict/reason, expected sequences for full-cycle/halt/fail-retry/escalate/malformed runs, and run-to-run equality modulo ts/message-id timestamps; renaming or reordering a field makes the gate exit 1."
+    },
+    {
+      "id": "S-006",
+      "priority": 6,
+      "title": "Persist coordinator state atomically and fail closed on corruption",
+      "description": "As an operator, I need state-file writes to be crash-atomic and corrupt state files to halt the tick instead of causing amnesia, so a crash mid-write cannot reset retry budgets or re-dispatch halted tasks.",
+      "filesHint": [
+        "bin/coord-tick.nu",
+        "tests/coord-state-atomic-test.nu"
+      ],
+      "passes": true,
+      "status": "passing",
+      "evidence": "coord-state-atomic-test.nu 5/5 pass via real `nu bin/coord-tick.nu` subprocess invocations: torn (truncated) state file fails closed (non-zero exit, spool byte-identical so halted t-hold is NOT re-dispatched, file quarantined to *.corrupt-*); empty state file fails closed the same way; absent state file still fresh-inits; successful save leaves valid TOML with no *.tmp.* debris (temp+rename); stale tmp from a crashed writer is swept and the intact state is ticked. Wired into .github/workflows/ci.yml and auto-discovered by tests/run-all.sh. Existing suites unaffected: coord-tick-test, coord-double-dispatch-test, coord-fsm-tests 9/9 all green."
     }
   ]
 }

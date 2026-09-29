@@ -60,6 +60,12 @@ jobs:
       - name: coord no-double-dispatch guard tests
         run: nu tests/coord-double-dispatch-test.nu
 
+      # coord-state-atomic-test.nu: crash-safe state persistence invariant
+      # (§12 companion — atomic save-state via temp+rename, fail-closed
+      # load-state with quarantine on corrupt files).
+      - name: coord state-atomic guard tests
+        run: nu tests/coord-state-atomic-test.nu
+
       # coord-dispatch-test.nu: billed-subprocess guard coverage for
       # dispatch-claude / find-claude (no other test in this suite reaches
       # bin/coord-dispatch.nu's claude-CLI path — only dispatch-vm is

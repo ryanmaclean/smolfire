@@ -1,0 +1,18 @@
+[
+  {
+    "path": "hps/bsd_primitives_bench.c",
+    "sha256": "fcf7e54aa4c801f8d4283e3729daf885d245122f761b04a259c9fdd65ecc6932"
+  },
+  {
+    "path": "tests/bsd-primitives-test.nu",
+    "sha256": "d22bde706485e08c91ebd01303b083dbf3e331fbfe8fd444711f128cf09ae990"
+  },
+  {
+    "path": "tests/bsd-primitives-runner-test.nu",
+    "sha256": "48cb986d7a5cb7c538c60f2ba15d414009410790e35ffd165df8b910cd1ddb28"
+  },
+  {
+    "path": "bin/bsd-primitives.nu",
+    "sha256": "c3ca728aa80afe63f2a003c6a8f5038af4610675cc8f46d637a0645c1f978f4a"
+  }
+]

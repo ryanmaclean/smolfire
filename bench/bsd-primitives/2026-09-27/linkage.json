@@ -1,0 +1,5 @@
+{
+  "stdout": "./bsd-primitives-bench:\n\tlibc.so.7 => /lib/libc.so.7 (0x289524f57000)\n\tlibsys.so.7 => /lib/libsys.so.7 (0x289525bf9000)\n\t[vdso] (0x289523f24000)\n",
+  "stderr": "",
+  "exit_code": 0
+}

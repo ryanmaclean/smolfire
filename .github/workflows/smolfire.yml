@@ -160,6 +160,7 @@ jobs:
           $SSH 'cp /root/smolfire/sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/'
           TSLOG_ENV=0
           [ "${{ inputs.tslog && 'true' || 'false' }}" = true ] && TSLOG_ENV=1
+          [ "$GITHUB_REF" = 'refs/heads/exp/uart-disable-0929' ] && TSLOG_ENV=1
           BUILD_RC=0
           $SSH "env SMOLFIRE_TSLOG=$TSLOG_ENV sh /root/smolfire/bin/build-smolfire.sh" 2>&1 | tee build.log || BUILD_RC=$?
           scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -371,13 +372,13 @@ jobs:
           exit $RC
 
       - name: TSLOG capture — 3 TSLOG boots + 3 release wall-clock boots (tslog only)
-        # Measurement, not a gate: runs after the gates whatever they said
-        # (a failing gate is exactly when phase data is most useful).
+        # Paired measurement is an enforced experiment gate and still runs
+        # after other gates, so their failures retain phase data.
         # Firecracker only (the VMM §1 of the roadmap describes); same
         # boot_args and TAP net path as the gate so rc does the same work.
-        if: ${{ !cancelled() && inputs.tslog }}
-        continue-on-error: true
+        if: ${{ !cancelled() && (inputs.tslog || github.ref == 'refs/heads/exp/uart-disable-0929') }}
         run: |
+          set -e
           cd "$WORK"
           test -f smolfire-kernel-tslog || { echo "no TSLOG kernel built"; exit 1; }
           sha256sum smolfire-kernel smolfire-kernel-tslog | tee kernels.sha256
@@ -394,11 +395,25 @@ jobs:
             ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
             echo "$!" > "$WORK/httpd.pid"; sleep 1
           fi
-          mkfc() {  # $1 = kernel file name
-            printf '{\n "boot-source": { "kernel_image_path": "%s/%s", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 hint.uart.1.disabled=1 hint.uart.2.disabled=1 hint.uart.3.disabled=1 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$1"
+          uart_hints='hint.uart.1.disabled=1 hint.uart.2.disabled=1 hint.uart.3.disabled=1 '
+          mkfc() {  # $1 = kernel file name; $2 = optional UART hints
+            printf '{\n "boot-source": { "kernel_image_path": "%s/%s", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 %ssmolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$1" "$2"
           }
-          mkfc smolfire-kernel       > fc-release.json
-          mkfc smolfire-kernel-tslog > fc-tslog.json
+          mkfc smolfire-kernel "$uart_hints" > fc-release.json
+          mkfc smolfire-kernel ''            > fc-baseline.json
+          mkfc smolfire-kernel-tslog "$uart_hints" > fc-tslog.json
+          candidate_cfg=$(cat fc-release.json)
+          baseline_cfg=$(cat fc-baseline.json)
+          [[ "$candidate_cfg" == *"$uart_hints"* ]] || { echo 'UART hints missing from candidate'; exit 1; }
+          [[ "${candidate_cfg/$uart_hints/}" == "$baseline_cfg" ]] || {
+            echo 'Paired configs differ outside the three UART hints'; exit 1;
+          }
+          sha256sum fc-baseline.json fc-release.json fc-tslog.json | tee configs.sha256
+          {
+            uname -a
+            grep -m 1 -E 'model name|cpu MHz' /proc/cpuinfo || true
+            "$WORK/firecracker" --version
+          } > paired-runner.txt
           # boot KIND N CFG WAITFOR: wall clock exec->READY via expect,
           # full serial to KIND-runN.log (send_user lines land in it too).
           boot() {
@@ -429,15 +444,97 @@ jobs:
           FAILS=0
           for i in 1 2 3; do boot release "$i" fc-release.json ""                 || FAILS=$((FAILS+1)); done
           for i in 1 2 3; do boot tslog   "$i" fc-tslog.json   SMOLFIRE_TSLOG_DONE || FAILS=$((FAILS+1)); done
+          # The release ELF and runner are identical in each adjacent A/B pair.
+          # Each boot gets a new token and proves network, shell and host ping.
+          paired_boot() {  # variant, pair, config
+            local variant="$1" pair="$2" cfg="$3" token="uart-${1}-${2}-${RANDOM}-${RANDOM}"
+            printf '%s\n' "$token" > "$WORK/www/token.txt"
+            timeout 60 expect -c '
+              log_file -noappend '"$WORK/pair-${variant}-run${pair}.log"'
+              set timeout 30
+              set t0 [clock milliseconds]
+              spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK/$cfg"'
+              expect {
+                "SMOLFIRE_NET_OK '"$token"'" { send_user "\nNET_GATE=pass\n" }
+                "SMOLFIRE_NET_FAIL" { send_user "\nNET_GATE=fail\n"; exit 3 }
+                "panic" { send_user "\nVERDICT=fail (panic)\n"; exit 2 }
+                timeout { send_user "\nVERDICT=fail (no network token)\n"; exit 3 }
+                eof { send_user "\nVERDICT=fail (firecracker exited)\n"; exit 2 }
+              }
+              expect {
+                "SMOLFIRE_READY" { send_user "\nTIME_TO_READY=[expr [clock milliseconds]-$t0]ms\n" }
+                "panic" { send_user "\nVERDICT=fail (panic)\n"; exit 2 }
+                timeout { send_user "\nVERDICT=fail (no READY)\n"; exit 1 }
+                eof { send_user "\nVERDICT=fail (firecracker exited)\n"; exit 2 }
+              }
+              send {echo FIRE_$((6*7))}
+              send "\r"
+              expect {
+                "FIRE_42" {
+                  send_user "\nSHELL_GATE=pass\n"
+                  if {[catch {exec ping -c 2 -W 2 172.16.0.2} pout]} {
+                    send_user "\nHOST_PING=fail ($pout)\n"; exit 4
+                  }
+                  send_user "\nHOST_PING=pass\nVERDICT=pass\n"
+                  exit 0
+                }
+                "panic" { send_user "\nVERDICT=fail (panic)\n"; exit 2 }
+                timeout { send_user "\nVERDICT=fail (shell timeout)\n"; exit 1 }
+                eof { send_user "\nVERDICT=fail (firecracker exited)\n"; exit 2 }
+              }'
+            local rc=$?
+            pkill -f 'firecracker --no-api' || true; sleep 1
+            return $rc
+          }
+          paired_boot warmA 0 fc-baseline.json || FAILS=$((FAILS+1))
+          paired_boot warmB 0 fc-release.json || FAILS=$((FAILS+1))
+          for i in $(seq 1 10); do
+            if [ $((i % 2)) -eq 1 ]; then order='A B'; else order='B A'; fi
+            for variant in $order; do
+              if [ "$variant" = A ]; then cfg=fc-baseline.json; else cfg=fc-release.json; fi
+              paired_boot "$variant" "$i" "$cfg" || FAILS=$((FAILS+1))
+            done
+          done
+          goal=pass
+          {
+            echo '### Paired release A/B (same runner and ELF; A=baseline, B=UART hints)'
+            echo '```'
+            for i in $(seq 1 10); do
+              for variant in A B; do
+                log="pair-${variant}-run${i}.log"
+                grep -F 'NET_GATE=pass' "$log" >/dev/null
+                grep -F 'SHELL_GATE=pass' "$log" >/dev/null
+                grep -F 'HOST_PING=pass' "$log" >/dev/null
+                grep -F 'VERDICT=pass' "$log" >/dev/null
+                if [ "$variant" = A ]; then
+                  for uart in 1 2 3; do grep -a -F "uart${uart}:" "$log" >/dev/null; done
+                else
+                  if grep -a -E 'uart[123]:' "$log" >/dev/null; then
+                    echo "phantom UART attached in candidate $log"; exit 1
+                  fi
+                fi
+                dt=$(sed -n 's/.*TIME_TO_READY=\([0-9][0-9]*\)ms.*/\1/p' "$log")
+                [[ "$dt" =~ ^[0-9]+$ ]] || { echo "missing/duplicate READY time in $log"; exit 1; }
+                if [ "$variant" = A ]; then a="$dt"; else b="$dt"; fi
+              done
+              echo "pair $i: baseline=${a}ms UART=${b}ms delta=$((a-b))ms"
+              [ "$b" -le 100 ] || goal=fail
+            done
+            echo '```'
+            echo "HARD_GOAL_READY_100MS=$goal (all ten candidate release boots)"
+          } > paired-summary.txt
+          cat paired-summary.txt | tee -a "$GITHUB_STEP_SUMMARY"
           {
             echo "### TSLOG capture"
             echo '```'
             cat kernels.sha256
+            cat configs.sha256
             grep -H -a -E -o 'TIME_TO_READY=[0-9]*ms|TSLOG_CAPTURE=[a-z]*|VERDICT=.*' release-run*.log tslog-run*.log || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           wc -c tslog-run*.log
           [ "$FAILS" -eq 0 ] || { echo "$FAILS boot(s) failed"; exit 1; }
+          [ "$goal" = pass ] || { echo 'Firecracker <=100ms hard goal not met'; exit 1; }
 
       - name: Upload artifacts
         if: always()
@@ -456,6 +553,13 @@ jobs:
             /mnt/smolfire-ci/qemu-microvm.pid
             /mnt/smolfire-ci/release-run*.log
             /mnt/smolfire-ci/tslog-run*.log
+            /mnt/smolfire-ci/pair-*.log
+            /mnt/smolfire-ci/fc-baseline.json
+            /mnt/smolfire-ci/fc-release.json
+            /mnt/smolfire-ci/fc-tslog.json
+            /mnt/smolfire-ci/configs.sha256
+            /mnt/smolfire-ci/paired-summary.txt
+            /mnt/smolfire-ci/paired-runner.txt
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log

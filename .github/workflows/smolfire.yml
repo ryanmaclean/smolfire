@@ -160,6 +160,7 @@ jobs:
           $SSH 'cp /root/smolfire/sys/amd64/conf/SMOLFIRE* /usr/src/sys/amd64/conf/'
           TSLOG_ENV=0
           [ "${{ inputs.tslog && 'true' || 'false' }}" = true ] && TSLOG_ENV=1
+          [ "$GITHUB_REF" = 'refs/heads/exp/boot-mute-0929' ] && TSLOG_ENV=1
           BUILD_RC=0
           $SSH "env SMOLFIRE_TSLOG=$TSLOG_ENV sh /root/smolfire/bin/build-smolfire.sh" 2>&1 | tee build.log || BUILD_RC=$?
           scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -227,7 +228,7 @@ jobs:
           # boot_args: env overrides (ledger #3/#4) + kenv-fed static net
           # (rc reads smolfire.ip/gw/fetch; Firecracker auto-appends its
           # virtio_mmio.device= entries so vtnet0 attaches).
-          printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" > fc.json
+          printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 boot_mute=YES smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" > fc.json
           cat fc.json
           # The typed command is FIRE_$((6*7)) (braced send = no Tcl subst),
           # so terminal echo can never match FIRE_42 — only real sh output can.
@@ -347,7 +348,7 @@ jobs:
             set t0 [clock milliseconds]
             spawn qemu-system-x86_64 -M microvm -accel kvm -cpu host -m 512M \
               -kernel '"$WORK"'/smolfire-kernel \
-              -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/token.txt" \
+              -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 boot_mute=YES smolfire.fetch=http://10.0.2.2:8080/token.txt" \
               -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
               -display none -serial mon:stdio
             set qemu_pid [exp_pid]
@@ -373,7 +374,7 @@ jobs:
         # (a failing gate is exactly when phase data is most useful).
         # Firecracker only (the VMM §1 of the roadmap describes); same
         # boot_args and TAP net path as the gate so rc does the same work.
-        if: ${{ !cancelled() && inputs.tslog }}
+        if: ${{ !cancelled() && (inputs.tslog || github.ref == 'refs/heads/exp/boot-mute-0929') }}
         continue-on-error: true
         run: |
           cd "$WORK"
@@ -393,7 +394,7 @@ jobs:
             echo "$!" > "$WORK/httpd.pid"; sleep 1
           fi
           mkfc() {  # $1 = kernel file name
-            printf '{\n "boot-source": { "kernel_image_path": "%s/%s", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$1"
+            printf '{\n "boot-source": { "kernel_image_path": "%s/%s", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 boot_mute=YES smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$1"
           }
           mkfc smolfire-kernel       > fc-release.json
           mkfc smolfire-kernel-tslog > fc-tslog.json

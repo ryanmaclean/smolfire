@@ -155,7 +155,7 @@
       ],
       "passes": true,
       "status": "passing",
-      "evidence": "coord-concurrent-pendings-test.nu 16/16 pass incl. crash injection and same-task-never-twice: executor-keyed slot lists (fleet 2/jail 2/vm 4), extended S-012 guard (per-slot checks + harvest refusal + crash scan), kill-switch, migration, N-slots follow-up. Live peak-2 proof vs 7950x4090pop (5-task fan-out, per-task dispatch == 1). PR #120 OPEN at time of writing (gh pr view 120 --json state => OPEN)."
+      "evidence": "coord-concurrent-pendings-test.nu 16/16 pass incl. crash injection and same-task-never-twice: executor-keyed slot lists (fleet 2/jail 2/vm 4), extended S-012 guard (per-slot checks + harvest refusal + crash scan), kill-switch, migration, N-slots follow-up. Live peak-2 proof vs 7950x4090pop (5-task fan-out, per-task dispatch == 1). PR #120 MERGED."
     }
   ]
 }

@@ -71,6 +71,20 @@ const MAX_INFLIGHT_PER_EXECUTOR = {vm: 4, jail: 2, fleet: 2}
 # attempts, one dispatch per tick) so healthy work never trips it.
 const INFLIGHT_STALE_AFTER_TICKS = 50
 
+# Slot constructors. Slot counts equal the per-executor inflight caps by
+# construction (slots==caps invariant): fleet 2, jail 2, vm 4.
+def empty-slot [] {
+    {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
+}
+
+def slot-count [executor: string] {
+    $MAX_INFLIGHT_PER_EXECUTOR | get -o $executor | default 1
+}
+
+def empty-slot-list [executor: string] {
+    1..(slot-count $executor) | each {|_| empty-slot }
+}
+
 # Default state for a fresh coordinator with no prior history.
 def default-state [] {
     {
@@ -84,9 +98,9 @@ def default-state [] {
         pending_to_addr:    ""
         dispatched_at:      ""
         pending_slots:      {
-            fleet: {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
-            jail:  {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
-            vm:    {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
+            fleet: (empty-slot-list "fleet")
+            jail:  (empty-slot-list "jail")
+            vm:    (empty-slot-list "vm")
         }
         attempt_counts:     {}   # record keyed by task_id → int attempt count
         halted_tasks:       []
@@ -100,10 +114,11 @@ def default-state [] {
     }
 }
 
-# ── Per-executor pending slots (concurrent pendings) ──────────────────────────
+# ── Per-executor pending slot lists (concurrent pendings) ─────────────────────
 #
-# One slot per known executor (fixed count; see docs/CONCURRENT-PENDINGS-
-# DESIGN.md). A slot is occupied when task_id != "". dispatched_at == ""
+# N slots per known executor, N == that executor's inflight cap (slots==caps
+# invariant: fleet 2, jail 2, vm 4; see docs/CONCURRENT-PENDINGS-DESIGN.md
+# §6 follow-up). A slot is occupied when task_id != "". dispatched_at == ""
 # means stamped-but-unsent (harvest stamped it, dispatching has not sent it
 # yet). Slots live in the same crash-atomic state record as inflight, so the
 # S-006 one-save-per-tick atomicity covers them with no new mechanism.
@@ -116,13 +131,9 @@ def default-state [] {
 # the write-clean removal is deferred to a follow-up.)
 const SLOT_ORDER = ["fleet", "jail", "vm"]
 
-def empty-slot [] {
-    {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
-}
-
 # Kill-switch: SMOLFIRE_CONCURRENT=0 restores single-pending (sequential
-# drain). Default ON. Exists for one release, then is removed with the
-# legacy keys.
+# drain: single target per tick, no refill while ANY slot is occupied).
+# Default ON. Exists for one release, then is removed with the legacy keys.
 def concurrent-enabled [] {
     ($env.SMOLFIRE_CONCURRENT? | default "1") != "0"
 }
@@ -131,24 +142,42 @@ def now-str [] {
     date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ"
 }
 
-# Read the slot table defensively (same posture as get-inflight): missing or
-# partial tables normalize to all-empty slots rather than crashing the tick.
+# Normalize one slot value to the full shape; non-records become empty.
+def normalize-slot [s: any] {
+    if ($s | describe | str starts-with "record") {
+        {
+            task_id: ($s | get -o task_id | default "")
+            request_id: ($s | get -o request_id | default "")
+            to_addr: ($s | get -o to_addr | default "")
+            dispatched_at: ($s | get -o dispatched_at | default "")
+        }
+    } else {
+        empty-slot
+    }
+}
+
+# Read the slot table defensively (same posture as get-inflight): missing,
+# partial, or legacy single-record tables normalize to per-executor slot
+# LISTS rather than crashing the tick. Legacy single-record slots upgrade to
+# 1-lists (record becomes element 0, padded with empties to the cap count);
+# short lists pad with empties, over-long lists keep every occupied slot so
+# no outstanding task is ever dropped by normalization.
 def get-pending-slots [state: record] {
     let raw = $state | get -o pending_slots | default {}
     let base = if ($raw | describe | str starts-with "record") { $raw } else { {} }
     mut out = {}
     for ex in $SLOT_ORDER {
-        let s = try { $base | get $ex } catch { null }
-        $out = $out | upsert $ex (if ($s | describe | str starts-with "record") {
-            {
-                task_id: ($s | get -o task_id | default "")
-                request_id: ($s | get -o request_id | default "")
-                to_addr: ($s | get -o to_addr | default "")
-                dispatched_at: ($s | get -o dispatched_at | default "")
-            }
+        let v = try { $base | get $ex } catch { null }
+        let vd = $v | describe
+        mut lst = if ($vd | str starts-with "record") {
+            [(normalize-slot $v)]
+        } else if ($vd | str starts-with "list") or ($vd | str starts-with "table") {
+            ($v | each {|s| normalize-slot $s })
         } else {
-            empty-slot
-        })
+            []
+        }
+        while ($lst | length) < (slot-count $ex) { $lst = $lst | append (empty-slot) }
+        $out = $out | upsert $ex $lst
     }
     $out
 }
@@ -161,24 +190,73 @@ def set-pending-slots [state: record, slots: record] {
     }
 }
 
-# Task ids held by occupied slots (canonical executor order).
+# Every slot as {executor, index, slot} in canonical order
+# (SLOT_ORDER, then index) — the single iteration order for waiting,
+# dispatching recovery, and timeout scans.
+def slot-entries [slots: record] {
+    mut out = []
+    for ex in $SLOT_ORDER {
+        let lst = $slots | get $ex
+        if ($lst | length) > 0 {
+            for i in 0..((($lst | length)) - 1) {
+                $out = $out | append {executor: $ex, index: $i, slot: ($lst | get $i)}
+            }
+        }
+    }
+    $out
+}
+
+# Task ids held by occupied slots (canonical order).
 def pending-slot-tasks [slots: record] {
-    $SLOT_ORDER | each {|ex| $slots | get $ex | get task_id } | where {|t| $t != "" }
+    slot-entries $slots | each {|e| $e.slot | get task_id } | where {|t| $t != "" }
 }
 
 def occupied-slot-count [slots: record] {
     (pending-slot-tasks $slots | length)
 }
 
-# Lowest-executor-name occupied slot first (fleet < jail < vm); null when none.
+# Lowest-executor-name occupied slot first (fleet < jail < vm, then index);
+# null when none.
 def primary-slot [slots: record] {
-    for ex in $SLOT_ORDER {
-        let s = $slots | get $ex
-        if ($s | get task_id) != "" {
-            return {executor: $ex, slot: $s}
+    for e in (slot-entries $slots) {
+        if ($e.slot | get task_id) != "" {
+            return $e
         }
     }
     null
+}
+
+# First free index in the executor's list, or null when the list is full.
+def free-slot-index [slots: record, executor: string] {
+    mut i = 0
+    for s in ($slots | get $executor) {
+        if ($s | get task_id) == "" { return $i }
+        $i = $i + 1
+    }
+    null
+}
+
+def set-slot [slots: record, executor: string, idx: int, slot: record] {
+    $slots | upsert $executor (($slots | get $executor) | upsert $idx $slot)
+}
+
+def clear-slot [slots: record, executor: string, idx: int] {
+    set-slot $slots $executor $idx (empty-slot)
+}
+
+# Clear every slot (any executor, any index) holding this task.
+def clear-slots-by-task [slots: record, task_id: string] {
+    mut out = $slots
+    for e in (slot-entries $slots) {
+        if ($e.slot.task_id == $task_id) {
+            $out = clear-slot $out $e.executor $e.index
+        }
+    }
+    $out
+}
+
+def update-slot-field [slots: record, executor: string, idx: int, field: string, value: string] {
+    set-slot $slots $executor $idx ((($slots | get $executor) | get $idx) | upsert $field $value)
 }
 
 def sync-legacy-mirror [state: record] {
@@ -243,6 +321,19 @@ def load-state [path: string] {
         # same dispatch — no re-dispatch, no S-012 violation. Idempotent:
         # re-running on slotted state is a no-op.
         $merged = set-pending-slots $merged (get-pending-slots $merged)
+        if ("pending_slots" in ($loaded | columns)) {
+            # Single-record slot tables (one slot per executor) upgrade to
+            # 1-lists via get-pending-slots above; log the upgrade per slot.
+            let raw_slots = try { $loaded | get pending_slots } catch { {} }
+            if ($raw_slots | describe | str starts-with "record") {
+                for ex in $SLOT_ORDER {
+                    let v = try { $raw_slots | get $ex } catch { null }
+                    if ($v | describe | str starts-with "record") {
+                        log-event "state_migrated_slot_record" {executor: $ex, task_id: ($v | get -o task_id | default "")}
+                    }
+                }
+            }
+        }
         if not ("pending_slots" in ($loaded | columns)) {
             let legacy_task = $loaded | get -o pending_task_id | default ""
             if $legacy_task != "" {
@@ -250,15 +341,18 @@ def load-state [path: string] {
                 let want_exec = if $exec_of != "" { $exec_of } else { $DEFAULT_EXECUTOR }
                 let target_exec = if $want_exec in $SLOT_ORDER { $want_exec } else { $DEFAULT_EXECUTOR }
                 mut slots = get-pending-slots $merged
-                if (($slots | get $target_exec | get task_id) == "") {
-                    $slots = $slots | upsert $target_exec {
+                let free_idx = free-slot-index $slots $target_exec
+                if $free_idx != null {
+                    $slots = set-slot $slots $target_exec $free_idx {
                         task_id: $legacy_task
                         request_id: ($loaded | get -o pending_request_id | default "")
                         to_addr: ($loaded | get -o pending_to_addr | default "")
                         dispatched_at: ($loaded | get -o dispatched_at | default "")
                     }
                     $merged = set-pending-slots $merged $slots
-                    log-event "state_migrated_legacy_pending" {task_id: $legacy_task, executor: $target_exec}
+                    log-event "state_migrated_legacy_pending" {task_id: $legacy_task, executor: $target_exec, index: $free_idx}
+                } else {
+                    log-event "state_migration_slot_full" {task_id: $legacy_task, executor: $target_exec}
                 }
             }
         }
@@ -881,11 +975,7 @@ def sweep-dead-workers [state: record, spool: string] {
             if ($eligible | is-empty) { continue }
             for t in $eligible {
                 $next_slots = if $t in ($next_slots | columns) { $next_slots | reject $t } else { $next_slots }
-                for ex in $SLOT_ORDER {
-                    if ((($next_pend | get $ex) | get task_id) == $t) {
-                        $next_pend = $next_pend | upsert $ex (empty-slot)
-                    }
-                }
+                $next_pend = clear-slots-by-task $next_pend $t
                 append-dead-reap-fail $spool $t $worker $age $threshold $state.tick_count
             }
             log-event "worker_tasks_reaped" {worker: $worker, tasks: $eligible}
@@ -900,11 +990,7 @@ def sweep-dead-workers [state: record, spool: string] {
             | upsert dead true)
         for t in $eligible {
             $next_slots = if $t in ($next_slots | columns) { $next_slots | reject $t } else { $next_slots }
-            for ex in $SLOT_ORDER {
-                if ((($next_pend | get $ex) | get task_id) == $t) {
-                    $next_pend = $next_pend | upsert $ex (empty-slot)
-                }
-            }
+            $next_pend = clear-slots-by-task $next_pend $t
             append-dead-reap-fail $spool $t $worker $age $threshold $state.tick_count
         }
         log-event "worker_marked_dead" {
@@ -1255,12 +1341,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         # lookup by task, never the legacy scalars).
                         let table = get-inflight $current_state
                         let cleared_slots = if $task_id in $table { $table | reject $task_id } else { $table }
-                        mut pend = get-pending-slots $current_state
-                        for ex in $SLOT_ORDER {
-                            if (($pend | get $ex | get task_id) == $task_id) {
-                                $pend = $pend | upsert $ex (empty-slot)
-                            }
-                        }
+                        let pend = clear-slots-by-task (get-pending-slots $current_state) $task_id
                         $new_seen = $new_seen | append $id
                         $current_state = record-heartbeat (sync-legacy-mirror (set-pending-slots (set-inflight $current_state $cleared_slots) $pend | update seen_ids $new_seen | update attempt_counts $cleared_counts | update task_executors $cleared_execs)) $reply_exec ($current_state.tick_count)
                         continue
@@ -1303,9 +1384,10 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                             $deferred_msgid = $id
                             continue
                         }
-                        # Retry dispatch reuses the slot of the reply's
-                        # recorded executor; another task holding it defers.
-                        if (((get-pending-slots $current_state) | get $retry_exec | get task_id) != "") {
+                        # Retry dispatch takes a FREE slot of the reply's
+                        # recorded executor; a full list defers.
+                        let free_idx = free-slot-index (get-pending-slots $current_state) $retry_exec
+                        if $free_idx == null {
                             log-event "dispatch_deferred_slot_occupied" {task_id: $task_id, executor: $retry_exec, decision: "retry", message_id: $id}
                             $deferred_count = $deferred_count + 1
                             $deferred_task  = $task_id
@@ -1314,7 +1396,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         }
                         log-verdict $category $decision "dispatching" --task-id $task_id --attempt $attempt_n --message-id $id
                         $new_seen = $new_seen | append $id
-                        $current_state = sync-legacy-mirror (set-pending-slots $current_state ((get-pending-slots $current_state) | upsert $retry_exec {task_id: $task_id, request_id: $id, to_addr: $from_addr, dispatched_at: ""})
+                        $current_state = sync-legacy-mirror (set-pending-slots $current_state (set-slot (get-pending-slots $current_state) $retry_exec $free_idx {task_id: $task_id, request_id: $id, to_addr: $from_addr, dispatched_at: ""})
                             | update seen_ids $new_seen)
                         $targets = $targets | append {task_id: $task_id, trigger_id: $id, to_addr: $from_addr, executor: $retry_exec, reason: "retry", verdict: $category, attempt: $attempt_n}
                         continue
@@ -1335,12 +1417,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         # slot would leak it permanently.
                         let table = get-inflight $current_state
                         let cleared_slots = if $task_id in $table { $table | reject $task_id } else { $table }
-                        mut pend = get-pending-slots $current_state
-                        for ex in $SLOT_ORDER {
-                            if (($pend | get $ex | get task_id) == $task_id) {
-                                $pend = $pend | upsert $ex (empty-slot)
-                            }
-                        }
+                        let pend = clear-slots-by-task (get-pending-slots $current_state) $task_id
                         $current_state = sync-legacy-mirror (set-pending-slots (set-inflight $current_state $cleared_slots
                             | update halted_tasks ($current_state.halted_tasks | append $task_id)) $pend)
                         $new_seen = $new_seen | append $id
@@ -1433,9 +1510,10 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         $deferred_msgid = $id
                         continue
                     }
-                    # New-request dispatch fills the FREE slot of the
-                    # resolved executor; another task holding it defers.
-                    if (((get-pending-slots $current_state) | get $exec_pick.executor | get task_id) != "") {
+                    # New-request dispatch fills a FREE slot of the
+                    # resolved executor; a full list defers.
+                    let free_idx = free-slot-index (get-pending-slots $current_state) $exec_pick.executor
+                    if $free_idx == null {
                         log-event "dispatch_deferred_slot_occupied" {task_id: $task_id, executor: $exec_pick.executor, decision: "new-request", message_id: $id}
                         $deferred_count = $deferred_count + 1
                         $deferred_task  = $task_id
@@ -1448,7 +1526,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         message_id: $id
                     }
                     $new_seen = $new_seen | append $id
-                    $current_state = sync-legacy-mirror (set-pending-slots $current_state ((get-pending-slots $current_state) | upsert $exec_pick.executor {task_id: $task_id, request_id: $id, to_addr: $to_addr, dispatched_at: ""})
+                    $current_state = sync-legacy-mirror (set-pending-slots $current_state (set-slot (get-pending-slots $current_state) $exec_pick.executor $free_idx {task_id: $task_id, request_id: $id, to_addr: $to_addr, dispatched_at: ""})
                         | update seen_ids           $new_seen
                         | update task_executors     ($current_state.task_executors | upsert $task_id {executor: $exec_pick.executor, network: $network, request_id: $id}))
                     $targets = $targets | append {task_id: $task_id, trigger_id: $id, to_addr: $to_addr, executor: $exec_pick.executor, reason: "new-request", verdict: "", attempt: ($current_state.attempt_counts | get -o $task_id | default 0)}
@@ -1487,17 +1565,18 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
     }
 }
 
-# waiting: pending slots have been dispatched; poll the spool for matching
-# replies. Iterates occupied slots in canonical executor order (fleet, jail,
-# vm): the first slot with a matching reply (In-Reply-To == slot.request_id)
-# clears THAT slot and routes to harvesting with the slot's task context.
-# Timeout injection is per-slot (each slot carries its own dispatched_at).
-# With the SMOLFIRE_CONCURRENT=0 kill-switch the same order means the
-# lowest-executor-name occupied slot is always matched first.
+# waiting: pending slot lists have been dispatched; poll the spool for
+# matching replies. Iterates occupied slots in canonical order (fleet, jail,
+# vm, then index): the first slot with a matching reply
+# (In-Reply-To == slot.request_id) clears THAT slot and routes to harvesting
+# with the slot's task context. Timeout injection is per-slot (each slot
+# carries its own dispatched_at). With the SMOLFIRE_CONCURRENT=0 kill-switch
+# the same order means the lowest-executor-name occupied slot is always
+# matched first.
 def state-waiting [state: record, spool: string, root: string, remaining: int] {
     mut cur = sync-legacy-mirror $state
     let slots = get-pending-slots $cur
-    let occupied = $SLOT_ORDER | each {|ex| {executor: $ex, slot: ($slots | get $ex)} } | where {|r| ($r.slot | get task_id) != "" }
+    let occupied = (slot-entries $slots) | where {|e| ($e.slot | get task_id) != "" }
 
     if ($occupied | is-empty) {
         # Defensive: waiting with nothing outstanding (unreachable through
@@ -1517,6 +1596,7 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
     let messages = parse-mbox $content
 
     mut matched_executor = ""
+    mut matched_index = -1
     mut matched_slot = empty-slot
     mut matched_reply_id = ""
     for entry in $occupied {
@@ -1526,6 +1606,7 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
         } | first 1
         if ($hits | length) > 0 {
             $matched_executor = $entry.executor
+            $matched_index = $entry.index
             $matched_slot = $entry.slot
             $matched_reply_id = msg-id ($hits | first)
             break
@@ -1542,7 +1623,7 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
         # liveness regardless of verdict (harvest still classifies quality) —
         # piggyback heartbeat on the matched slot's task, no new traffic.
         $cur = record-heartbeat $cur (resolve-task-executor $cur ($matched_slot | get task_id)) ($cur.tick_count)
-        let cleared = (get-pending-slots $cur) | upsert $matched_executor (empty-slot)
+        let cleared = clear-slot (get-pending-slots $cur) $matched_executor $matched_index
         $cur = sync-legacy-mirror (set-pending-slots $cur $cleared | update fsm_state "harvesting")
         tick $cur $spool $root ($remaining - 1)
     } else {
@@ -1579,7 +1660,7 @@ verdict = \"fail\"
 failure_reason = \"timeout: no reply within 300s\"
 "
                     $synth_msg | save --append $spool
-                    $slots2 = $slots2 | upsert $entry.executor (($slots2 | get $entry.executor) | upsert dispatched_at "")
+                    $slots2 = update-slot-field $slots2 $entry.executor $entry.index "dispatched_at" ""
                     $timed_out = $timed_out | append $entry
                 }
             }
@@ -1663,8 +1744,8 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
     # stamp and append with a persisted dispatched_at). Requeue it for send;
     # a slot whose dispatch exists-but-is-answered is left alone — waiting
     # routes its reply to harvest.
-    for ex in $SLOT_ORDER {
-        let sl = (get-pending-slots $cur) | get $ex
+    for entry in (slot-entries (get-pending-slots $cur)) {
+        let sl = $entry.slot
         if ($sl | get task_id) != "" and ($sl | get dispatched_at) != "" {
             let content = try { open --raw $spool } catch { "" }
             let messages = if $content == "" { [] } else { parse-mbox $content }
@@ -1673,13 +1754,13 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
                 and ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
             })
             if not $has_disp {
-                $cur = set-pending-slots $cur ((get-pending-slots $cur) | upsert $ex ($sl | upsert dispatched_at ""))
+                $cur = set-pending-slots $cur (update-slot-field (get-pending-slots $cur) $entry.executor $entry.index "dispatched_at" "")
             }
         }
     }
 
-    let unsent = $SLOT_ORDER | where {|ex|
-        ((get-pending-slots $cur) | get $ex | get task_id) != "" and ((get-pending-slots $cur) | get $ex | get dispatched_at) == ""
+    let unsent = (slot-entries (get-pending-slots $cur)) | where {|e|
+        ($e.slot | get task_id) != "" and ($e.slot | get dispatched_at) == ""
     }
 
     if ($unsent | is-empty) {
@@ -1696,8 +1777,10 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
 
     mut backstopped = []
 
-    for ex in $unsent {
-        let sl = (get-pending-slots $cur) | get $ex
+    for entry in $unsent {
+        let ex = $entry.executor
+        let idx = $entry.index
+        let sl = $entry.slot
         let task_id = $sl | get task_id
         let slot_request = $sl | get request_id
         let slot_to = $sl | get to_addr
@@ -1711,7 +1794,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
                 existing_message_id: $inflight_id
             }
             log-transition "dispatching" "waiting" "resume-inflight-dispatch" --task-id $task_id --message-id $inflight_id
-            $cur = sync-legacy-mirror (set-pending-slots $cur ((get-pending-slots $cur) | upsert $ex ($sl | upsert request_id $inflight_id | upsert dispatched_at (now-str))))
+            $cur = sync-legacy-mirror (set-pending-slots $cur (set-slot (get-pending-slots $cur) $ex $idx ($sl | upsert request_id $inflight_id | upsert dispatched_at (now-str))))
             continue
         }
 
@@ -1726,7 +1809,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
         if $gate.at_cap {
             log-backpressure $task_id $exec_info.executor "dispatch-backstop" $slot_request $gate
             let unseed = $cur.seen_ids | where {|s| $s != $slot_request }
-            $cur = sync-legacy-mirror (set-pending-slots $cur ((get-pending-slots $cur) | upsert $ex (empty-slot)) | update seen_ids $unseed)
+            $cur = sync-legacy-mirror (set-pending-slots $cur (clear-slot (get-pending-slots $cur) $ex $idx) | update seen_ids $unseed)
             $backstopped = $backstopped | append {task_id: $task_id, trigger_id: $slot_request}
             continue
         }
@@ -1734,7 +1817,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
         let attempt_n    = $cur.attempt_counts | get -o $task_id | default 0
         let next_attempt = $attempt_n + 1
         let ts           = date now | format date "%Y%m%d%H%M%S"
-        let msg_id       = $"<coord.($cur.tick_count).r($next_attempt).($ts).($ex)@smolfire.local>"
+        let msg_id       = $"<coord.($cur.tick_count).r($next_attempt).($ts).($ex).($idx)@smolfire.local>"
         let to_addr      = if $slot_to != "" { $slot_to } else { $"($task_id)@smolfire.local" }
         let from_addr    = "coordinator@smolfire.local"
 
@@ -1792,7 +1875,7 @@ executor = \"($exec_info.executor)\"
         $cur = sync-legacy-mirror (set-inflight $cur $slot_table
             | update attempt_counts     $updated_counts
         )
-        $cur = set-pending-slots $cur ((get-pending-slots $cur) | upsert $ex {task_id: $task_id, request_id: $msg_id, to_addr: $to_addr, dispatched_at: (now-str)})
+        $cur = set-pending-slots $cur (set-slot (get-pending-slots $cur) $ex $idx {task_id: $task_id, request_id: $msg_id, to_addr: $to_addr, dispatched_at: (now-str)})
         $cur = sync-legacy-mirror $cur
     }
 

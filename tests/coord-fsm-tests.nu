@@ -737,13 +737,13 @@ def test-telemetry-sequences [scenarios: list] {
 # ── Test 9: determinism — identical fixtures → identical events ───────────────
 
 # Mask the only legitimately run-dependent parts: ts, and the timestamp segment
-# of coordinator-generated Message-IDs (<coord.N.rN.YYYYmmddHHMMSS[.exec]@...> —
-# the optional .exec suffix disambiguates parallel per-slot dispatches sent in
+# of coordinator-generated Message-IDs (<coord.N.rN.YYYYmmddHHMMSS[.exec[.idx]]@...> —
+# the .exec[.idx] suffix disambiguates parallel per-slot dispatches sent in
 # the same tick/second).
 def normalize-event [e: record] {
     $e
     | update ts "<ts>"
-    | update message_id ($e.message_id | str replace --regex '\.\d{14}(\.[a-z]+)?@' '.<ts>@')
+    | update message_id ($e.message_id | str replace --regex '\.\d{14}(\.[a-z]+)?(\.\d+)?@' '.<ts>@')
 }
 
 def test-telemetry-determinism [run_a: list, run_b: list] {

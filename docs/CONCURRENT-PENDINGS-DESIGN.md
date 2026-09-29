@@ -1,10 +1,20 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Concurrent pendings design (per-executor slots)
 
-Status: **design only — no code.** Implements TRIZ #5 Segmentation:
-pendings segmented per executor; the S-012 no-double-dispatch guard is
-EXTENDED, not removed. Gastown parity goal: fleet cap (2) reachable via
-parallel slots instead of today's hard concurrency-1.
+Status: **single-slot phase implemented; §6 follow-up (N slots per executor,
+slots==caps) implemented on `feat/coord-concurrent-pendings`.** Implements
+TRIZ #5 Segmentation: pendings segmented per executor; the S-012
+no-double-dispatch guard is EXTENDED, not removed. Gastown parity goal: fleet
+cap (2) reachable via parallel slots instead of today's hard concurrency-1.
+
+> Follow-up delta (N-slot lists): `pending_slots.<exec>` is now a LIST of N
+> slot records with N == `MAX_INFLIGHT_PER_EXECUTOR` (fleet 2, jail 2,
+> vm 4). All slot operations generalize to (executor, index) entries in
+> canonical order. Dispatch Message-IDs carry an extra `.idx` segment
+> (`<coord.TICK.rN.TS.exec.idx@...>`) so two same-executor dispatches in one
+> tick never share an id. Single-record tables migrate to 1-lists;
+> legacy scalars still backfill to the first free slot. Kill-switch is
+> single-target/tick + no refill while ANY slot is occupied.
 
 ## 1. Current single-pending flow (with refs)
 
@@ -156,7 +166,8 @@ one release, then is removed with the legacy keys.
 
 - NON-goal: raising caps (vm 4 / jail 2 / fleet 2 / global 8 stay fixed).
 - NON-goal: multi-slot-per-executor (fleet cap 2 served by 1 slot + queue;
-  N-slots-per-executor is the follow-up, not this phase).
+  N-slots-per-executor is the follow-up, not this phase). **Done as the §6
+  follow-up: slot lists with slots==caps (fleet 2, jail 2, vm 4).**
 - NON-goal: changing the D2 retry table, HALT format, telemetry schema, or
   the 300 s timeout value.
 - Rejected: global pending pool (one shared queue across executors) — loses

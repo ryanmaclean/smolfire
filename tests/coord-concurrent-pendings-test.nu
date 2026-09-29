@@ -95,11 +95,12 @@ def run-tick [root: string, stub_dir: string, --fleet, --sequential] {
     }
 }
 
-def wait-for-fleet-reply [spool_abs: string, timeout_sec: int = 25] {
+def wait-for-fleet-replies [spool_abs: string, count: int, timeout_sec: int = 60] {
     mut waited = 0
     while $waited < $timeout_sec {
         let content = try { open --raw $spool_abs } catch { "" }
-        if ($content | str contains "fleet-agent@smolfire.local") { return true }
+        let hits = ($content | split row "fleet-agent@smolfire.local" | length) - 1
+        if $hits >= $count { return true }
         sleep 1sec
         $waited = $waited + 1
     }
@@ -111,8 +112,8 @@ def count-coord-dispatches [spool_abs: string] {
     ($content | split row "Message-ID: <coord." | length) - 1
 }
 
-def slot-of [state: record, executor: string] {
-    $state.pending_slots | get $executor
+def slot-of [state: record, executor: string, idx: int = 0] {
+    $state.pending_slots | get $executor | get $idx
 }
 
 def base-state [] {
@@ -166,7 +167,7 @@ do {
 
     # Fleet child replies asynchronously via stub ssh; the vm reply is
     # crafted (vm spawn is hermetic-skipped, so no vm child ever answers).
-    assert (wait-for-fleet-reply $spool_abs) "detached fleet child answered"
+    assert (wait-for-fleet-replies $spool_abs 1) "detached fleet child answered"
     let st1b = read-state $state_abs
     let vm_reply = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<reply.cp1.vm@host>" "task_id = \"t-cp-vm\"\nverdict = \"pass\"" --in-reply-to (slot-of $st1b "vm" | get request_id)
     $vm_reply | save --append $spool_abs
@@ -508,7 +509,7 @@ do {
     print "  ok"
 }
 
-print "pendings 11: fresh state carries one empty slot per known executor"
+print "pendings 11: fresh state carries N empty slots per executor (slots==caps)"
 do {
     let tmp = make-temp-dir
     mkdir ([$tmp, "stubbin"] | path join)
@@ -519,10 +520,189 @@ do {
     let r = run-tick $tmp $stub_dir
     assert equal $r.exit_code 0 "tick exits 0"
     let st = read-state $state_abs
-    assert equal ($st.pending_slots | columns | sort) ["fleet" "jail" "vm"] "one slot per known executor"
-    assert equal (slot-of $st "vm" | get task_id) "" "vm slot starts empty"
-    assert equal (slot-of $st "jail" | get task_id) "" "jail slot starts empty"
-    assert equal (slot-of $st "fleet" | get task_id) "" "fleet slot starts empty"
+    assert equal ($st.pending_slots | columns | sort) ["fleet" "jail" "vm"] "one slot list per known executor"
+    assert equal (($st.pending_slots | get "fleet" | length)) 2 "fleet list matches fleet cap 2"
+    assert equal (($st.pending_slots | get "jail" | length)) 2 "jail list matches jail cap 2"
+    assert equal (($st.pending_slots | get "vm" | length)) 4 "vm list matches vm cap 4"
+    assert equal (slot-of $st "vm" 0 | get task_id) "" "vm slot 0 starts empty"
+    assert equal (slot-of $st "vm" 3 | get task_id) "" "vm slot 3 starts empty"
+    assert equal (slot-of $st "jail" 1 | get task_id) "" "jail slot 1 starts empty"
+    assert equal (slot-of $st "fleet" 1 | get task_id) "" "fleet slot 1 starts empty"
+
+    ^rm -rf $tmp
+    print "  ok"
+}
+
+print "pendings 12: two fleet tasks live-concurrent — both dispatched before either harvests"
+do {
+    let tmp = make-temp-dir
+    mkdir ([$tmp, "stubbin"] | path join)
+    let stub_dir = [$tmp, "stubbin"] | path join
+    let _ = write-ssh-stub $stub_dir
+    let spool_abs = [$tmp, "var", "mail", "spool"] | path join
+    let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
+
+    write-spool $spool_abs ((make-msg "user@smolfire.local" "fleet-builder-1@smolfire.local" "<req.cp12.a@host>" (fleet-body "t-cf-a")) + (make-msg "user@smolfire.local" "fleet-builder-2@smolfire.local" "<req.cp12.b@host>" (fleet-body "t-cf-b")))
+    write-state $state_abs (base-state)
+
+    let r1 = run-tick $tmp $stub_dir --fleet
+    assert equal $r1.exit_code 0 "tick1 exits 0"
+    let st1 = read-state $state_abs
+    assert equal $st1.fsm_state "waiting" "ends waiting on two outstanding dispatches"
+    assert equal (slot-of $st1 "fleet" 0 | get task_id) "t-cf-a" "fleet slot 0 holds the first task"
+    assert equal (slot-of $st1 "fleet" 1 | get task_id) "t-cf-b" "fleet slot 1 holds the second task"
+    assert ((slot-of $st1 "fleet" 0 | get request_id | str starts-with "<coord.") ) "slot 0 carries its dispatch id"
+    assert ((slot-of $st1 "fleet" 1 | get request_id | str starts-with "<coord.") ) "slot 1 carries its dispatch id"
+    assert ((slot-of $st1 "fleet" 0 | get request_id) != (slot-of $st1 "fleet" 1 | get request_id)) "distinct dispatch ids"
+    assert equal (count-coord-dispatches $spool_abs) 2 "both dispatched in one tick before either harvests"
+    assert (not ($r1.stdout | str contains "dispatch_deferred_slot_occupied")) "no slot refusal on the second fill"
+
+    # Both detached fleet children answer asynchronously.
+    assert (wait-for-fleet-replies $spool_abs 2) "both fleet children answered"
+    let r2 = run-tick $tmp $stub_dir --fleet
+    assert equal $r2.exit_code 0 "tick2 exits 0"
+    let st2 = read-state $state_abs
+    assert equal $st2.fsm_state "idle" "both replies harvested to idle"
+    assert equal (slot-of $st2 "fleet" 0 | get task_id) "" "slot 0 drained"
+    assert equal (slot-of $st2 "fleet" 1 | get task_id) "" "slot 1 drained"
+    assert (($st2.inflight | columns | is-empty)) "no inflight leak"
+    assert (($st2.attempt_counts | columns | is-empty)) "no attempt leak"
+    assert equal (count-coord-dispatches $spool_abs) 2 "harvest reaps without re-dispatch"
+
+    ^rm -rf $tmp
+    print "  ok"
+}
+
+print "pendings 13: third fleet task defers while both fleet slots are full"
+do {
+    let tmp = make-temp-dir
+    mkdir ([$tmp, "stubbin"] | path join)
+    let stub_dir = [$tmp, "stubbin"] | path join
+    let _ = write-ssh-stub $stub_dir
+    let spool_abs = [$tmp, "var", "mail", "spool"] | path join
+    let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
+
+    write-spool $spool_abs ((make-msg "user@smolfire.local" "fleet-builder-1@smolfire.local" "<req.cp13.a@host>" (fleet-body "t-cn-a")) + (make-msg "user@smolfire.local" "fleet-builder-2@smolfire.local" "<req.cp13.b@host>" (fleet-body "t-cn-b")) + (make-msg "user@smolfire.local" "fleet-builder-3@smolfire.local" "<req.cp13.c@host>" (fleet-body "t-cn-c")))
+    write-state $state_abs (base-state)
+
+    let r = run-tick $tmp $stub_dir --fleet
+    assert equal $r.exit_code 0 "tick exits 0"
+    assert equal (count-coord-dispatches $spool_abs) 2 "only N=2 fleet dispatches"
+    assert ($r.stdout | str contains "dispatch_deferred_slot_occupied") "N+1th refusal logged"
+    let st = read-state $state_abs
+    assert equal (slot-of $st "fleet" 0 | get task_id) "t-cn-a" "slot 0 filled"
+    assert equal (slot-of $st "fleet" 1 | get task_id) "t-cn-b" "slot 1 filled"
+    assert (not ("<req.cp13.c@host>" in $st.seen_ids)) "deferred trigger stays unseen for rediscovery"
+
+    ^rm -rf $tmp
+    print "  ok"
+}
+
+print "pendings 14: same task twice on the SAME executor dispatches once"
+do {
+    let tmp = make-temp-dir
+    mkdir ([$tmp, "stubbin"] | path join)
+    let stub_dir = [$tmp, "stubbin"] | path join
+    let _ = write-ssh-stub $stub_dir
+    let spool_abs = [$tmp, "var", "mail", "spool"] | path join
+    let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
+
+    write-spool $spool_abs ((make-msg "user@smolfire.local" "fleet-builder-1@smolfire.local" "<req.cp14.a@host>" (fleet-body "t-same")) + (make-msg "user@smolfire.local" "fleet-builder-2@smolfire.local" "<req.cp14.b@host>" (fleet-body "t-same")))
+    write-state $state_abs (base-state)
+
+    let r = run-tick $tmp $stub_dir --fleet
+    assert equal $r.exit_code 0 "tick exits 0"
+    assert ($r.stdout | str contains "dispatch_skipped_duplicate_task") "same-task refusal logged"
+    assert equal (count-coord-dispatches $spool_abs) 1 "exactly one dispatch for the duplicated task"
+    let st = read-state $state_abs
+    assert equal (slot-of $st "fleet" 0 | get task_id) "t-same" "first request fills slot 0"
+    assert equal (slot-of $st "fleet" 1 | get task_id) "" "same task never occupies slot 1"
+    assert (not ("<req.cp14.b@host>" in $st.seen_ids)) "duplicate trigger stays unseen"
+
+    ^rm -rf $tmp
+    print "  ok"
+}
+
+print "pendings 15: kill-switch with two fleet tasks stays sequential (single target, no refill)"
+do {
+    let tmp = make-temp-dir
+    mkdir ([$tmp, "stubbin"] | path join)
+    let stub_dir = [$tmp, "stubbin"] | path join
+    let _ = write-ssh-stub $stub_dir
+    let spool_abs = [$tmp, "var", "mail", "spool"] | path join
+    let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
+
+    write-spool $spool_abs ((make-msg "user@smolfire.local" "fleet-builder-1@smolfire.local" "<req.cp15.a@host>" (fleet-body "t-k1")) + (make-msg "user@smolfire.local" "fleet-builder-2@smolfire.local" "<req.cp15.b@host>" (fleet-body "t-k2")))
+    write-state $state_abs (base-state)
+
+    let r1 = run-tick $tmp $stub_dir --fleet --sequential
+    assert equal $r1.exit_code 0 "tick1 exits 0"
+    assert equal (count-coord-dispatches $spool_abs) 1 "kill-switch dispatches exactly one despite a free second slot"
+    let st1 = read-state $state_abs
+    assert equal (slot-of $st1 "fleet" 0 | get task_id) "t-k1" "first request fills slot 0"
+    assert equal (slot-of $st1 "fleet" 1 | get task_id) "" "free slot 1 is NOT refilled"
+    assert (not ("<req.cp15.b@host>" in $st1.seen_ids)) "second request stays unseen"
+
+    let r2 = run-tick $tmp $stub_dir --fleet --sequential
+    assert equal $r2.exit_code 0 "tick2 exits 0"
+    assert equal (count-coord-dispatches $spool_abs) 1 "occupied slot blocks refill"
+
+    ^rm -rf $tmp
+    print "  ok"
+}
+
+print "pendings 16: single-record slot table migrates to 1-lists and resumes"
+do {
+    let tmp = make-temp-dir
+    mkdir ([$tmp, "stubbin"] | path join)
+    let stub_dir = [$tmp, "stubbin"] | path join
+    let _ = write-ssh-stub $stub_dir
+    let spool_abs = [$tmp, "var", "mail", "spool"] | path join
+    let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
+
+    # One-slot-per-executor state file: pending_slots values are records.
+    # Spool is absent so the resumed wait parks without timeout injection.
+    write-state $state_abs {
+        version:            "1"
+        tick_count:         10
+        fsm_state:          "waiting"
+        seen_ids:           ["<other.cp16@host>"]
+        last_tick_at:       "2026-01-01T00:00:00Z"
+        pending_request_id: "<disp.cp16@host>"
+        pending_task_id:    "t-mig"
+        pending_to_addr:    "fleet-builder-9@smolfire.local"
+        dispatched_at:      "2026-09-28T00:00:00Z"
+        pending_slots:      {
+            fleet: {task_id: "t-mig", request_id: "<disp.cp16@host>", to_addr: "fleet-builder-9@smolfire.local", dispatched_at: "2026-09-28T00:00:00Z"}
+            jail:  {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
+            vm:    {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
+        }
+        attempt_counts:     {"t-mig": 1}
+        halted_tasks:       []
+        task_executors:     {"t-mig": {executor: "fleet", network: false, request_id: "<req.cp16@host>"}}
+        inflight:           {"t-mig": {executor: "fleet", since_tick: 10}}
+    }
+
+    let r1 = run-tick $tmp $stub_dir --fleet
+    assert equal $r1.exit_code 0 "tick1 exits 0"
+    assert ($r1.stdout | str contains "state_migrated_slot_record") "record upgrade logged"
+    let st1 = read-state $state_abs
+    assert equal $st1.fsm_state "waiting" "migrated wait resumes as waiting"
+    assert equal (($st1.pending_slots | get "fleet" | length)) 2 "fleet record upgraded to a 2-list"
+    assert equal (slot-of $st1 "fleet" 0 | get task_id) "t-mig" "record becomes list element 0"
+    assert equal (slot-of $st1 "fleet" 0 | get request_id) "<disp.cp16@host>" "same dispatch id, no re-dispatch"
+    assert equal (slot-of $st1 "fleet" 1 | get task_id) "" "padded slot stays empty"
+    assert equal (count-coord-dispatches $spool_abs) 0 "migration appends nothing"
+
+    # The resumed dispatch drains normally: a pass reply harvests to idle.
+    mkdir ([$tmp, "var", "mail"] | path join)
+    let reply = make-msg "fleet-agent@smolfire.local" "coordinator@smolfire.local" "<reply.cp16@host>" "task_id = \"t-mig\"\nverdict = \"pass\"" --in-reply-to "<disp.cp16@host>"
+    $reply | save --append $spool_abs
+    let r2 = run-tick $tmp $stub_dir --fleet
+    assert equal $r2.exit_code 0 "tick2 exits 0"
+    let st2 = read-state $state_abs
+    assert equal $st2.fsm_state "idle" "resumed dispatch drains to idle"
+    assert equal (slot-of $st2 "fleet" 0 | get task_id) "" "slot freed on harvest"
 
     ^rm -rf $tmp
     print "  ok"

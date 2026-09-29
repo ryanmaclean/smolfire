@@ -21,6 +21,13 @@ ident SMOLFIRE
 # Keep the legacy PIC available for the branch-scoped APIC-disable boot
 # experiment; normal release boots still select the APIC path.
 device atpic
+device attimer
+
+# PVH boot has no loader-provided GENERIC.hints. Match FreeBSD's official
+# ISA PIT hint so attimer can register the i8254 IRQ0 event timer in PIC mode.
+envvar hint.attimer.0.at="isa"
+envvar hint.attimer.0.port="0x40"
+envvar hint.attimer.0.irq="0"
 
 # RAM-backed scratch space for the live system (md root is small)
 options TMPFS

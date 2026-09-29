@@ -13,18 +13,23 @@ def elapsed-ms [start: datetime] {
 
 # Keep byte-for-byte serial in `log` while stamping each line *as it arrives*.
 # timeout owns the exact child and sends TERM, then KILL; no broad pkill.
-def capture [executable: string, args: list<string>, log: string, seconds: int] {
+def capture [executable: string, args: list<string>, log: string, status_file: string, seconds: int] {
     let start = date now
     let limit = $"($seconds)s"
-    with-env {LC_ALL: C} {
-        ^timeout --verbose --signal=TERM --kill-after=1s $limit $executable ...$args o+e>| ^tee $log
+    let rows = do -i {
+        # POSIX sh only records the first child's numeric exit while Nu
+        # streams and timestamps stdout/stderr through tee.
+        ^sh -c 'status=$1; shift; "$@"; code=$?; printf "%s\n" "$code" > "$status"; exit "$code"' sh $status_file timeout --signal=TERM --kill-after=1s $limit $executable ...$args o+e>| ^tee $log
             | lines
             | each {|line| {ms: (elapsed-ms $start), line: ($line | str trim)} }
     }
-}
-
-def signaled-at-limit [rows: list<record>] {
-    ($rows | where {|row| $row.line | str starts-with "timeout: sending signal TERM to command"} | length) == 1
+    let total_ms = elapsed-ms $start
+    let code = if ($status_file | path exists) { open --raw $status_file | str trim } else { "missing" }
+    # GNU timeout returns 124 on the expected deadline; also enforce elapsed
+    # time because a child could itself exit 124 before the deadline.
+    {rows: $rows, elapsed_ms: $total_ms,
+     child_status: $code,
+     at_limit: ($code == "124" and $total_ms >= ($seconds * 1000 - 100) and $total_ms <= ($seconds * 1000 + 2500))}
 }
 
 def first-exact-ms [rows: list<record>, needle: string] {
@@ -65,14 +70,16 @@ def run-boot [work: string, kernel: string, firecracker: string, label: string, 
 
     let json_path = $"($out)/($label).fc.json"
     let log_path = $"($out)/($label).serial.log"
+    let status_path = $"($out)/($label).timeout.rc"
     let result_path = $"($out)/($label).json"
     config $kernel $mode $panic_probe | to json | save -f $json_path
 
-    let rows = capture $firecracker [--no-api --config-file $json_path] $log_path 4
+    let captured = capture $firecracker [--no-api --config-file $json_path] $log_path $status_path 4
+    let rows = $captured.rows
     let ready_ms = first-exact-ms $rows SMOLFIRE_READY
     let net_ms = first-exact-ms $rows $"SMOLFIRE_NET_OK ($token)"
     let panic_line = $rows | where {|row| ($row.line | str lowercase) =~ 'panic:'} | get 0?.line
-    let bounded_exit = signaled-at-limit $rows
+    let bounded_exit = $captured.at_limit
     let net_fail = ($rows | where {|row| $row.line | str contains SMOLFIRE_NET_FAIL} | length) > 0
     let ready_value = ($ready_ms | default (-1))
     let net_value = ($net_ms | default (-1))
@@ -92,7 +99,7 @@ def run-boot [work: string, kernel: string, firecracker: string, label: string, 
     }
     let result = {
         label: $label, mode: $mode, panic_probe: $panic_probe, verdict: $verdict
-        ready_ms: $ready_ms, net_ms: $net_ms, panic_line: $panic_line, bounded_exit: $bounded_exit
+        ready_ms: $ready_ms, net_ms: $net_ms, panic_line: $panic_line, bounded_exit: $bounded_exit, child_status: $captured.child_status, child_window_ms: $captured.elapsed_ms
         boot_chatter_lines: ($chatter | length), boot_chatter_samples: ($chatter | first 5)
         config: $json_path, serial: $log_path, token: $token
     }
@@ -108,7 +115,9 @@ def "main selftest" [] {
         fail "private selftest directory creation failed"
     }
     let log = $"($temp)/delayed-lines.log"
-    let rows = capture nu [-c "print FIRST; sleep 500ms; print SECOND"] $log 3
+    let delayed_rc = $"($temp)/delayed-lines.rc"
+    let delayed = capture nu [-c "print FIRST; sleep 500ms; print SECOND"] $log $delayed_rc 3
+    let rows = $delayed.rows
     let first = first-exact-ms $rows FIRST
     let second = first-exact-ms $rows SECOND
     if $first == null or $second == null or ($second - $first) < 400 or ($second - $first) > 2000 {
@@ -131,16 +140,24 @@ def "main selftest" [] {
     }
     if (median [1.0 2.0]) != 1.5 { fail "paired median arithmetic failed" }
     let early_log = $"($temp)/early-exit.log"
-    let early = capture nu [-c "print EARLY"] $early_log 1
-    if (signaled-at-limit $early) { fail "early child exit appeared to reach the timeout boundary" }
+    let early_rc = $"($temp)/early-exit.rc"
+    let early = capture nu [-c "print EARLY"] $early_log $early_rc 1
+    if $early.at_limit or $early.child_status != "0" or $early.elapsed_ms > 500 { fail "early child exit appeared to reach the timeout boundary" }
     let held_log = $"($temp)/held.log"
-    let held = capture nu [-c "print HELD; sleep 2sec"] $held_log 1
-    if not (signaled-at-limit $held) { fail "timeout child boundary was not recorded" }
+    let held_rc = $"($temp)/held.rc"
+    let held = capture sleep ["2"] $held_log $held_rc 1
+    if not $held.at_limit or $held.child_status != "124" { fail "timeout child boundary was not recorded" }
+    let spoof_log = $"($temp)/early-124.log"
+    let spoof_rc = $"($temp)/early-124.rc"
+    let spoof = capture nu [-c "exit 124"] $spoof_log $spoof_rc 1
+    if $spoof.at_limit or $spoof.child_status != "124" or $spoof.elapsed_ms > 500 { fail "early child exit 124 appeared to reach the timeout boundary" }
     let removed_log = (^rm -- $log | complete)
     let removed_early = (^rm -- $early_log | complete)
     let removed_held = (^rm -- $held_log | complete)
+    let removed_spoof = (^rm -- $spoof_log | complete)
+    let removed_rcs = (^rm -- $delayed_rc $early_rc $held_rc $spoof_rc | complete)
     let removed_dir = (^rmdir -- $temp | complete)
-    if $removed_log.exit_code != 0 or $removed_early.exit_code != 0 or $removed_held.exit_code != 0 or $removed_dir.exit_code != 0 or ($temp | path exists) {
+    if $removed_log.exit_code != 0 or $removed_early.exit_code != 0 or $removed_held.exit_code != 0 or $removed_spoof.exit_code != 0 or $removed_rcs.exit_code != 0 or $removed_dir.exit_code != 0 or ($temp | path exists) {
         fail "private selftest cleanup failed"
     }
     print $"apic-pic-pair selftest: streamed delay ($second - $first)ms"

@@ -85,6 +85,9 @@ def default-state [] {
         inflight:           {}   # task_id → {executor, since_tick}; one slot held
                                  # from dispatch until harvest (accept or S-003
                                  # escalation). Covered by atomic save/load.
+        workers:            {}   # executor → {last_seen_tick, consecutive_failures,
+                                 # dead}; piggyback heartbeat, see the Worker
+                                 # heartbeat section. Covered by atomic save/load.
     }
 }
 
@@ -564,6 +567,191 @@ def prune-inflight [state: record] {
     set-inflight $state $kept
 }
 
+# ── Worker heartbeat + dead-worker detection (gastown parity) ─────────────────
+#
+# `workers: {<executor>: {last_seen_tick, consecutive_failures, dead}}` lives
+# in the crash-atomic state record, so it gets the same torn-write protection
+# as the inflight slot table: readers see the old or the new table, never a
+# half-written one.
+#
+# Heartbeats are OBSERVATIONS of real spool traffic (piggyback — no pings, no
+# extra SSH/process round trips):
+#   - state-waiting reply-received: a dispatch round trip completed (a reply
+#     arrived for the pending dispatch, any verdict — liveness, not quality);
+#   - state-harvesting accept: a pass verdict was classified.
+# Harvested fail/blocked/malformed verdicts bump consecutive_failures WITHOUT
+# touching last_seen_tick (failure is not liveness); successes reset it to 0.
+#
+# Deliberately NOT a heartbeat site: state-dispatching send. A coordinator
+# spool append proves nothing about the worker, and heartbeating on send
+# would resurrect a dead worker in the same tick its reaped tasks redispatch
+# — dead-marking could never stick. Dispatch alone leaves workers untouched.
+#
+# Dead detection: a worker that still owns inflight work but saw no
+# successful round trip for SMOLFIRE_WORKER_DEAD_TICKS (default
+# WORKER_DEAD_AFTER_TICKS, garbage falls back via env-int-or) is marked dead
+# with one edge-triggered `worker_marked_dead` diagnostic (S-005 shape:
+# fixed event name via log-event, like dispatch_deferred_backpressure — NOT
+# a state_transition/verdict, whose schema and value enums are closed).
+# Its eligible inflight tasks are reaped to the REAL retry path: the slot is
+# released and a synthetic fail reply is appended in the same tick (single
+# save-state — atomic release+requeue, no double-dispatch, no leak), so the
+# next harvest routes them through the D2 table: attempts increment, the
+# budget still applies, nothing is dropped, and reap itself never HALTs.
+# Eligible = owned by the worker, not the pending task (state-waiting owns
+# it; the 300 s timeout path handles it), not halted (S-002 owns those).
+# A live worker with no inflight is idle, never dead.
+#
+# Resurrection: any later successful round trip clears dead with one
+# edge-triggered `worker_resurrected` event. Already-dead workers with fresh
+# inflight are silently re-reaped every tick (`worker_tasks_reaped`, no
+# repeat dead event) so retried tasks keep moving instead of hanging.
+#
+# Rate-limit interplay: dead-worker tasks occupy slots until the reap tick —
+# release and requeue happen atomically together, so counting is never
+# momentarily wrong in either direction.
+const WORKER_DEAD_AFTER_TICKS = 20
+
+def dead-after-ticks [] {
+    env-int-or "SMOLFIRE_WORKER_DEAD_TICKS" $WORKER_DEAD_AFTER_TICKS
+}
+
+# Read the worker table defensively (same posture as get-inflight).
+def get-workers [state: record] {
+    let raw = $state | get -o workers | default {}
+    if ($raw | describe | str starts-with "record") { $raw } else { {} }
+}
+
+def set-workers [state: record, table: record] {
+    if "workers" in $state {
+        $state | update workers $table
+    } else {
+        $state | insert workers $table
+    }
+}
+
+# Attribute traffic to a worker: recorded executor for the task, else its
+# inflight slot, else the default executor (same fallback chain the harvest
+# retry path uses).
+def resolve-task-executor [state: record, task_id: string] {
+    let via_map = try { $state.task_executors | get $task_id | get executor } catch { "" }
+    if $via_map != "" { return $via_map }
+    let via_slot = try { get-inflight $state | get $task_id | get executor } catch { "" }
+    if $via_slot != "" { return $via_slot }
+    $DEFAULT_EXECUTOR
+}
+
+# Record a successful round trip: stamp liveness, clear failures and dead.
+# Edge-triggered resurrection event — only on true → false.
+def record-heartbeat [state: record, executor: string, tick: int] {
+    let table = get-workers $state
+    let raw = $table | get -o $executor | default {}
+    let prev = if ($raw | describe | str starts-with "record") { $raw } else { {} }
+    if (($prev | get -o dead | default false) == true) {
+        log-event "worker_resurrected" {worker: $executor, last_seen_tick: $tick}
+    }
+    set-workers $state ($table | upsert $executor {last_seen_tick: $tick, consecutive_failures: 0, dead: false})
+}
+
+# Record an observed failure: bump the counter, preserve liveness and dead.
+# A never-before-seen worker starts at last_seen_tick 0 (never observed
+# alive); the dead-mark gate additionally requires owned inflight work, so a
+# stray failure alone can never mark anything dead.
+def record-worker-failure [state: record, executor: string] {
+    let table = get-workers $state
+    let raw = $table | get -o $executor | default {}
+    let prev = if ($raw | describe | str starts-with "record") { $raw } else { {} }
+    let fails = (try { $prev | get consecutive_failures | into int } catch { 0 }) + 1
+    let next = {
+        last_seen_tick: ($prev | get -o last_seen_tick | default 0)
+        consecutive_failures: $fails
+        dead: ($prev | get -o dead | default false)
+    }
+    set-workers $state ($table | upsert $executor $next)
+}
+
+# Queue one reaped task back into the retry path as a synthetic fail reply.
+# Same shape as state-waiting's timeout injection: harvest classifies it via
+# the D2 table (retry while attempts < 3, else the standard escalation —
+# the budget owns the outcome, never the reap). X-Dead-Worker-Reap marks the
+# provenance for operators grepping the spool.
+def append-dead-reap-fail [spool: string, task_id: string, worker: string, age: int, threshold: int, tick: int] {
+    let dir = $spool | path dirname
+    if not ($dir | path exists) { mkdir $dir }
+    let ts = date now | format date "%Y%m%d%H%M%S"
+    let synth_id = $"<deadreap.($task_id).t($tick).($ts)@smolfire.local>"
+    let synth_msg = $"From coordinator@smolfire.local ($ts)
+From: coordinator@smolfire.local
+To: coordinator@smolfire.local
+Message-ID: ($synth_id)
+X-Dead-Worker-Reap: ($worker)
+Content-Type: text/toml; charset=utf-8
+
+task_id = \"($task_id)\"
+verdict = \"fail\"
+failure_reason = \"dead worker ($worker): no successful round trip for ($age) ticks; threshold ($threshold) ticks\"
+"
+    $synth_msg | save --append $spool
+}
+
+# Mark silent workers dead and reap their tasks. Runs at tick entry (every
+# FSM state, before the HALT check — same placement as prune-inflight, which
+# runs first so halted / budget-exhausted / stale slots are already owned
+# elsewhere and never reach the reap).
+def sweep-dead-workers [state: record, spool: string] {
+    let table = get-workers $state
+    if ($table | columns | is-empty) {
+        return $state
+    }
+    let threshold = dead-after-ticks
+    let pending = $state | get -o pending_task_id | default ""
+    mut next_table = $table
+    mut next_slots = get-inflight $state
+    mut next_state = $state
+    for worker in ($table | columns) {
+        let raw_entry = try { $table | get $worker } catch { {} }
+        let entry = if ($raw_entry | describe | str starts-with "record") { $raw_entry } else { {} }
+        let last = try { $entry | get last_seen_tick | into int } catch { 0 }
+        let is_dead = ($entry | get -o dead | default false) == true
+        let age = $state.tick_count - $last
+        let age = if $age < 0 { 0 } else { $age }
+        let owned = $next_slots | columns | where {|t|
+            (try { $next_slots | get $t | get executor } catch { "" }) == $worker
+        }
+        let eligible = $owned | where {|t| $t != $pending and not ($t in $next_state.halted_tasks) }
+        if $is_dead {
+            # Already dead: no repeat event, but still reap promptly.
+            if ($eligible | is-empty) { continue }
+            for t in $eligible {
+                $next_slots = $next_slots | reject $t
+                append-dead-reap-fail $spool $t $worker $age $threshold $state.tick_count
+            }
+            log-event "worker_tasks_reaped" {worker: $worker, tasks: $eligible}
+            continue
+        }
+        # Idle workers (no owned inflight) are never dead.
+        if ($owned | is-empty) { continue }
+        if $age < $threshold { continue }
+        $next_table = $next_table | upsert $worker ($entry
+            | upsert last_seen_tick $last
+            | upsert consecutive_failures (try { $entry | get consecutive_failures | into int } catch { 0 })
+            | upsert dead true)
+        for t in $eligible {
+            $next_slots = $next_slots | reject $t
+            append-dead-reap-fail $spool $t $worker $age $threshold $state.tick_count
+        }
+        log-event "worker_marked_dead" {
+            worker: $worker
+            last_seen_tick: $last
+            age_ticks: $age
+            threshold_ticks: $threshold
+            reaped_tasks: $eligible
+        }
+    }
+    $next_state = set-inflight $next_state $next_slots
+    set-workers $next_state $next_table
+}
+
 # Launch bin/jail-execute.nu detached for a dispatched task (executor = jail).
 # Values reach the child as positional argv, never interpolated into the sh
 # script, so task ids / Message-IDs cannot inject shell.
@@ -855,6 +1043,15 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                     _ => (if $attempt_n < 3 { "retry" } else { "retry-exhausted" })
                 }
 
+                # Worker heartbeat attribution (best effort): recorded
+                # executor, else inflight slot, else default. Fail-family
+                # verdicts are quality failures, not liveness — bump the
+                # counter, leave last_seen_tick alone.
+                let reply_exec = resolve-task-executor $current_state $task_id
+                if $category in ["fail", "blocked", "malformed"] {
+                    $current_state = record-worker-failure $current_state $reply_exec
+                }
+
                 match $decision {
                     "accepted" => {
                         log-verdict $category $decision "harvesting" --task-id $task_id --attempt $attempt_n --message-id $id
@@ -865,7 +1062,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         let table = get-inflight $current_state
                         let cleared_slots = if $task_id in $table { $table | reject $task_id } else { $table }
                         $new_seen = $new_seen | append $id
-                        $current_state = (set-inflight $current_state $cleared_slots | update seen_ids $new_seen | update attempt_counts $cleared_counts | update task_executors $cleared_execs)
+                        $current_state = record-heartbeat (set-inflight $current_state $cleared_slots | update seen_ids $new_seen | update attempt_counts $cleared_counts | update task_executors $cleared_execs) $reply_exec ($current_state.tick_count)
                         continue
                     }
                     "unrecognized-verdict" => {
@@ -1053,7 +1250,15 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
             pending_task_id:    $state.pending_task_id
         }
         log-transition "waiting" "harvesting" "reply-received" --task-id $state.pending_task_id --attempt ($state.attempt_counts | get -o $state.pending_task_id | default 0) --message-id (msg-id ($reply | first))
-        let next_state = $state
+        # The dispatch round trip completed: the worker answered. That is
+        # liveness regardless of verdict (harvest still classifies quality) —
+        # piggyback heartbeat, no new traffic.
+        let waited = if ($state | get -o pending_task_id | default "") != "" {
+            record-heartbeat $state (resolve-task-executor $state ($state | get pending_task_id)) ($state.tick_count)
+        } else {
+            $state
+        }
+        let next_state = $waited
             | update pending_request_id ""
             | update pending_task_id    ""
             | update pending_to_addr    ""
@@ -1290,10 +1495,12 @@ def tick [state: record, spool: string, root: string, remaining: int] {
     let resumed_state = process-resume-actions $state $root $spool "tick"
 
     # Sweep inflight slots that can never drain through harvest (halted,
-    # budget-exhausted, stale) — the no-orphan-slot guarantee. Runs in every
-    # FSM state, before the HALT check, so a halted coordinator still
-    # reclaims rather than leaking caps across the pause.
-    let swept_state = prune-inflight $resumed_state
+    # budget-exhausted, stale) — the no-orphan-slot guarantee — then mark
+    # silent workers dead and reap their tasks to the retry path. Both run in
+    # every FSM state, before the HALT check, so a halted coordinator still
+    # reclaims rather than leaking caps across the pause. Prune runs first so
+    # halted/exhausted/stale slots are owned elsewhere, never reaped.
+    let swept_state = sweep-dead-workers (prune-inflight $resumed_state) $spool
 
     # O(1) HALT check before every state dispatch — spec §13.
     if (halt-present $root) {

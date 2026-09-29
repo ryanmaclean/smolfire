@@ -59,29 +59,74 @@ def default-state [] {
     }
 }
 
-# Load state from TOML file, or return the default if file absent / parse fails.
+# Load state from TOML file, or return the default if file absent.
 # Missing keys are filled in from default-state so old state files remain compatible.
+#
+# Fail-CLOSED crash-safety invariant (§12 companion): a state file that is
+# present but empty or unparseable is NEVER treated as "no history".
+# Treating it as fresh default-state would be total amnesia — seen_ids,
+# attempt_counts, and halted_tasks all forgotten — causing re-harvest of
+# every message, reset D2 retry budgets (unbounded billed retries), and
+# re-dispatch of operator-halted tasks. Instead the corrupt file is
+# quarantined to <path>.corrupt-<ts> as forensic evidence and the process
+# exits non-zero BEFORE any tick side effect (no dispatch, no spool
+# append, no HALT write, no state overwrite).
 def load-state [path: string] {
     if not ($path | path exists) {
         log-event "state_init" {path: $path, reason: "file absent"}
         return (default-state)
     }
+    let raw = try {
+        open --raw $path
+    } catch {|err|
+        log-event "state_load_error" {path: $path, error: ($err | get msg? | default "read error")}
+        log-event "state_quarantined" {path: $path, reason: "unreadable"}
+        exit 1
+    }
+    if ($raw | str trim | is-empty) {
+        let ts = date now | format date "%Y%m%d%H%M%S"
+        let quarantine = $"($path).corrupt-($ts)"
+        try { mv $path $quarantine } catch {}
+        log-event "state_load_error" {path: $path, error: "empty state file (possible torn write)"}
+        log-event "state_quarantined" {path: $path, quarantine: $quarantine}
+        exit 1
+    }
     try {
-        let loaded = open --raw $path | from toml
+        let loaded = $raw | from toml
         (default-state) | merge $loaded
     } catch {|err|
+        let ts = date now | format date "%Y%m%d%H%M%S"
+        let quarantine = $"($path).corrupt-($ts)"
+        try { mv $path $quarantine } catch {}
         log-event "state_load_error" {path: $path, error: ($err | get msg? | default "parse error")}
-        default-state
+        log-event "state_quarantined" {path: $path, quarantine: $quarantine}
+        exit 1
     }
 }
 
-# Persist state back to disk as TOML.
+# Persist state back to disk as TOML, atomically.
+#
+# Crash-safe atomic persist (§12 companion invariant): the record is
+# written to a temp file in the SAME directory and renamed over the
+# target. Same-directory rename(2) is atomic — concurrent/crash readers
+# see the old intact file or the new complete file, never a torn prefix.
+# A crash between temp-write and rename leaves only an orphan
+# <path>.tmp.* file (swept on the next save); the state file itself is
+# never torn, so load-state's fail-closed path stays a backstop for
+# operator/disk corruption rather than a routine crash outcome.
 def save-state [state: record, path: string] {
     let dir = $path | path dirname
     if not ($dir | path exists) {
         mkdir $dir
     }
-    $state | to toml | save --force $path
+    # Sweep orphan tmp files from writers killed before rename.
+    for stale in (try { glob $"($path).tmp.*" } catch { [] }) {
+        try { rm $stale } catch {}
+    }
+    let ts = date now | format date "%Y%m%d%H%M%S"
+    let tmp = $"($path).tmp.($nu.pid).($ts)"
+    $state | to toml | save --force $tmp
+    mv $tmp $path
 }
 
 # Emit a structured TOML log line to stdout.

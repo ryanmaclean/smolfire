@@ -1,0 +1,20 @@
+{
+  "schema": "ryanlab.bench.v1",
+  "project": "smolBSD",
+  "timestamp": "2026-09-29T18:34:16Z",
+  "runtime": "fbryz3070-freebsd-amd64",
+  "filesystem": null,
+  "workload": "pipe-stream-64k",
+  "commit": "57ceb45",
+  "metrics": {
+    "bytes": 268435456,
+    "wall_ns": 20434481,
+    "throughput_MBps": 13136.4
+  },
+  "tags": {
+    "project": "smolBSD",
+    "runtime": "fbryz3070-freebsd-amd64",
+    "workload": "pipe-stream-64k"
+  },
+  "notes": "smolBSD #90 BSD transport-primitives baseline, fbryz3070 (FreeBSD 15.0-RELEASE-p11 amd64, Ryzen 9 5950X, clang 19.1.7 -O2). Throwaway C harness in /tmp on host (never committed), nice -n 10, CLOCK_MONOTONIC. RTT workloads: fork ping-pong, N=20000, full-duplex pipe/socketpair pair. See bench/fbryz3070/2026-09-29/raw/prim90.log and README.md."
+}

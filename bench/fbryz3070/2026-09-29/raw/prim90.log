@@ -1,0 +1,13 @@
+PRIM workload=pipe-rtt-1b n=20000 min_ns=2560 p50_ns=3090 p95_ns=3390 p99_ns=3690 max_ns=36149 mean_ns=3137
+PRIM workload=pipe-rtt-4k n=20000 min_ns=3009 p50_ns=3500 p95_ns=3650 p99_ns=3940 max_ns=29889 mean_ns=3522
+PRIM workload=socketpair-rtt-1b n=20000 min_ns=2900 p50_ns=3259 p95_ns=3409 p99_ns=3580 max_ns=34118 mean_ns=3270
+PRIM workload=socketpair-rtt-4k n=20000 min_ns=3400 p50_ns=3470 p95_ns=3590 p99_ns=3810 max_ns=29009 mean_ns=3488
+PRIM workload=pipe-stream-64k bytes=268435456 wall_ns=20434481 throughput_MBps=13136.4
+PRIM workload=socketpair-stream-64k bytes=268435456 wall_ns=10934118 throughput_MBps=24550.3
+PRIM workload=shm-mmap-64M write_ns=3162358 write_GBps=21.22 readscan_ns=163943 readscan_GBps=409.34
+PRIM workload=kqueue-user-trigger-wait n=20000 min_ns=269 p50_ns=280 p95_ns=290 p99_ns=300 max_ns=1330 mean_ns=287
+PRIM workload=kqueue-trigger-batch-1 n=20000 wall_ns=2398518 ops_per_s=8338482
+PRIM workload=kqueue-trigger-batch-64 n=20000 wall_ns=2390318 ops_per_s=8367088
+PRIM workload=mutex-condvar-pingpong n=20000 min_ns=5590 p50_ns=5940 p95_ns=6430 p99_ns=6900 max_ns=29128 mean_ns=6019
+PRIM workload=atomic-flag-handoff-2thread n=20000 min_ns=89 p50_ns=129 p95_ns=130 p99_ns=140 max_ns=2240 mean_ns=117
+PRIM workload=atomic-fetchadd-local n=5000000 wall_ns=7508831 ns_per_op=1.5

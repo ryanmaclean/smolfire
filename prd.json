@@ -1,6 +1,6 @@
 {
   "project": "smolfire coordinator",
-  "version": "1.3",
+  "version": "1.4",
   "branchName": "main",
   "qualityChecks": [
     "nu tests/mbox-parse-test.nu",
@@ -130,6 +130,32 @@
       "passes": true,
       "status": "passing",
       "evidence": "coord-fleet-dispatch-test.nu 26/26 pass (live 7950x4090pop round trip guarded by SMOLFIRE_FLEET_LIVE=1, skipped by default): opt-in SSH backend defaults OFF; capability gating refuses Network on unknown hosts (S-004); attestation reply envelope carries X-Executor and command_executed claim; halted tasks never dispatch; MiSTer target refused. Design doc docs/FLEET-DISPATCH.md. Merged via PR #114."
+    },
+    {
+      "id": "S-010",
+      "priority": 10,
+      "title": "Route fleet roles to the real fleet backend inside the tick",
+      "description": "As a coordinator operator, I need fleet roles to route to the real fleet backend inside the tick (resolve-executor, state-dispatching before spawn-subagent, identical harvest plumbing) so fleet-capable work actually runs remotely instead of falling back to the old dispatch path.",
+      "filesHint": [
+        "bin/coord-tick.nu",
+        "tests/coord-tick-fleet-route-test.nu"
+      ],
+      "passes": true,
+      "status": "passing",
+      "evidence": "coord-tick-fleet-route-test.nu 6/6 pass (failing-first): fleet role + enabled routes to the real fleet backend via resolve-executor with state-dispatching before spawn-subagent and identical harvest plumbing; disabled preserves old behavior exactly; halt (S-002) and capability-mismatch (S-004) paths intact. Live proofs vs 7950x4090pop: 1-task round trip + 5-task drain. Merged via PR #119."
+    },
+    {
+      "id": "S-011",
+      "priority": 11,
+      "title": "Support concurrent pending dispatches per executor",
+      "description": "As a coordinator operator, I need executor-keyed pending slot lists (fleet 2, jail 2, vm 4) with an extended no-double-dispatch guard (per-slot checks, harvest refusal, crash scan), a kill-switch, and state migration, so independent tasks can fan out concurrently without ever dispatching the same task twice.",
+      "filesHint": [
+        "bin/coord-tick.nu",
+        "tests/coord-concurrent-pendings-test.nu"
+      ],
+      "passes": true,
+      "status": "passing",
+      "evidence": "coord-concurrent-pendings-test.nu 16/16 pass incl. crash injection and same-task-never-twice: executor-keyed slot lists (fleet 2/jail 2/vm 4), extended S-012 guard (per-slot checks + harvest refusal + crash scan), kill-switch, migration, N-slots follow-up. Live peak-2 proof vs 7950x4090pop (5-task fan-out, per-task dispatch == 1). PR #120 OPEN at time of writing (gh pr view 120 --json state => OPEN)."
     }
   ]
 }

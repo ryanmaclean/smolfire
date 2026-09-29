@@ -41,6 +41,32 @@ const EXECUTORS = ["vm", "jail"]
 const DEFAULT_EXECUTOR = "vm"
 const JAIL_EXECUTOR_SCRIPT = path self jail-execute.nu
 
+# Max-inflight caps (gastown parity; Jev 0.88 decision: in-flight work is
+# counted in the crash-atomic state file — token-bucket rejected as a
+# duplicate mechanism for the same invariant).
+#
+# Latency justification (worker latency drives the numbers — slow, billed,
+# contention-prone executors get the smallest caps):
+#   vm    = 4  local QEMU boot + SSH runs in seconds; host can overlap a few
+#   jail  = 2  shares the host kernel; privileged + noisy, keep it narrow
+#   fleet = 2  remote SSH workers, minutes of latency each; most contended
+#   global = 8 bounds total concurrent billed work below the S-003 retry
+#              blast radius (3 attempts x 8 tasks), not above it
+#
+# `fleet` has no tick-level selection yet (resolve-executor knows vm|jail;
+# fleet travels via fleet-* roles in bin/coord-dispatch.nu). The entry
+# reserves the accounting so role-routed fleet work is capped the moment
+# tick-level selection learns it — counting is keyed by executor string,
+# so no code change is needed then. Unknown executors fall back to the
+# global cap only (see cap-for-executor).
+const MAX_INFLIGHT_GLOBAL = 8
+const MAX_INFLIGHT_PER_EXECUTOR = {vm: 4, jail: 2, fleet: 2}
+# Crash-orphan horizon, in ticks: an inflight entry for a task the FSM is
+# NOT waiting on that survives this many ticks without harvest or retry
+# is reclaimed (see prune-inflight). Well above the S-003 budget (3
+# attempts, one dispatch per tick) so healthy work never trips it.
+const INFLIGHT_STALE_AFTER_TICKS = 50
+
 # Default state for a fresh coordinator with no prior history.
 def default-state [] {
     {
@@ -56,6 +82,9 @@ def default-state [] {
         attempt_counts:     {}   # record keyed by task_id → int attempt count
         halted_tasks:       []
         task_executors:     {}   # task_id → {executor, network, request_id}; reused on retry
+        inflight:           {}   # task_id → {executor, since_tick}; one slot held
+                                 # from dispatch until harvest (accept or S-003
+                                 # escalation). Covered by atomic save/load.
     }
 }
 
@@ -114,6 +143,10 @@ def load-state [path: string] {
 # <path>.tmp.* file (swept on the next save); the state file itself is
 # never torn, so load-state's fail-closed path stays a backstop for
 # operator/disk corruption rather than a routine crash outcome.
+#
+# The inflight slot table lives in this record, so atomicity is what makes
+# the caps crash-safe: a torn state file would lose slot accounting and let
+# the next tick over-dispatch past the caps (pattern from 8a95eb2 / S-006).
 def save-state [state: record, path: string] {
     let dir = $path | path dirname
     if not ($dir | path exists) {
@@ -179,6 +212,7 @@ const TELEMETRY_TRANSITION_REASONS = [
     "new-request", "retry", "task-halted", "harvest-complete",
     "reply-received", "no-reply", "reply-timeout",
     "dispatch-sent",
+    "backpressure-deferred",
     "halt-marker-present", "awaiting-resume", "resume-action",
     "unknown-state",
 ]
@@ -379,6 +413,155 @@ def resolve-executor [payload: record, host_os: string] {
         return ($pick | insert error $"jail executor requires a FreeBSD host; this host is ($host_os)")
     }
     $pick | insert error ""
+}
+
+# ── Max-inflight backpressure (gastown parity) ───────────────────────────────
+#
+# Slots live in the state record (`inflight: {task_id: {executor,
+# since_tick}}`), so they are covered by the atomic save/load above: a crash
+# between dispatch and harvest loses no accounting, and a restarted
+# coordinator sees exactly the slots outstanding before the crash.
+#
+# No config files: every knob has an env override (parsed defensively — a
+# typo falls back to the const, never crashes the tick):
+#   SMOLFIRE_MAX_INFLIGHT          global cap (default MAX_INFLIGHT_GLOBAL)
+#   SMOLFIRE_MAX_INFLIGHT_<EXEC>   per-executor cap, e.g.
+#                                  SMOLFIRE_MAX_INFLIGHT_FLEET (default from
+#                                  MAX_INFLIGHT_PER_EXECUTOR, else global)
+#   SMOLFIRE_MAX_INFLIGHT_STALE_TICKS  orphan horizon (default
+#                                  INFLIGHT_STALE_AFTER_TICKS)
+def env-int-or [key: string, fallback: int] {
+    let raw = try { $env | get $key } catch { null }
+    if $raw == null {
+        return $fallback
+    }
+    try { $raw | into int } catch { $fallback }
+}
+
+def cap-global [] {
+    env-int-or "SMOLFIRE_MAX_INFLIGHT" $MAX_INFLIGHT_GLOBAL
+}
+
+def cap-for-executor [executor: string] {
+    let key = $"SMOLFIRE_MAX_INFLIGHT_($executor | str uppercase)"
+    let fallback = $MAX_INFLIGHT_PER_EXECUTOR | get -o $executor | default $MAX_INFLIGHT_GLOBAL
+    env-int-or $key $fallback
+}
+
+def stale-after-ticks [] {
+    env-int-or "SMOLFIRE_MAX_INFLIGHT_STALE_TICKS" $INFLIGHT_STALE_AFTER_TICKS
+}
+
+# Read the slot table defensively: a hand-edited state file with a non-record
+# inflight counts as empty rather than crashing the tick. Old state files
+# without the key get {} from load-state's merge with default-state.
+def get-inflight [state: record] {
+    let raw = $state | get -o inflight | default {}
+    if ($raw | describe | str starts-with "record") { $raw } else { {} }
+}
+
+def set-inflight [state: record, table: record] {
+    if "inflight" in $state {
+        $state | update inflight $table
+    } else {
+        $state | insert inflight $table
+    }
+}
+
+# Count slots. Returns {global: int, per_executor: record}.
+def inflight-counts [inflight: any] {
+    if not ($inflight | describe | str starts-with "record") {
+        return {global: 0, per_executor: {}}
+    }
+    let execs = $inflight | values | each {|e| $e | get -o executor | default $DEFAULT_EXECUTOR }
+    mut per = {}
+    for k in ($execs | uniq) {
+        $per = $per | upsert $k ($execs | where {|x| $x == $k } | length)
+    }
+    {global: ($execs | length), per_executor: $per}
+}
+
+# Gate check for one executor. Returns {at_cap, global, global_cap,
+# for_executor, exec_cap} — the counts travel with the verdict so the
+# deferral event logs the exact reason (per-executor vs global).
+def inflight-status [inflight: any, executor: string] {
+    let counts = inflight-counts $inflight
+    let gcap = cap-global
+    let ecap = cap-for-executor $executor
+    let ecount = $counts.per_executor | get -o $executor | default 0
+    {
+        at_cap: ($counts.global >= $gcap or $ecount >= $ecap)
+        global: $counts.global
+        global_cap: $gcap
+        for_executor: $ecount
+        exec_cap: $ecap
+    }
+}
+
+# S-005-shaped backpressure signal: one diagnostic `dispatch_deferred_backpressure`
+# event per refused candidate (telemetry conventions — fixed event name, the
+# counts that explain the refusal), plus one fixed-schema harvesting→idle
+# transition per tick (reason "backpressure-deferred").
+def log-backpressure [task_id: string, executor: string, decision: string, message_id: string, gate: record] {
+    log-event "dispatch_deferred_backpressure" {
+        task_id:             $task_id
+        executor:            $executor
+        decision:            $decision
+        inflight_global:     $gate.global
+        global_cap:          $gate.global_cap
+        inflight_executor:   $gate.for_executor
+        executor_cap:        $gate.exec_cap
+        message_id:          $message_id
+    }
+}
+
+# Release slots that can never drain through harvest — the no-orphan-slot
+# guarantee. A slot is reclaimed when its task:
+#   - is in halted_tasks (S-002: operator-halted work is never re-dispatched
+#     until resume, and resume re-dispatch re-registers the slot), or
+#   - exhausted the S-003 budget (attempts >= 3: escalation owns the task;
+#     harvest already released or will never re-dispatch), or
+#   - is stale: (tick_count - since_tick) beyond the horizon — crash orphans
+#     whose reply was lost age out instead of occupying a slot forever.
+# The task the FSM is currently waiting on (pending_task_id) is EXEMPT: its
+# slot is owned by state-waiting/harvesting and released on harvest, so the
+# sweep never prematurely reclaims genuinely outstanding work.
+# Every release logs `inflight_slot_reclaimed`. Runs once per tick entry so
+# the sweep fires in every FSM state.
+def prune-inflight [state: record] {
+    let table = get-inflight $state
+    if ($table | columns | is-empty) {
+        return (set-inflight $state $table)
+    }
+    let horizon = stale-after-ticks
+    let pending = $state | get -o pending_task_id | default ""
+    mut kept = {}
+    for tid in ($table | columns) {
+        if $tid == $pending and $pending != "" {
+            $kept = $kept | upsert $tid ($table | get $tid)
+            continue
+        }
+        let entry = $table | get $tid
+        let since = try { $entry | get since_tick | into int } catch { $state.tick_count }
+        let age = $state.tick_count - $since
+        let age = if $age < 0 { 0 } else { $age }
+        let attempts = $state.attempt_counts | get -o $tid | default 0
+        let reason = if $tid in $state.halted_tasks {
+            "halted"
+        } else if $attempts >= 3 {
+            "budget-exhausted"
+        } else if $age > $horizon {
+            "stale"
+        } else {
+            ""
+        }
+        if $reason == "" {
+            $kept = $kept | upsert $tid $entry
+        } else {
+            log-event "inflight_slot_reclaimed" {task_id: $tid, reason: $reason, age_ticks: $age, attempts: $attempts}
+        }
+    }
+    set-inflight $state $kept
 }
 
 # Launch bin/jail-execute.nu detached for a dispatched task (executor = jail).
@@ -584,6 +767,13 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
     mut dispatch_attempt = -1
     mut dispatch_task    = ""
     mut dispatch_msgid   = ""
+    # Backpressure context: candidates refused by max-inflight caps stay
+    # UNSEEN (no seen_ids append) so the next tick rediscovers them — deferral
+    # is level-triggered, never a drop. Only the last refused candidate feeds
+    # the harvesting→idle transition below.
+    mut deferred_count = 0
+    mut deferred_task  = ""
+    mut deferred_msgid = ""
 
     for msg in $messages {
         # Stop processing once we've identified a dispatch target.
@@ -670,14 +860,31 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         log-verdict $category $decision "harvesting" --task-id $task_id --attempt $attempt_n --message-id $id
                         let cleared_counts = if $task_id in $current_state.attempt_counts { $current_state.attempt_counts | reject $task_id } else { $current_state.attempt_counts }
                         let cleared_execs  = if $task_id in $current_state.task_executors { $current_state.task_executors | reject $task_id } else { $current_state.task_executors }
+                        # Harvest releases the inflight slot — completion path
+                        # of the no-leak guarantee (dispatch→harvest→0).
+                        let table = get-inflight $current_state
+                        let cleared_slots = if $task_id in $table { $table | reject $task_id } else { $table }
                         $new_seen = $new_seen | append $id
-                        $current_state = ($current_state | update seen_ids $new_seen | update attempt_counts $cleared_counts | update task_executors $cleared_execs)
+                        $current_state = (set-inflight $current_state $cleared_slots | update seen_ids $new_seen | update attempt_counts $cleared_counts | update task_executors $cleared_execs)
                         continue
                     }
                     "unrecognized-verdict" => {
                         log-verdict $category $decision "harvesting" --task-id $task_id --attempt $attempt_n --message-id $id
                     }
                     "retry" => {
+                        # Retries re-enter the dispatch path, so they take a
+                        # slot like new requests. At cap the retry is DEFERRED:
+                        # no verdict (the decision is postponed, not made), no
+                        # seen_ids append — the reply is re-harvested next tick.
+                        let retry_exec = $current_state.task_executors | get -o $task_id | get -o executor | default $DEFAULT_EXECUTOR
+                        let gate = inflight-status (get-inflight $current_state) $retry_exec
+                        if $gate.at_cap {
+                            log-backpressure $task_id $retry_exec "retry" $id $gate
+                            $deferred_count = $deferred_count + 1
+                            $deferred_task  = $task_id
+                            $deferred_msgid = $id
+                            continue
+                        }
                         log-verdict $category $decision "dispatching" --task-id $task_id --attempt $attempt_n --message-id $id
                         $new_seen = $new_seen | append $id
                         $dispatch_state = ($current_state
@@ -701,7 +908,13 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         try-irc-dm $task_id $decision $root
                         log-verdict $category $decision "idle" --task-id $task_id --attempt $attempt_n --message-id $id
                         log-transition "harvesting" "idle" "task-halted" --task-id $task_id --verdict $category --attempt $attempt_n --message-id $id
-                        $current_state = ($current_state | update halted_tasks ($current_state.halted_tasks | append $task_id))
+                        # S-003 escalation releases the inflight slot: an
+                        # exhausted task never re-dispatches, so holding its
+                        # slot would leak it permanently.
+                        let table = get-inflight $current_state
+                        let cleared_slots = if $task_id in $table { $table | reject $task_id } else { $table }
+                        $current_state = (set-inflight $current_state $cleared_slots
+                            | update halted_tasks ($current_state.halted_tasks | append $task_id))
                         $new_seen = $new_seen | append $id
                         return ($current_state | update seen_ids $new_seen | update fsm_state "idle")
                     }
@@ -754,6 +967,20 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
 
                 let in_reply_to = $msg.headers | get "In-Reply-To"? | default ""
                 if $in_reply_to == "" {
+                    # Max-inflight gate: refuse with a logged backpressure
+                    # event before any dispatch side effect. Halt-skipped,
+                    # capability-mismatched, and executor-refused messages
+                    # never reach here, so they never occupy slots.
+                    let gate = inflight-status (get-inflight $current_state) $exec_pick.executor
+                    if $gate.at_cap {
+                        log-backpressure $task_id $exec_pick.executor "new-request" $id $gate
+                        $deferred_count = $deferred_count + 1
+                        $deferred_task  = $task_id
+                        $deferred_msgid = $id
+                        # No seen_ids append: the request is rediscovered next
+                        # tick (level-triggered backpressure, not a drop).
+                        continue
+                    }
                     log-event "would_dispatch" {
                         task_id:    $task_id
                         to_role:    $to_addr
@@ -786,6 +1013,11 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
     if $has_dispatch {
         log-transition "harvesting" "dispatching" $dispatch_reason --task-id $dispatch_task --verdict $dispatch_verdict --attempt $dispatch_attempt --message-id $dispatch_msgid
         tick $dispatch_state $spool $root ($remaining - 1)
+    } else if $deferred_count > 0 {
+        log-transition "harvesting" "idle" "backpressure-deferred" --task-id $deferred_task --message-id $deferred_msgid
+        $current_state
+        | update seen_ids $new_seen
+        | update fsm_state "idle"
     } else {
         log-transition "harvesting" "idle" "harvest-complete"
         $current_state
@@ -946,6 +1178,24 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
     let from_addr    = "coordinator@smolfire.local"
     let exec_info    = $state.task_executors | get -o $task_id | default {executor: $DEFAULT_EXECUTOR, network: false, request_id: $state.pending_request_id}
 
+    # Backstop: harvesting gates every dispatch it routes, but a persisted
+    # `dispatching` state (crash between harvest-save and spool-append) can
+    # re-enter here with the caps since filled. Refuse rather than
+    # over-dispatch; the trigger was already marked seen at harvest, so
+    # un-mark it — the next tick rediscovers the work instead of dropping it.
+    let gate = inflight-status (get-inflight $state) $exec_info.executor
+    if $gate.at_cap {
+        log-backpressure $task_id $exec_info.executor "dispatch-backstop" $state.pending_request_id $gate
+        log-transition "dispatching" "idle" "backpressure-deferred" --task-id $task_id --message-id $state.pending_request_id
+        let unseed = $state.seen_ids | where {|s| $s != $state.pending_request_id }
+        return ($state
+            | update fsm_state          "idle"
+            | update seen_ids           $unseed
+            | update pending_request_id ""
+            | update pending_task_id    ""
+            | update pending_to_addr    "")
+    }
+
     let mbox_msg = $"From ($from_addr) ($ts)
 From: ($from_addr)
 To: ($to_addr)
@@ -970,6 +1220,10 @@ executor = \"($exec_info.executor)\"
         executor:   $exec_info.executor
     }
 
+    # Occupy one inflight slot, counted in the crash-atomic state file.
+    # Released on harvest (accept or S-003 escalation) or by prune-inflight.
+    let slot_table = (get-inflight $state) | upsert $task_id {executor: $exec_info.executor, since_tick: $state.tick_count}
+
     if $exec_info.executor == "jail" {
         # Jail executor: run the ORIGINAL request's commands in an ephemeral
         # jail; the reply's In-Reply-To is this dispatch's Message-ID.
@@ -984,7 +1238,7 @@ executor = \"($exec_info.executor)\"
     log-transition "dispatching" "waiting" "dispatch-sent" --task-id $task_id --attempt $next_attempt --message-id $msg_id
 
     let updated_counts = $state.attempt_counts | upsert $task_id $next_attempt
-    tick ($state
+    tick (set-inflight $state $slot_table
         | update fsm_state          "waiting"
         | update attempt_counts     $updated_counts
         | update pending_request_id $msg_id
@@ -1035,13 +1289,19 @@ def tick [state: record, spool: string, root: string, remaining: int] {
     # without requiring a global HALT marker.
     let resumed_state = process-resume-actions $state $root $spool "tick"
 
+    # Sweep inflight slots that can never drain through harvest (halted,
+    # budget-exhausted, stale) — the no-orphan-slot guarantee. Runs in every
+    # FSM state, before the HALT check, so a halted coordinator still
+    # reclaims rather than leaking caps across the pause.
+    let swept_state = prune-inflight $resumed_state
+
     # O(1) HALT check before every state dispatch — spec §13.
     if (halt-present $root) {
-        return (state-halted $resumed_state $root $spool "halt-marker-present")
+        return (state-halted $swept_state $root $spool "halt-marker-present")
     }
 
-    let next_count = $resumed_state.tick_count + 1
-    let stamped = $resumed_state
+    let next_count = $swept_state.tick_count + 1
+    let stamped = $swept_state
         | update tick_count $next_count
         | update last_tick_at (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ")
 

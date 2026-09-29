@@ -35,6 +35,8 @@ on:
       - 'sys/amd64/conf/SMOLFIRE*'
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
+      - 'tests/boot-mute-pair.nu'
+      - '.github/nu-version'
   push:
     paths:
       - '.github/workflows/smolfire.yml'
@@ -46,6 +48,8 @@ on:
       - 'sys/amd64/conf/SMOLFIRE*'
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
+      - 'tests/boot-mute-pair.nu'
+      - '.github/nu-version'
   workflow_dispatch:
     inputs:
       tslog:
@@ -438,6 +442,24 @@ jobs:
           wc -c tslog-run*.log
           [ "$FAILS" -eq 0 ] || { echo "$FAILS boot(s) failed"; exit 1; }
 
+      - name: Install Nushell for boot-mute experiment
+        if: ${{ !cancelled() && github.ref == 'refs/heads/exp/boot-mute-0929' }}
+        continue-on-error: true
+        run: |
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          ARCHIVE="nu-${NU_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-x86_64-unknown-linux-musl/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Same-ELF boot-mute paired experiment
+        if: ${{ !cancelled() && github.ref == 'refs/heads/exp/boot-mute-0929' }}
+        continue-on-error: true
+        run: |
+          nu tests/boot-mute-pair.nu selftest
+          nu tests/boot-mute-pair.nu --work "$WORK" --runs 3
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -455,6 +477,7 @@ jobs:
             /mnt/smolfire-ci/qemu-microvm.pid
             /mnt/smolfire-ci/release-run*.log
             /mnt/smolfire-ci/tslog-run*.log
+            /mnt/smolfire-ci/boot-mute-pair/
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log

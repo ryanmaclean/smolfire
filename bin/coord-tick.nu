@@ -35,11 +35,15 @@ const STATE_VERSION = "1"
 
 # Task executors. `vm` (default) keeps today's dispatch path unchanged;
 # `jail` (experimental, FreeBSD hosts only) runs the request's commands in an
-# ephemeral jail via bin/jail-execute.nu. Selected per request by a TOML
-# `executor = "vm"|"jail"` field, else SMOLFIRE_EXECUTOR, else "vm".
+# ephemeral jail via bin/jail-execute.nu. `fleet` (opt-in, only when
+# SMOLFIRE_FLEET_ENABLE=1) runs them on a remote fleet worker via
+# bin/coord-fleet-dispatch.nu. Selected per request by a TOML
+# `executor = "vm"|"jail"|"fleet"` field, else SMOLFIRE_EXECUTOR, else the
+# recipient role (`fleet-*` → fleet when enabled), else "vm".
 const EXECUTORS = ["vm", "jail"]
 const DEFAULT_EXECUTOR = "vm"
 const JAIL_EXECUTOR_SCRIPT = path self jail-execute.nu
+const FLEET_EXECUTOR_SCRIPT = path self coord-fleet-dispatch.nu
 
 # Max-inflight caps (gastown parity; Jev 0.88 decision: in-flight work is
 # counted in the crash-atomic state file — token-bucket rejected as a
@@ -53,12 +57,12 @@ const JAIL_EXECUTOR_SCRIPT = path self jail-execute.nu
 #   global = 8 bounds total concurrent billed work below the S-003 retry
 #              blast radius (3 attempts x 8 tasks), not above it
 #
-# `fleet` has no tick-level selection yet (resolve-executor knows vm|jail;
-# fleet travels via fleet-* roles in bin/coord-dispatch.nu). The entry
-# reserves the accounting so role-routed fleet work is capped the moment
-# tick-level selection learns it — counting is keyed by executor string,
-# so no code change is needed then. Unknown executors fall back to the
-# global cap only (see cap-for-executor).
+# `fleet` is selected at tick level by resolve-executor below (explicit
+# `executor = "fleet"` or a `fleet-*` recipient role, both gated on
+# SMOLFIRE_FLEET_ENABLE=1) and travels the same detached-spawn path as jail.
+# The entry reserves the accounting so role-routed fleet work is capped —
+# counting is keyed by executor string, so no code change is needed here.
+# Unknown executors fall back to the global cap only (see cap-for-executor).
 const MAX_INFLIGHT_GLOBAL = 8
 const MAX_INFLIGHT_PER_EXECUTOR = {vm: 4, jail: 2, fleet: 2}
 # Crash-orphan horizon, in ticks: an inflight entry for a task the FSM is
@@ -396,21 +400,31 @@ def try-irc-dm [task_id: string, reason: string, root: string] {
 }
 
 # Resolve the executor for a request. Precedence: request TOML `executor` field,
-# then SMOLFIRE_EXECUTOR, then "vm". Returns {executor, source, error}; a
-# non-empty error means refuse dispatch (never silently fall back — an explicit
-# request for isolation must not be downgraded).
-def resolve-executor [payload: record, host_os: string] {
+# then SMOLFIRE_EXECUTOR, then the recipient role (`fleet-*` → fleet, but ONLY
+# when SMOLFIRE_FLEET_ENABLE=1), then "vm". Returns {executor, source, error};
+# a non-empty error means refuse dispatch (never silently fall back — an
+# explicit request for isolation must not be downgraded).
+#
+# Fleet is default-off: when SMOLFIRE_FLEET_ENABLE != 1 this behaves exactly
+# as the old vm|jail-only resolution — an explicit `fleet` is refused as
+# unknown and `fleet-*` roles fall through to the default (vm) path.
+def resolve-executor [payload: record, host_os: string, --role: string = ""] {
+    let fleet_enabled = (($env | get SMOLFIRE_FLEET_ENABLE? | default "") == "1")
+    let allowed = if $fleet_enabled { $EXECUTORS | append "fleet" } else { $EXECUTORS }
     let from_payload = $payload | get -o executor | default ""
     let from_env     = $env.SMOLFIRE_EXECUTOR? | default ""
+    let role_local = ($role | split row "@" | first | default "")
     let pick = if $from_payload != "" {
         {executor: $from_payload, source: "request"}
     } else if $from_env != "" {
         {executor: $from_env, source: "env"}
+    } else if $fleet_enabled and ($role_local | str starts-with "fleet-") {
+        {executor: "fleet", source: "role"}
     } else {
         {executor: $DEFAULT_EXECUTOR, source: "default"}
     }
-    if not ($pick.executor in $EXECUTORS) {
-        return ($pick | insert error $"unknown executor '($pick.executor)' \(from ($pick.source)\); expected one of ($EXECUTORS | str join ', ')")
+    if not ($pick.executor in $allowed) {
+        return ($pick | insert error $"unknown executor '($pick.executor)' \(from ($pick.source)\); expected one of ($allowed | str join ', ')")
     }
     if $pick.executor == "jail" and $host_os != "freebsd" {
         return ($pick | insert error $"jail executor requires a FreeBSD host; this host is ($host_os)")
@@ -766,6 +780,28 @@ def spawn-jail-executor [task_id: string, dispatch_id: string, request_id: strin
         task_id:    $task_id
         agent_type: "jail-agent"
         executor:   "jail"
+        log_file:   $log_file
+    }
+}
+
+# Launch bin/coord-fleet-dispatch.nu detached for a dispatched task
+# (executor = fleet). Same shape as spawn-jail-executor: values reach the
+# child as positional argv, never interpolated into the sh script, so task
+# ids / Message-IDs cannot inject shell. The child's reply threads to
+# dispatch_id (the coordinator dispatch Message-ID state-waiting matches on)
+# and carries the executor-agnostic result shape, so harvest, the D2 retry
+# table, and telemetry stay identical to the vm/jail paths.
+def spawn-fleet-executor [task_id: string, dispatch_id: string, request_id: string, spool_path: string, root: string] {
+    let spawn_dir = [$root, "var", "run", "spawned"] | path join
+    if not ($spawn_dir | path exists) { mkdir $spawn_dir }
+    let log_file = [$spawn_dir, $"($task_id).fleet.log"] | path join
+    with-env {SMOLFIRE_FLEET_LOG: $log_file} {
+        ^sh -c '"$0" "$@" >"$SMOLFIRE_FLEET_LOG" 2>&1 &' $nu.current-exe $FLEET_EXECUTOR_SCRIPT dispatch --task-id $task_id --dispatch-id $dispatch_id --request-id $request_id --spool $spool_path
+    }
+    log-event "subagent_spawned" {
+        task_id:    $task_id
+        agent_type: "fleet-agent"
+        executor:   "fleet"
         log_file:   $log_file
     }
 }
@@ -1146,9 +1182,11 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                     continue
                 }
 
-                # Executor selection (docs/JAIL-EXECUTOR.md). Refusal is a
-                # coordinator-level rejection like §17, not a retry.
-                let exec_pick = resolve-executor $payload $nu.os-info.name
+                # Executor selection (docs/JAIL-EXECUTOR.md, docs/FLEET-DISPATCH.md).
+                # Refusal is a coordinator-level rejection like §17, not a retry.
+                # The recipient role travels along so `fleet-*` roles resolve
+                # to the fleet executor when SMOLFIRE_FLEET_ENABLE=1.
+                let exec_pick = resolve-executor $payload $nu.os-info.name --role $to_addr
                 if $exec_pick.error != "" {
                     log-event "dispatch_executor_refused" {
                         task_id:    $task_id
@@ -1433,6 +1471,15 @@ executor = \"($exec_info.executor)\"
         # Jail executor: run the ORIGINAL request's commands in an ephemeral
         # jail; the reply's In-Reply-To is this dispatch's Message-ID.
         spawn-jail-executor $task_id $msg_id $exec_info.request_id $spool $root
+    } else if $exec_info.executor == "fleet" {
+        # Fleet executor: run the ORIGINAL request's commands on the remote
+        # fleet worker via the real fleet backend
+        # (bin/coord-fleet-dispatch.nu dispatch — same run-fleet-task +
+        # reply-envelope contract as dispatch-fleet in bin/coord-dispatch.nu,
+        # threaded to this dispatch's Message-ID). This branch sits BEFORE
+        # the spawn-subagent agent-type classification so fleet roles never
+        # hit the claude-CLI path.
+        spawn-fleet-executor $task_id $msg_id $exec_info.request_id $spool $root
     } else {
         # vm (default): unchanged. Auto-spawn a subagent (Phase II); agent_type
         # is derived from the local-part of the recipient address.

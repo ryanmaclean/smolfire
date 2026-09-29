@@ -36,6 +36,7 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/boot-mute-pair.nu'
+      - 'tests/apic-pic-pair.nu'
       - '.github/nu-version'
   push:
     paths:
@@ -49,6 +50,7 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/boot-mute-pair.nu'
+      - 'tests/apic-pic-pair.nu'
       - '.github/nu-version'
   workflow_dispatch:
     inputs:
@@ -232,7 +234,9 @@ jobs:
           # boot_args: env overrides (ledger #3/#4) + kenv-fed static net
           # (rc reads smolfire.ip/gw/fetch; Firecracker auto-appends its
           # virtio_mmio.device= entries so vtnet0 attaches).
-          printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 boot_mute=YES smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" > fc.json
+          APIC_HINT=""
+          [ "$GITHUB_REF" = 'refs/heads/exp/apic-pic-0929' ] && APIC_HINT=" hint.apic.0.disabled=1"
+          printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 boot_mute=YES%s smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$APIC_HINT" > fc.json
           cat fc.json
           # The typed command is FIRE_$((6*7)) (braced send = no Tcl subst),
           # so terminal echo can never match FIRE_42 — only real sh output can.
@@ -442,9 +446,9 @@ jobs:
           wc -c tslog-run*.log
           [ "$FAILS" -eq 0 ] || { echo "$FAILS boot(s) failed"; exit 1; }
 
-      - name: Install Nushell for boot-mute experiment
+      - name: Install Nushell for paired experiments
         id: boot_mute_nu
-        if: ${{ !cancelled() && github.ref == 'refs/heads/exp/boot-mute-0929' }}
+        if: ${{ !cancelled() && (github.ref == 'refs/heads/exp/boot-mute-0929' || github.ref == 'refs/heads/exp/apic-pic-0929') }}
         run: |
           NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
           ARCHIVE="nu-${NU_VERSION}-x86_64-unknown-linux-musl.tar.gz"
@@ -459,6 +463,13 @@ jobs:
         run: |
           nu tests/boot-mute-pair.nu selftest
           nu tests/boot-mute-pair.nu --work "$WORK" --runs 3
+
+      - name: Same-ELF APIC/PIC paired experiment
+        id: apic_pic_pair
+        if: ${{ !cancelled() && github.ref == 'refs/heads/exp/apic-pic-0929' }}
+        run: |
+          nu tests/apic-pic-pair.nu selftest
+          nu tests/apic-pic-pair.nu --work "$WORK" --runs 3
 
       - name: Upload artifacts
         if: always()
@@ -478,6 +489,7 @@ jobs:
             /mnt/smolfire-ci/release-run*.log
             /mnt/smolfire-ci/tslog-run*.log
             /mnt/smolfire-ci/boot-mute-pair/
+            /mnt/smolfire-ci/apic-pic-pair/
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log
@@ -495,6 +507,10 @@ jobs:
             if [ "$GITHUB_REF" = 'refs/heads/exp/boot-mute-0929' ]; then
               echo 'boot_mute_nu=${{ steps.boot_mute_nu.outcome }}'
               echo 'boot_mute_pair=${{ steps.boot_mute_pair.outcome }}'
+            fi
+            if [ "$GITHUB_REF" = 'refs/heads/exp/apic-pic-0929' ]; then
+              echo 'apic_pic_nu=${{ steps.boot_mute_nu.outcome }}'
+              echo 'apic_pic_pair=${{ steps.apic_pic_pair.outcome }}'
             fi
           } > "$WORK/gate-results.env"
           while IFS='=' read -r gate outcome; do

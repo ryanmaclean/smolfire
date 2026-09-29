@@ -137,6 +137,12 @@ if [ -n "$pages" ] && [ -n "$free" ] && [ -n "$psize" ]; then
 used=$(( (pages - free) * psize ))
 echo "SMOLFIRE_METRIC ready.vm.used.bytes=$used"
 fi
+# Branch-only paired test trigger. It is dormant in every timed A/B boot;
+# the separate disposable PIC guest requests it after READY via kenv.
+if [ "$(kenv smolfire.test.panic 2>/dev/null)" = 1 ]; then
+    /rescue/sysctl debug.kdb.panic_str=smolfire-pic-panic-probe
+    echo "SMOLFIRE_PANIC_TRIGGER_FAILED"
+fi
 exec /rescue/sh </dev/console >/dev/console 2>&1
 EOF
 fi

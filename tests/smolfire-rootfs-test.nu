@@ -76,6 +76,13 @@ if not ($rc.stdout | str contains "SMOLFIRE_METRIC ready.vm.used.bytes=") {
 if not ($rc.stdout | str contains "exec /rescue/sh") {
     fail "/etc/rc missing exec /rescue/sh handoff"
 }
+if not ($rc.stdout | str contains "debug.kdb.panic_str=smolfire-pic-panic-probe") {
+    fail "/etc/rc missing deliberate PIC guest panic probe"
+}
+let release_lines = ($rc.stdout | lines)
+let ready_index = ($release_lines | enumerate | where {|r| $r.item | str contains "SMOLFIRE_READY"} | get index | first)
+let panic_index = ($release_lines | enumerate | where {|r| $r.item | str contains "debug.kdb.panic_str=smolfire-pic-panic-probe"} | get index | first)
+if $panic_index <= $ready_index { fail "deliberate guest panic probe must follow READY" }
 
 # Release rc must stay TSLOG-free (the release ELF is the measured path).
 if ($rc.stdout | str contains "TSLOG") {

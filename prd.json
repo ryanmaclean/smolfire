@@ -1,6 +1,6 @@
 {
   "project": "smolfire coordinator",
-  "version": "1.2",
+  "version": "1.3",
   "branchName": "main",
   "qualityChecks": [
     "nu tests/mbox-parse-test.nu",
@@ -89,6 +89,47 @@
       "passes": true,
       "status": "passing",
       "evidence": "coord-state-atomic-test.nu 5/5 pass via real `nu bin/coord-tick.nu` subprocess invocations: torn (truncated) state file fails closed (non-zero exit, spool byte-identical so halted t-hold is NOT re-dispatched, file quarantined to *.corrupt-*); empty state file fails closed the same way; absent state file still fresh-inits; successful save leaves valid TOML with no *.tmp.* debris (temp+rename); stale tmp from a crashed writer is swept and the intact state is ticked. Wired into .github/workflows/ci.yml and auto-discovered by tests/run-all.sh. Existing suites unaffected: coord-tick-test, coord-double-dispatch-test, coord-fsm-tests 9/9 all green."
+    },
+    {
+      "id": "S-007",
+      "priority": 7,
+      "title": "Enforce per-executor and global max-inflight rate limits",
+      "description": "As a coordinator operator, I need per-executor and global max-inflight caps counted in the crash-atomic state file so one executor cannot starve the others, with overload dispatches deferred under backpressure instead of dropped, slots released on harvest and escalation, stale slots aged out by prune-inflight, and env overrides for tuning.",
+      "filesHint": [
+        "bin/coord-tick.nu",
+        "tests/coord-ratelimit-test.nu"
+      ],
+      "passes": true,
+      "status": "passing",
+      "evidence": "coord-ratelimit-test.nu 11/11 pass: per-executor and global caps enforced via dispatch_deferred_backpressure; harvest and escalation release slots; prune-inflight ages stale entries; inflight survives the atomic save/load round-trip; env overrides (zero cap, per-executor cap, garbage fallback) honored; refusal paths never occupy slots. Merged via PR #117."
+    },
+    {
+      "id": "S-008",
+      "priority": 8,
+      "title": "Detect dead workers via heartbeats and reap to retry without dropping work",
+      "description": "As a coordinator operator, I need piggybacked worker heartbeats with dead marking at a configurable threshold so stalled workers are reaped back to retry instead of dropping tasks, resurrected workers resume cleanly, and halted or pending dispatches stay exempt from heartbeat tracking.",
+      "filesHint": [
+        "bin/coord-tick.nu",
+        "tests/coord-heartbeat-test.nu"
+      ],
+      "passes": true,
+      "status": "passing",
+      "evidence": "coord-heartbeat-test.nu 14/14 pass: piggybacked heartbeats update worker state; dead marking fires at threshold and reaps to retry (never drops); resurrection clears dead marking; halt-skipped and pending dispatches never touch heartbeat state; legacy state files without a workers key keep working; env override sets threshold with garbage fallback; heartbeat/reap paths spawn no extra processes. Merged via PR #118."
+    },
+    {
+      "id": "S-009",
+      "priority": 9,
+      "title": "Dispatch fleet tasks over opt-in SSH with capability gating and attestation",
+      "description": "As a coordinator operator, I need an opt-in SSH fleet dispatch executor so capable hosts can run tasks remotely, with capability gating per host, an attestation reply envelope, halt compatibility, and the MiSTer gaming box explicitly excluded.",
+      "filesHint": [
+        "bin/coord-dispatch.nu",
+        "bin/coord-fleet-dispatch.nu",
+        "docs/FLEET-DISPATCH.md",
+        "tests/coord-fleet-dispatch-test.nu"
+      ],
+      "passes": true,
+      "status": "passing",
+      "evidence": "coord-fleet-dispatch-test.nu 26/26 pass (live 7950x4090pop round trip guarded by SMOLFIRE_FLEET_LIVE=1, skipped by default): opt-in SSH backend defaults OFF; capability gating refuses Network on unknown hosts (S-004); attestation reply envelope carries X-Executor and command_executed claim; halted tasks never dispatch; MiSTer target refused. Design doc docs/FLEET-DISPATCH.md. Merged via PR #114."
     }
   ]
 }

@@ -443,8 +443,8 @@ jobs:
           [ "$FAILS" -eq 0 ] || { echo "$FAILS boot(s) failed"; exit 1; }
 
       - name: Install Nushell for boot-mute experiment
+        id: boot_mute_nu
         if: ${{ !cancelled() && github.ref == 'refs/heads/exp/boot-mute-0929' }}
-        continue-on-error: true
         run: |
           NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
           ARCHIVE="nu-${NU_VERSION}-x86_64-unknown-linux-musl.tar.gz"
@@ -454,8 +454,8 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Same-ELF boot-mute paired experiment
+        id: boot_mute_pair
         if: ${{ !cancelled() && github.ref == 'refs/heads/exp/boot-mute-0929' }}
-        continue-on-error: true
         run: |
           nu tests/boot-mute-pair.nu selftest
           nu tests/boot-mute-pair.nu --work "$WORK" --runs 3
@@ -492,6 +492,10 @@ jobs:
             echo 'firecracker_boot_time=${{ steps.firecracker_boot_time.outcome }}'
             echo 'firecracker_shell=${{ steps.firecracker_shell.outcome }}'
             echo 'qemu_microvm=${{ steps.qemu_microvm.outcome }}'
+            if [ "$GITHUB_REF" = 'refs/heads/exp/boot-mute-0929' ]; then
+              echo 'boot_mute_nu=${{ steps.boot_mute_nu.outcome }}'
+              echo 'boot_mute_pair=${{ steps.boot_mute_pair.outcome }}'
+            fi
           } > "$WORK/gate-results.env"
           while IFS='=' read -r gate outcome; do
             echo "$gate=$outcome"

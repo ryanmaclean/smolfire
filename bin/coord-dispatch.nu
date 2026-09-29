@@ -7,8 +7,10 @@
 # and write a reply back to the spool.
 #
 # Role routing:
-#   vm-*@smolfire.local  → dispatch-vm  (boots qcow2, runs commands via SSH)
-#   anything else       → dispatch-claude (spawns claude CLI)
+#   vm-*@smolfire.local    → dispatch-vm  (boots qcow2, runs commands via SSH)
+#   fleet-*@smolfire.local → dispatch-fleet (runs commands on a remote fleet
+#                           worker over key-auth SSH; OFF unless SMOLFIRE_FLEET_ENABLE=1)
+#   anything else         → dispatch-claude (spawns claude CLI)
 
 # Find the claude CLI binary.
 #
@@ -159,6 +161,56 @@ Content-Type: text/toml; charset=utf-8
     {launched: true, mode: "vm-direct", verdict: $result.verdict, boot_sec: $result.boot_sec}
 }
 
+# ── Private: fleet execution path ──────────────────────────────────────────────
+
+# Dispatch a task to a remote fleet worker (role pattern: fleet-*@smolfire.local).
+# OFF by default — requires SMOLFIRE_FLEET_ENABLE=1 (same opt-in pattern as
+# dispatch-claude's SMOLFIRE_SPAWN_SUBAGENT gate and the jail executor).
+# Reads commands from the task TOML body's [commands] run = [...] section.
+# Returns {launched: bool, mode: string, verdict: string, boot_sec: int}
+def dispatch-fleet [
+    task_id: string
+    role:    string
+    brief:   string   # full TOML body — must contain [commands] run = [...]
+    spool:   string
+] {
+    if (($env | get SMOLFIRE_FLEET_ENABLE? | default "") != "1") {
+        return {launched: false, pid: 0, log_path: "", error: "fleet dispatch disabled by default (set SMOLFIRE_FLEET_ENABLE=1 to enable)"}
+    }
+
+    let parsed = try { $brief | from toml } catch { {} }
+    let commands = $parsed | get -o commands.run | default []
+    let cp = $parsed | get -o context_pointers | default {}
+    let target = $cp | get -o fleet_target | default ($env.SMOLFIRE_FLEET_HOST? | default "")
+    let user = $cp | get -o fleet_user | default ""
+    let tools = $parsed | get -o tools_required | default []
+    let timeout = $parsed | get -o timeout_sec | default ($env.SMOLFIRE_FLEET_TIMEOUT? | default 240 | into int)
+
+    if ($commands | length) == 0 {
+        return {launched: false, error: "no commands.run in task brief"}
+    }
+
+    use coord-fleet-dispatch.nu [run-fleet-task, reply-envelope, mbox-append-prefix, root-for-spool]
+    let root = root-for-spool $spool
+    let result = run-fleet-task $task_id $commands --target $target --user $user --tools-required $tools --timeout $timeout --root $root
+
+    if ($result.outputs | length) == 0 and $result.verdict == "fail" {
+        # Refusal (halted / bad target / capability / preflight): do not
+        # append a reply, do not claim a launch — same posture as
+        # dispatch-claude's disabled-by-default refusal.
+        let err = $result | get error
+        if ($err | str starts-with "task ") or ($err | str starts-with "no fleet target") or ($err | str starts-with "bad fleet target") or ($err | str starts-with "unsafe fleet") or ($err | str starts-with "fleet target ") or ($err | str starts-with "fleet host ") or ($err | str starts-with "fleet preflight") {
+            return {launched: false, error: $err}
+        }
+    }
+
+    # Build reply envelope and append to spool (executor-agnostic shape).
+    let dispatch_id = $"<($task_id).fleet-dispatch@smolfire.local>"
+    let existing = if ($spool | path exists) { open --raw $spool } else { "" }
+    (mbox-append-prefix $existing) + (reply-envelope $task_id $dispatch_id $result) | save --append $spool
+    {launched: true, mode: "fleet-direct", verdict: $result.verdict, boot_sec: $result.boot_sec}
+}
+
 # ── Public: unified dispatch entry point ──────────────────────────────────────
 
 # Dispatch a subagent for a task.
@@ -173,6 +225,8 @@ export def dispatch-subagent [
 ] {
     if ($role | str starts-with "vm-") {
         dispatch-vm $task_id $role $brief $spool
+    } else if ($role | str starts-with "fleet-") {
+        dispatch-fleet $task_id $role $brief $spool
     } else {
         dispatch-claude $task_id $role $brief $spool $log_dir
     }

@@ -1,0 +1,23 @@
+{
+  "schema": "ryanlab.bench.v1",
+  "project": "smolfire",
+  "timestamp": "2026-09-29T18:29:44Z",
+  "runtime": "superstation1-mister-linux-armv7",
+  "filesystem": "tmpfs",
+  "workload": "durable-commit-tmpfs-append-4096-py-recovery",
+  "commit": "a54f696",
+  "metrics": {
+    "recovery_ns": 178423877,
+    "recovery_records": 2000,
+    "recovery_bad_tail": 0,
+    "recovery_bytes_scanned": 8192000,
+    "recovery_wall_from_main_ns": 178501158,
+    "restart_wall_ns": 289579881
+  },
+  "tags": {
+    "project": "smolfire",
+    "runtime": "superstation1-mister-linux-armv7",
+    "workload": "durable-commit-tmpfs-append-4096-py-recovery"
+  },
+  "notes": "smolFire #86 recovery pass, fresh process, seq-chain + crc32 verify of 2000 4K records. superstation1, MiSTer Linux 6.18.38-MiSTer armv7l, CPython 3.9.6 verifier (CPU-bound). Times in ns."
+}

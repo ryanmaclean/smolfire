@@ -422,6 +422,20 @@ module durable_tid_v0_tb;
     check("T3 durable held at 8", t_d == 64'h8);
     clear_errors;
 
+    // TEST 3b: a conflicting payload for an old seq must not be mistaken
+    // for a successful idempotent re-ack. This DUT only reports DUP; a
+    // persisted-payload comparison belongs to the host/storage path.
+    pulses_before = mon_trusted_cnt;
+    submit_one(32'h00000005, 32'hDEADBEEF, 32'hCAFED00D, 32'h00000001, 1'b0);
+    wait_idle(t_ok);
+    check("T3b conflicting replay wait idle ok", t_ok == 1'b1);
+    mm_read(A_ERROR, t_err);
+    check("T3b conflicting replay flagged DUP", t_err[E_DUP] == 1'b1);
+    read_durable(t_d);
+    check("T3b durable held at 8", t_d == 64'h8);
+    check("T3b no trusted pulse", mon_trusted_cnt == pulses_before);
+    clear_errors;
+
     // TEST 4: gap seq (durable+5 = 13) -> GAP, durable held.
     submit_one(32'h0000000D, 32'hDEADBEEF, 32'hCAFED00D, 32'h00000001, 1'b0);
     wait_idle(t_ok);

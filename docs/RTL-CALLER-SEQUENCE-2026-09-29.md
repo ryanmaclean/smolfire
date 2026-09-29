@@ -25,6 +25,17 @@ the host must compare an old request's payload to the durable record
 before re-acknowledging it. This DUT has no persisted payload index or
 read path, so it only returns `DUP_SEQ` with no new commit. A `DUP_SEQ`
 bit **alone must not be reported as a successful idempotent re-ack**.
+The HPS UART harness has no durable-media read interface: its duplicate
+vector deliberately changes the descriptor and treats `DUP_SEQ` as a
+successful *negative test*, never an application ACK. The separate #86
+software log writes internally generated records and is not bound to the
+FPGA descriptor, epoch, or commit pulse. Comparing that log to a retry
+would not prove the submitted operation was durably stored. Safe re-ack
+requires a storage record indexed by the same request TID and epoch,
+the persisted payload (or collision-resistant digest), and an authenticated
+read after recovery before any ACK decision. Those interfaces do not exist
+in this register-only v0 slice, so conflicting and identical old requests
+both remain fail-closed `DUP_SEQ` without a trusted completion pulse.
 The 16-byte descriptor CRC covers the low request word and payload as in
 the existing frame; the full-width equality check against durable count
 keeps an altered high word from being accepted as the next request.
@@ -33,7 +44,8 @@ oracle uses a 32-bit request value. The high-half acceptance and low-word
 carry cases are exercised only through the Avalon register testbench.
 
 The source-only testbench adds reset in SUBMIT and CRC, full-width gap,
-terminal overflow, and forced-state high-half/carry arithmetic controls;
+terminal overflow, conflicting-payload duplicate rejection, and forced-state
+high-half/carry arithmetic controls;
 it retains the merged PR113 SUBMIT/S_CRC zero/one-count reset controls,
 adapted to durable-count semantics, as well as COMMIT reset, duplicate,
 gap, CRC and monotonicity controls. It can be compiled with either

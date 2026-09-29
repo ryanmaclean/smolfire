@@ -503,6 +503,9 @@ static int vec_good(uint64_t *next, unsigned opno)
 
 static int vec_dup(uint64_t base, uint64_t next, unsigned opno)
 {
+    /* Negative fault vector: deliberately change the payload of an old
+     * request. Returning 0 means the harness observed DUT rejection; it is
+     * never an application-level idempotent ACK or a persisted-byte match. */
     uint32_t req;
     uint32_t err = 0;
     uint64_t d = 0;
@@ -522,7 +525,7 @@ static int vec_dup(uint64_t base, uint64_t next, unsigned opno)
                (unsigned long long)d);
         return -1;
     }
-    tr_log("op %u DUP req=%u held d=%llu", opno, req,
+    tr_log("op %u DUP req=%u rejected, durable held d=%llu", opno, req,
            (unsigned long long)d);
     return (clear_errors() == 0) ? 0 : -1;
 }

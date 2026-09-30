@@ -6,6 +6,8 @@ Use the three SuperStation One systems as the cheapest hardware validation path 
 
 Hardware status 2026-09-24: 1× SuperStation One on hand, 2× incoming. FPGA DUT path: MiSTer (already in use, 10.0.2.61) — fit of the durable-tid RTL to its fabric TBD.
 
+Located 2026-09-27: SS1 = `superstation1` @ 10.0.3.136 (DHCP, wired via US-8-60W port 3), root SSH works with controller key. SoC-FPGA box: ARMv7 (Cyclone V HPS class), kernel `6.18.38-MiSTer` (Linux), fpga_bridge br0-2 + fpga_manager fpga0 present. PLATFORM RULING (owner, 2026-09-29): Linux ACCEPTED on DE10-Nano-class devices (no working BSD exists).
+
 ## Node roles
 
 ### SS1-A — software control

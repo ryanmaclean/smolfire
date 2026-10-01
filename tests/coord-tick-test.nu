@@ -3,7 +3,7 @@
 
 # These tests exercise the D2 retry table, not the §12 backoff schedule
 # (covered by tests/coord-retry-backoff-test.nu): keep retries immediate.
-$env.SMOLFIRE_RETRY_BACKOFF = "0"
+export-env { $env.SMOLFIRE_RETRY_BACKOFF = "0" }
 
 # Inline assert helpers — avoids std library version sensitivity.
 def "assert equal" [left: any, right: any] {

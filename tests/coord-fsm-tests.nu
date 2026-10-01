@@ -20,7 +20,7 @@ use ../bin/mbox-parse.nu [parse-mbox, msg-id]
 
 # These scenarios exercise the D2 retry table, not the §12 backoff schedule
 # (covered by tests/coord-retry-backoff-test.nu): keep retries immediate.
-$env.SMOLFIRE_RETRY_BACKOFF = "0"
+export-env { $env.SMOLFIRE_RETRY_BACKOFF = "0" }
 
 const COORD_TICK = path self | path dirname | path dirname | path join "bin" "coord-tick.nu"
 

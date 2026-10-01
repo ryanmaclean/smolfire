@@ -26,7 +26,7 @@
 
 # Retry-path tests here are about heartbeats, not the §12 backoff schedule
 # (tests/coord-retry-backoff-test.nu): keep retries immediate.
-$env.SMOLFIRE_RETRY_BACKOFF = "0"
+export-env { $env.SMOLFIRE_RETRY_BACKOFF = "0" }
 
 def "assert equal" [left: any, right: any, msg: string = ""] {
     if $left != $right {

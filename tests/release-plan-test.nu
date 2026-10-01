@@ -4,7 +4,7 @@
 #
 #   nu tests/release-plan-test.nu
 
-use ../bin/release-plan.nu [tag-problems run-problems artifact-problems asset-name kernel-asset-name checksums-text digest-change notes-text]
+use ../bin/release-plan.nu [tag-problems run-problems artifact-problems asset-name kernel-asset-name checksums-text digest-change notes-text notes-file-problems fetch-list missing-assets]
 
 def "assert equal" [left: any, right: any, msg?: string] {
     if $left != $right {
@@ -94,5 +94,84 @@ $fx.release_assets_before | to json | save ($tmpj | path join "b.json")
 let dc = (do { ^nu $rp digest-changed --before ($tmpj | path join "b.json") --after ($tmpj | path join "b.json") --name "smolfire-aarch64-v0.5.0.qcow2" } | complete)
 assert equal $dc.exit_code 1 "digest-changed refuses unchanged"
 rm -rf $tmpj
+
+print "test: notes_file path validation"
+assert equal (notes-file-problems "") [] "empty ok"
+assert equal (notes-file-problems "docs/notes/v0.6.0.md") [] "relative ok"
+assert (not (notes-file-problems "/etc/passwd" | is-empty)) "absolute refused"
+assert (not (notes-file-problems "../secret" | is-empty)) ".. refused"
+assert (not (notes-file-problems "a/../../b" | is-empty)) "nested .. refused"
+assert (not (notes-file-problems "-rf" | is-empty)) "leading dash refused"
+assert equal (notes-file-problems "a..b/c") [] "dots inside a name are fine"
+let nf = (do { ^nu $rp validate-notes-file "/etc/passwd" } | complete)
+assert equal $nf.exit_code 1 "CLI refuses absolute notes_file"
+
+print "test: replace-mode fetch list / completeness (fail closed)"
+let rel = [{name: "smolfire-amd64-v1.qcow2"} {name: "smolfire-aarch64-v1.qcow2"} {name: "smolfire-kernel-v1"} {name: "SHA256SUMS"} {name: "smolfire-amd64-v1.qcow2.sha256"}]
+assert equal (fetch-list $rel ["smolfire-aarch64-v1.qcow2"]) ["smolfire-amd64-v1.qcow2" "smolfire-kernel-v1"] "fetch all but staged and derived"
+assert equal (missing-assets $rel ["smolfire-amd64-v1.qcow2" "smolfire-kernel-v1"]) ["smolfire-aarch64-v1.qcow2"] "missing detected"
+assert equal (missing-assets $rel ["smolfire-amd64-v1.qcow2" "smolfire-aarch64-v1.qcow2" "smolfire-kernel-v1"]) [] "complete"
+let cd = (mktemp -d)
+let ad = (mktemp -d)
+$rel | to json | save ($ad | path join "a.json")
+"x" | save ($cd | path join "smolfire-amd64-v1.qcow2")
+let inc = (do { ^nu $rp release-complete --assets ($ad | path join "a.json") --dir $cd } | complete)
+assert equal $inc.exit_code 1 "CLI release-complete refuses incomplete set"
+let fl = (do { ^nu $rp release-fetch --assets ($ad | path join "a.json") --staged-dir $cd } | complete)
+assert equal $fl.exit_code 0 "release-fetch ok"
+assert equal ($fl.stdout | lines) ["smolfire-aarch64-v1.qcow2" "smolfire-kernel-v1"] "release-fetch names"
+rm -rf $cd $ad
+
+print "test: CLI names / checksums / notes / validate-run --artifacts"
+assert equal ((^nu $rp names --tag v0.6.0 --arch aarch64) | str trim) "smolfire-aarch64-v0.6.0.qcow2" "names arch"
+assert equal ((^nu $rp names --tag v0.6.0 --kernel) | str trim) "smolfire-kernel-v0.6.0" "names kernel"
+let okt = (do { ^nu $rp validate-tag v0.6.0 } | complete)
+assert equal $okt.exit_code 0 "valid tag accepted"
+let wd = (mktemp -d)
+"abc" | save ($wd | path join "smolfire-amd64-v0.6.0.qcow2")
+"hello" | save ($wd | path join "smolfire-kernel-v0.6.0")
+let ck = (do { ^nu $rp checksums --dir $wd } | complete)
+assert equal $ck.exit_code 0 "checksums CLI"
+let sc = (do { cd $wd; ^sha256sum -c SHA256SUMS } | complete)
+assert equal $sc.exit_code 0 $"sha256sum -c: ($sc.stdout) ($sc.stderr)"
+let sc2 = (do { cd $wd; ^sha256sum -c smolfire-amd64-v0.6.0.qcow2.sha256 } | complete)
+assert equal $sc2.exit_code 0 "per-file .sha256 verifies"
+let emptyd = (mktemp -d)
+let ce = (do { ^nu $rp checksums --dir $emptyd } | complete)
+assert equal $ce.exit_code 1 "checksums on empty dir refuses"
+"body text" | save ($wd | path join "body.md")
+let nt = (do { ^nu $rp notes --tag v0.6.0 --dir $wd --body-file ($wd | path join "body.md") --amd64-run 11 --kernel-run 33 --prerelease } | complete)
+assert equal $nt.exit_code 0 "notes CLI"
+assert ($nt.stdout | str starts-with "body text") "notes body"
+assert ($nt.stdout | str contains "qemu-system-x86_64 -M q35") "boot command present"
+assert ($nt.stdout | str contains "file=smolfire-amd64-v0.6.0.qcow2") "boot line names the qcow2"
+assert ($nt.stdout | str contains "512 MiB") "size target present"
+let nt2 = (do { ^nu $rp notes --tag v0.6.0 --dir $emptyd } | complete)
+assert (not ($nt2.stdout | str contains "qemu-system-x86_64")) "no boot line without amd64 asset"
+$fx.runs.ok | to json | save ($wd | path join "run.json")
+$fx.compare.ancestor | to json | save ($wd | path join "cmp.json")
+$fx.artifacts.amd64 | to json | save ($wd | path join "art.json")
+$fx.artifacts.expired | to json | save ($wd | path join "exp.json")
+let va = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "art.json") --artifact-name smolfire-amd64 } | complete)
+assert equal $va.exit_code 0 "artifacts present"
+let vb = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "exp.json") --artifact-name smolfire-amd64 } | complete)
+assert equal $vb.exit_code 1 "expired artifact refused via CLI"
+rm -rf $wd $emptyd
+
+print "test: workflow structure (release-flow invariants)"
+let wf_path = ($root | path join ".github/workflows/release-image.yml")
+let wf = (open $wf_path)
+let steps = ($wf.jobs.release.steps)
+let idx = {|needle| $steps | enumerate | where {|r| (($r.item | get -o name | default "") | str contains $needle) } | get -o 0.index }
+assert (($steps | get 0.run) | str contains "refs/heads/main") "first step guards ref == main"
+assert (($steps | get 1.with.ref) == "main") "checkout pins main"
+let i_att = (do $idx "Attest")
+let i_create = (do $idx "Create release")
+let i_repl = (do $idx "Replace assets")
+assert ($i_att < $i_create and $i_att < $i_repl) "attest runs before release is created/modified"
+let raw = (open --raw $wf_path)
+assert (not ($raw | str contains "|| true")) "no || true swallowing in release workflow"
+assert ($raw | str contains 'cp -- "$NOTES_FILE"') "cp uses -- for notes file"
+assert (($steps | where {|s| ($s | get -o uses | default "") | str contains "attest-build-provenance" } | get 0.with.subject-path | str trim) == "assets/*") "attest subject is assets/* (all staged files)"
 
 print "release-plan-test: all passed"

@@ -39,7 +39,13 @@ The workflow refuses, before downloading anything, if any supplied run has
 or a `head_sha` that is not an ancestor of (or equal to) `main`. It then:
 downloads the artifacts, runs `qemu-img check` on each qcow2 (and an ELF magic
 check on the kernel), writes `SHA256SUMS` plus per-file `.sha256`, creates the
-release with `--target <main commit>`, and attests every asset.
+release with `--target <main commit>`. All staged files (`assets/*`) are
+attested **before** the release is created or modified, so an attestation
+failure leaves nothing public and the job can simply be re-run.
+
+The workflow must be dispatched from `main` (it refuses any other ref and
+checks out `main`), so the validator that gates the release is main's copy.
+`notes_file` must be a repo-relative path (no `..`, not absolute, no leading `-`).
 
 ## Replace one asset
 
@@ -48,7 +54,9 @@ release with `--target <main commit>`, and attests every asset.
 The workflow re-uploads that asset with `--clobber`, regenerates `SHA256SUMS`
 over the whole release, and asserts that the asset's GitHub digest (a) changed
 and (b) equals the sha256 of the validated local file. An unchanged digest
-fails the job. Replaced assets are re-attested.
+fails the job. The untouched assets are downloaded by exact name and the job
+fails if any release asset is missing from the regenerated `SHA256SUMS` set
+(no partial checksums). Replaced assets are attested before upload.
 
 ## Verify a release (consumers)
 

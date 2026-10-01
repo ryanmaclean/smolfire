@@ -102,7 +102,17 @@ jobs:
       NOTES_FILE: ${{ inputs.notes_file }}
       PRERELEASE: ${{ inputs.prerelease }}
     steps:
+      # The validator (bin/release-plan.nu) is run from this checkout, so a
+      # dispatch from any other ref could ship a weakened validator.
+      - name: Require dispatch from main
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "ERROR: dispatch this workflow from main (got $GITHUB_REF)."; exit 1
+          fi
+
       - uses: actions/checkout@v4.2.2
+        with:
+          ref: main
 
       - name: Install Nushell
         run: |
@@ -122,6 +132,10 @@ jobs:
           set -euo pipefail
           mkdir -p plan assets
           nu bin/release-plan.nu validate-tag "$TAG"
+          nu bin/release-plan.nu validate-notes-file "$NOTES_FILE"
+          if [ -n "$NOTES_FILE" ] && [ ! -f "$NOTES_FILE" ]; then
+            echo "ERROR: notes_file '$NOTES_FILE' not found in main"; exit 1
+          fi
           if [ -z "$AMD64_RUN$AARCH64_RUN$KERNEL_RUN" ]; then
             echo "ERROR: supply at least one of amd64_run / aarch64_run / kernel_run."
             exit 1
@@ -208,11 +222,21 @@ jobs:
           # untouched assets are pulled down so SHA256SUMS stays complete.
           mkdir -p all
           if [ "$MODE" = replace-asset ]; then
-            gh release download "$TAG" --repo "$REPO" --dir all \
-              --pattern '*.qcow2' --pattern 'smolfire-kernel-*' || true
+            # Fail closed: download each untouched asset by exact name, then
+            # assert nothing on the release is missing from the checksum set.
+            gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name}]' > plan/release-assets.json
+            nu bin/release-plan.nu release-fetch --assets plan/release-assets.json --staged-dir assets > plan/fetch.txt
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              gh release download "$TAG" --repo "$REPO" --dir all --pattern "$name"
+              [ -f "all/$name" ] || { echo "ERROR: failed to download release asset $name"; exit 1; }
+            done < plan/fetch.txt
           fi
           cp -f assets/* all/    # staged (validated) files win over old ones
           rm -f all/*.sha256 all/SHA256SUMS
+          if [ "$MODE" = replace-asset ]; then
+            nu bin/release-plan.nu release-complete --assets plan/release-assets.json --dir all
+          fi
           nu bin/release-plan.nu checksums --dir all | tee plan/SHA256SUMS.txt
           cp -f all/SHA256SUMS assets/SHA256SUMS
           for f in assets/*.qcow2 assets/smolfire-kernel-*; do
@@ -223,13 +247,23 @@ jobs:
           ls -l assets
           if [ "$MODE" = release ]; then
             if [ -n "$NOTES_BODY" ]; then printf '%s\n' "$NOTES_BODY" > plan/body.md
-            elif [ -n "$NOTES_FILE" ]; then cp "$NOTES_FILE" plan/body.md
+            elif [ -n "$NOTES_FILE" ]; then cp -- "$NOTES_FILE" plan/body.md
             else : > plan/body.md; fi
             FLAGS=""; [ "$PRERELEASE" = true ] && FLAGS="--prerelease"
             nu bin/release-plan.nu notes --tag "$TAG" --dir assets --body-file plan/body.md \
               --amd64-run "$AMD64_RUN" --aarch64-run "$AARCH64_RUN" --kernel-run "$KERNEL_RUN" $FLAGS > notes.md
             cat notes.md
           fi
+
+      # Attest BEFORE anything becomes public: a failure here leaves the release
+      # untouched and the job simply re-runnable. Attestations cover digests, so
+      # the order relative to upload does not change what is attested.
+      # SHA pin: actions/attest-build-provenance v4.2.2 (git ls-remote, 2026-10-01).
+      # Re-verify tag -> SHA before merging if the pin is bumped.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: assets/*
 
       - name: Create release
         if: ${{ inputs.mode == 'release' }}
@@ -260,16 +294,6 @@ jobs:
           done
           [ "$fail" = 0 ] || exit 1
           echo "Replaced assets verified: digests changed and match validated local files."
-
-      # SHA pin: actions/attest-build-provenance v4.2.2 (git ls-remote, 2026-10-01).
-      # Re-verify tag -> SHA before merging if the pin is bumped.
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: |
-            assets/*.qcow2
-            assets/smolfire-kernel-*
-            assets/SHA256SUMS
 
       - name: Summary
         run: |

@@ -140,6 +140,123 @@ if not $have {
     }
 }
 
+# ── 2b. awk double-precision + the whole post-makefs aarch64 block ───────────
+# (a) arm_kernel_boothdr.awk does hex math in doubles; at kernbase
+#     0xffff000000000000 doubles are 2 KiB-granular, so an unaligned
+#     _start/_end is rounded. mk-arm64-image.sh feeds the awk rebased
+#     offsets so the header is exact on mawk, gawk and one-true-awk alike.
+# (b) bin/build-smolfire.sh --arch aarch64 is executed end to end (under its
+#     own `set -eu`) with stub make/makefs/sysctl on PATH: the Image is a
+#     flat binary that `size -A` rejects, which used to kill the build after
+#     makefs/buildkernel had succeeded.
+let have2 = (["as" "ld" "objcopy" "nm" "size" "awk" "od" "cmp"] | all {|t| (which $t | is-not-empty) })
+if not $have2 {
+    print "SKIP: post-makefs aarch64 block test needs as/ld/objcopy/nm/size/awk/od/cmp"
+} else {
+    let e2 = $"($tmp)/elf2"
+    mkdir $e2
+    "\t.text\n\t.globl _start\n_start:\n\tnop\n\tnop\n\tret\n\t.data\n\t.ascii \"MFS-PAYLOAD\"\n\t.bss\n\t.space 4096\n" | save --force $"($e2)/k.s"
+    # Unaligned layout: _start = kernbase+0xa34 (not a multiple of 2048), _end
+    # = kernbase+0x4567 (not page aligned). A double-based awk rounds both.
+    "SECTIONS {\n  kernbase = 0xffff000000000000;\n  . = kernbase + 0xa34;\n  .text : { *(.text) }\n  . = ALIGN(0x1000) + 0x7;\n  .data : { *(.data) }\n  .bss : { *(.bss) }\n  _end = kernbase + 0x4567;\n}\nENTRY(_start)\n" | save --force $"($e2)/k.ld"
+    let b2 = (do { cd $e2; ^as -o k.o k.s; ^ld -T k.ld -o kernel.full k.o } | complete)
+    if $b2.exit_code != 0 {
+        print $"SKIP: host as/ld cannot build the unaligned synthetic ELF: ($b2.stderr | str trim)"
+    } else {
+        let hdrawk = $"($env.PWD)/tests/fixtures/freebsd-releng-15.0/sys/tools/arm_kernel_boothdr.awk"
+        # Direct evidence the premise is real: the raw upstream awk (no
+        # rebasing) mis-rounds this layout (so the guard is not vacuous).
+        let raw = (^sh -c $"nm '($e2)/kernel.full' | LC_ALL=C awk -f '($hdrawk)' -v hdrtype=v8booti | od -An -tx1 -N4" | complete)
+        let want_first = "8d 02 00 14"
+        let raw_first = ($raw.stdout | str trim)
+        print $"note: raw upstream awk first word: ($raw_first) [exact: ($want_first)]"
+        if $raw_first == $want_first {
+            print "note: this awk computes the unrebased header exactly (still checking the wrapper)"
+        }
+        let awks = (["mawk" "gawk" "original-awk" "awk" "bwk"] | where {|a| (which $a | is-not-empty) })
+        mut images = []
+        for a in $awks {
+            let img = $"($e2)/Image-($a)"
+            let m = (with-env {ARM_BOOTHDR_AWK: $hdrawk, AWK: $a} {
+                ^sh bin/mk-arm64-image.sh $"($e2)/kernel.full" $img | complete
+            })
+            if $m.exit_code != 0 { fail $"mk-arm64-image.sh with AWK=($a) failed: ($m.stderr)" }
+            let d = (open --raw $img | into binary)
+            let le = {|from: int, n: int| $d | bytes at $from..<($from + $n) | into int --endian little }
+            if (do $le 0 4) != (0x14000000 + (0xa34 / 4 | into int)) { fail $"AWK=($a): 'b _start' word wrong: (do $le 0 4)" }
+            if (do $le 16 8) != 0x4567 { fail $"AWK=($a): image_size must be exactly _end-kernbase=0x4567, got (do $le 16 8)" }
+            if (do $le 56 4) != 0x644d5241 { fail $"AWK=($a): bad magic" }
+            $images = ($images | append $img)
+        }
+        # every awk implementation yields byte-identical Images
+        for i in ($images | skip 1) {
+            let c = (^cmp ($images | first) $i | complete)
+            if $c.exit_code != 0 { fail $"Images differ between awk implementations: ($images | first) vs ($i)" }
+        }
+        print $"smolfire-a64-test: boothdr header exact on awks: ($awks | str join ',')"
+
+        # ── (b) end-to-end post-makefs aarch64 block, stubbed toolchain ──
+        let w = $"($tmp)/e2e"
+        let bin = $"($w)/bin"
+        let src = $"($w)/src"
+        let obj = $"($w)/obj"
+        let kdir = $"($obj)($src)/arm64.aarch64/sys/SMOLFIRE"
+        mkdir $bin $"($src)/sys/arm64/conf" $"($src)/sys/tools" $"($w)/rescue"
+        ^cp $hdrawk $"($src)/sys/tools/arm_kernel_boothdr.awk"
+        "include SMOLFIRE-VM\n" | save --force $"($src)/sys/arm64/conf/SMOLFIRE"
+        fake-elf $"($w)/rescue/rescue" 0x[b7 00]
+        for n in [route ping fetch nc] { "x" | save --force $"($w)/rescue/($n)" }
+        ^cp $"($e2)/kernel.full" $"($w)/prebuilt-kernel"
+        let real_size = (which size | first | get path)
+        # make: log the cross-build env; buildkernel materialises the objdir
+        r##'#!/bin/sh
+echo "make $* TARGET=${TARGET:-unset} TARGET_ARCH=${TARGET_ARCH:-unset}" >> "$STUB_LOG"
+case "$*" in
+  *buildkernel*) mkdir -p "$STUB_KDIR"
+                 cp "$STUB_ELF" "$STUB_KDIR/kernel"
+                 cp "$STUB_ELF" "$STUB_KDIR/kernel.full" ;;
+esac
+'## | save --force $"($bin)/make"
+        r##'#!/bin/sh
+echo "makefs $*" >> "$STUB_LOG"
+for last; do :; done; shift $(($# - 2)); dd if=/dev/zero of="$1" bs=4096 count=8 2>/dev/null
+'## | save --force $"($bin)/makefs"
+        "#!/bin/sh\necho 2\n" | save --force $"($bin)/sysctl"
+        ^chmod +x $"($bin)/make" $"($bin)/makefs" $"($bin)/sysctl"
+        let run_env = {
+            PATH: ([$bin ($env.PATH | str join (char esep))] | str join (char esep)),
+            SRC: $src, OBJ: $obj, ROOT: $"($w)/root", IMG: $"($w)/mfs.img",
+            OUT: $"($w)/kernel", OUT_A64: $"($w)/kernel-a64", LOG: $"($w)/build.log",
+            RESCUE_SRC: $"($w)/rescue/rescue",
+            STUB_LOG: $"($w)/stub.log", STUB_KDIR: $kdir, STUB_ELF: $"($w)/prebuilt-kernel"
+        }
+        let r = (with-env $run_env { ^sh bin/build-smolfire.sh --arch aarch64 | complete })
+        if $r.exit_code != 0 {
+            fail $"aarch64 post-makefs block exited ($r.exit_code) - Image metrics must not kill set -e:\n($r.stdout)\n($r.stderr)"
+        }
+        let img = $"($w)/kernel-a64"
+        for p in [$img $"($img).elf" $"($w)/mfs.img"] {
+            if not ($p | path exists) { fail $"aarch64 block did not produce ($p)" }
+        }
+        let magic = (open --raw $img | into binary | bytes at 56..<60)
+        if $magic != 0x[41 52 4d 64] { fail "aarch64 output is not an arm64 Image" }
+        let stublog = (open --raw $"($w)/stub.log")
+        assert-contains $stublog "TARGET=arm64 TARGET_ARCH=aarch64" "cross-build env reached make"
+        assert-contains $stublog "buildkernel KERNCONF=SMOLFIRE" "buildkernel invoked"
+        assert-contains $stublog "makefs -t ffs" "makefs invoked"
+        for needle in ["SMOLFIRE_METRIC mfs.bytes=" "SMOLFIRE_METRIC elf.bytes=" "SMOLFIRE_METRIC kernel.bytes=" "SMOLFIRE_SECTION .text=" "SMOLFIRE_METRIC kernel.text.bytes="] {
+            assert-contains $r.stdout $needle "aarch64 metrics output"
+        }
+        # sections are reported once (from the ELF), never from the flat Image
+        let nsec = ($r.stdout | lines | where {|l| $l | str starts-with "SMOLFIRE_SECTION .text=" } | length)
+        if $nsec != 1 { fail $"expected exactly one .text section line, got ($nsec)" }
+        # a missing SMOLFIRE kernconf in the tree still fails loud (not silently)
+        ^rm $"($src)/sys/arm64/conf/SMOLFIRE"
+        let nk = (with-env $run_env { ^sh bin/build-smolfire.sh --arch aarch64 | complete })
+        if $nk.exit_code == 0 { fail "aarch64 build accepted a tree without sys/arm64/conf/SMOLFIRE" }
+    }
+}
+
 # ── 3. Probe classifier in PROBE_KERNEL mode (fake qemu seam) ────────────────
 if (which expect | is-empty) {
     print "SKIP: expect(1) not installed — probe kernel-mode test not run"

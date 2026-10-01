@@ -32,7 +32,38 @@ HDR_AWK=${ARM_BOOTHDR_AWK:-/usr/src/sys/tools/arm_kernel_boothdr.awk}
 rm -f "$OUT.temp" "$OUT.hdr"
 # Strip ARM mapping symbols ($a/$d/$t/$x) like the upstream rule does.
 "$OBJCOPY" --wildcard --strip-symbol='$[adtx]*' --output-target=binary "$K" "$OUT.temp"
-"$NM" "$K" | LC_ALL=C "$AWK" -f "$HDR_AWK" -v hdrtype=v8booti > "$OUT.hdr"
+# arm_kernel_boothdr.awk does its hex->number math in awk doubles (53-bit
+# mantissa). FreeBSD arm64 kernbase is 0xffff000000000000 (~2^64), where the
+# double spacing is 2048 bytes: an _end/_start that is not 2 KiB-aligned is
+# silently rounded (verified identical on mawk, gawk and one-true-awk, see
+# docs/SMOLFIRE-A64-FEASIBILITY.md). A rounded _start would corrupt the
+# header's `b _start`. So hand the awk script offsets relative to a small
+# synthetic kernbase (RB): every value is < 2^53 and therefore exact, and
+# the header is identical to what an exact-arithmetic awk would produce.
+# 64-bit hex is split as <top 4 digits><low 12 digits> because sh's $((0x..))
+# saturates above INT64_MAX.
+RB=0000010000000000
+syms=$("$NM" "$K" | while read -r a _t n; do
+    case "$n" in kernbase|_start|_end) printf '%s %s\n' "$a" "$n" ;; esac
+done)
+kb=$(printf '%s\n' "$syms" | while read -r a n; do [ "$n" = kernbase ] && echo "$a"; done)
+if [ -n "$kb" ]; then
+    khi=${kb%????????????}
+    klo=${kb#????}
+    synth=$(printf '%s\n' "$syms" | while read -r a n; do
+        [ "$n" = kernbase ] && continue
+        [ "${a%????????????}" = "$khi" ] \
+            || { echo "mk-arm64-image: $n ($a) is outside kernbase ($kb) 48-bit window" >&2; exit 1; }
+        off=$(( 0x${a#????} - 0x$klo ))
+        [ "$off" -ge 0 ] || { echo "mk-arm64-image: $n below kernbase" >&2; exit 1; }
+        printf '%016x T %s\n' $(( 0x$RB + off )) "$n"
+    done) || exit 1
+    synth="$RB A kernbase
+$synth"
+else
+    synth=""    # no kernbase: let the awk script report the missing symbol
+fi
+printf '%s\n' "$synth" | LC_ALL=C "$AWK" -f "$HDR_AWK" -v hdrtype=v8booti > "$OUT.hdr"
 cat "$OUT.hdr" "$OUT.temp" > "$OUT"
 rm -f "$OUT.temp" "$OUT.hdr"
 

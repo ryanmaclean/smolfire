@@ -203,11 +203,15 @@ or any push/PR trigger.
    either way. If a future SMOLFIRE-VM kernel build fails to link, this is
    the first place to look.
 3. **`arm_kernel_boothdr.awk` uses awk doubles** on 64-bit kernel addresses
-   (`addr % kernbase`), so `_start`/`_end` offsets keep full precision only
-   when they are multiples of 2 KiB. A real kernel's `_start`
-   (`kernbase+0x800`) and `_end` (page aligned) are; the unit test's
-   synthetic ELF aligns `_end` for this reason. Header fields were inspected on the
-   real 15.0 kernel and that Image booted.
+   (`addr % kernbase`). At `0xffff000000000000` doubles are 2 KiB-granular,
+   so a `_start`/`_end` that is not 2 KiB-aligned is silently rounded (an
+   unaligned `_start` yields a wrong `b _start`). Checked identical on
+   mawk, gawk and one-true-awk 20231127 (the awk FreeBSD ships; all are
+   IEEE doubles). `bin/mk-arm64-image.sh` therefore feeds the awk rebased
+   offsets (synthetic small kernbase, offsets computed in sh), exact on
+   every awk; `tests/smolfire-a64-test.nu` section 2b asserts byte-identical
+   Images across awks for an unaligned layout. Header fields were also
+   inspected on the real 15.0 kernel and that Image booted.
 4. QEMU `virt` with an ELF `-kernel` leaves `x0 = 0` (bare-metal protocol),
    so even a phys-linked FreeBSD ELF would lack the FDT pointer.
 

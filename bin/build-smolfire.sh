@@ -11,14 +11,15 @@
 # SPDX-License-Identifier: Apache-2.0
 set -eu
 
-SRC=/usr/src
+SRC=${SRC:-/usr/src}
+OBJ=${OBJ:-/usr/obj}
 # RESCUE_SRC and ROOT are env-overridable so the rootfs-assembly section
 # (pure POSIX sh) can run — and be tested — outside the FreeBSD build VM.
 RESCUE_SRC=${RESCUE_SRC:-/rescue/rescue}
 ROOT=${ROOT:-/root/smolfire-root}
-IMG=/root/smolfire-mfs.img
-OUT=/root/smolfire-kernel
-LOG=/var/tmp/smolfire-build.log
+IMG=${IMG:-/root/smolfire-mfs.img}
+OUT=${OUT:-/root/smolfire-kernel}
+LOG=${LOG:-/var/tmp/smolfire-build.log}
 # SMOLFIRE_TSLOG=1: additionally build SMOLFIRE-TSLOG with the TSLOG rc.
 # With --rootfs-only it selects which rc variant is assembled (tests).
 TSLOG=no
@@ -330,7 +331,7 @@ if [ "$ARCH" = aarch64 ]; then
     # Cross-build the arm64 kernel (also native on an aarch64 host).
     TARGET=arm64 TARGET_ARCH=aarch64
     export TARGET TARGET_ARCH
-    OUT=/root/smolfire-kernel-aarch64
+    OUT=${OUT_A64:-/root/smolfire-kernel-aarch64}
     test -f "$SRC/sys/arm64/conf/SMOLFIRE" \
         || { echo "ERROR: $SRC/sys/arm64/conf/SMOLFIRE missing — copy sys/arm64/conf/SMOLFIRE* into the tree"; exit 1; }
 fi
@@ -341,7 +342,7 @@ make -C "$SRC" -j "$NCPU" buildkernel \
     KERNCONF=SMOLFIRE MFS_IMAGE="$IMG" >> "$LOG" 2>&1
 
 if [ "$ARCH" = aarch64 ]; then
-    KDIR="/usr/obj${SRC}/arm64.aarch64/sys/SMOLFIRE"
+    KDIR="${OBJ}${SRC}/arm64.aarch64/sys/SMOLFIRE"
     KERNEL="$KDIR/kernel"
 else
     KERNEL="/usr/obj${SRC}/amd64.amd64/sys/SMOLFIRE/kernel"
@@ -351,16 +352,26 @@ if [ "$ARCH" = aarch64 ]; then
     # QEMU/Firecracker cannot load the arm64 ELF (p_paddr == KERNBASE VA);
     # wrap it exactly like sys/conf/Makefile.arm64's kernel.bin rule.
     cp "$KERNEL" "$OUT.elf"
+    ARM_BOOTHDR_AWK=${ARM_BOOTHDR_AWK:-$SRC/sys/tools/arm_kernel_boothdr.awk}
+    export ARM_BOOTHDR_AWK
     sh "$REPO_DIR/bin/mk-arm64-image.sh" "$KDIR/kernel.full" "$OUT" \
         || { echo "ERROR: arm64 Image wrap failed"; exit 1; }
     emit_metric elf.bytes "$(wc -c < "$OUT.elf")"
-    emit_section_metrics "$OUT.elf"
+    # The Image is a flat binary (booti header + objcopy -O binary): size(1)
+    # rejects it and emit_section_metrics would kill this set -e script
+    # AFTER makefs/buildkernel succeeded. Section sizes come from the ELF
+    # instead (the stripped `kernel`; kernel.full only as a fallback).
+    emit_section_metrics "$OUT.elf" || emit_section_metrics "$KDIR/kernel.full" \
+        || echo "WARN: no section metrics available for the arm64 kernel" >&2
 else
     cp "$KERNEL" "$OUT"
 fi
 echo "==> smolfire kernel: $(du -h "$OUT" | cut -f1) (rootfs embedded)"
 emit_metric kernel.bytes "$(wc -c < "$OUT")"
-emit_section_metrics "$OUT"
+# amd64 kernel is an ELF; the aarch64 Image is not (handled above).
+if [ "$ARCH" = amd64 ]; then
+    emit_section_metrics "$OUT"
+fi
 
 if [ "$TSLOG" = yes ]; then
     # Measurement-only second kernel: same tree, same objdir toolchain

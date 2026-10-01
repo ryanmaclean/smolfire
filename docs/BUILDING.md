@@ -179,6 +179,63 @@ If you only want buildworld + buildkernel and not the image yet:
 sudo nu bin/build-smolfire-vm.nu --skip-release
 ```
 
+## Reassemble mode (hosted workflow; config-only image changes)
+
+A change that only touches `release/tools/smolfire-qemu*.conf` (trim lists,
+package list, sshd, ...) affects nothing but the last stage, yet the hosted
+pipeline rebuilds world+kernel (~30 of ~35 min). Reassemble mode reuses the
+previous run's package repository instead. Opt-in; with both inputs unset the
+workflow is the unchanged full pipeline.
+
+1. Run `build-image-hosted.yml` once with `emit_reassemble=true`. After a green
+   build it uploads `smolfire-reassemble-<arch>-<kernconf>` (7-day retention):
+   `reassemble-products.tar` + `manifest.json`.
+2. After editing only the release conf, dispatch with
+   `reassemble_from_run=<that run id>` (same `arch` and `kernconf`). The job
+   boots the build VM as usual, restores the products into `/usr/obj`, runs only
+   `cloudware-release` and then the same compress/size/boot gates.
+
+What is reused (verified against releng/15.0 `release/Makefile`, `Makefile.vm`,
+`Makefile.inc1`): `cw-smolfire-ufs-qcow2` depends on `pkgbase-repo-dir`, which
+depends on `pkgbase-repo` — a target with no prerequisites, so an existing
+directory is "up to date" and `make packages` is not re-run; the image is built
+by `pkg install` from that repo (kernel included as a `FreeBSD-kernel-*`
+package), not from the obj tree. Relative to `/usr/obj/usr/src/<arch>.<march>/`
+the tar holds only `release/pkgbase-repo`, `release/pkgbase-repo-dir` (its conf
+has an absolute `file://` path, hence the same `/usr/obj` layout) and
+`worldstage/usr/bin/uname` (`PKG_ABI_FILE`). The 15-40 GiB of objects are not
+needed. Size: the upstream `FreeBSD:15:amd64` base repo is 1.2 GiB with
+`-dbg`/`-tests`/lib32 and ~450 MiB without (summed from pkg.freebsd.org
+`packagesite`); our `WITHOUT_*` set should be at or below that. The real number
+is printed in the "reassemble products (measured)" step summary of the first
+emitting run. `pack` refuses above 2 GiB (storage-quota alarm, not a GitHub
+hard limit) and the pack step is `continue-on-error`.
+
+Safety (all in `bin/reassemble-plan.nu`, tested by
+`tests/reassemble-plan-test.nu`):
+
+- the workflow validates the source run is completed, `success`, of this
+  workflow, still has an unexpired artifact for the same arch+kernconf, and is
+  not the current run;
+- `unpack` refuses (=> run a full build) if the manifest's arch/kernconf differ,
+  if `/etc/src.conf` (world knobs) or the kernconf (+ same-dir `include`s)
+  hash differently, if the tar is truncated/corrupt, or `/usr/obj` is not fresh;
+- before the real run, `build-smolfire-vm.nu --reassemble-from` does
+  `make -n cloudware-release` and aborts if the dry run contains a
+  `packages`/`buildworld`/`installworld` step, so a make up-to-date surprise
+  fails in seconds instead of silently rebuilding.
+
+Not for: kernel/src.conf/world changes, or a new releng/15.0 tip you want in the
+image (the run pins `/usr/src` to the source commit when the server allows a
+shallow fetch of that sha, else warns and uses the branch tip).
+
+Manual equivalent inside a VM that already holds `manifest.json` and
+`reassemble-products.tar` in `DIR`:
+
+```sh
+sudo nu bin/build-smolfire-vm.nu --reassemble-from DIR
+```
+
 ## amd64 cross-compile (qcow2 compatibility path)
 
 On an aarch64 host, build the amd64 image with:

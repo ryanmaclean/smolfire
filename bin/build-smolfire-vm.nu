@@ -28,6 +28,9 @@
 #   sudo nu bin/build-smolfire-vm.nu --skip-buildworld  # release only (obj already built)
 #   sudo nu bin/build-smolfire-vm.nu --arch aarch64     # explicit arch
 #   sudo nu bin/build-smolfire-vm.nu --check            # preflight checks only
+#   sudo nu bin/build-smolfire-vm.nu --reassemble-from DIR  # image step only, reusing a
+#                                                       # prior run's pkgbase repo (see
+#                                                       # bin/reassemble-plan.nu, docs/BUILDING.md)
 
 export def main [
     --arch: string = ""              # aarch64 | amd64 | riscv64-experimental (auto-detect if empty)
@@ -39,9 +42,21 @@ export def main [
     --skip-buildworld                # skip to release (obj already populated)
     --skip-release                   # buildworld+kernel only, no release image
     --check                          # preflight only, no build
+    --reassemble-from: string = ""   # dir with manifest.json + reassemble-products.tar from a prior green run; skips world+kernel
     --log: string = "/var/tmp/smolfire-build.log"
 ] {
     let t_start = (date now)
+
+    # Reassemble mode (opt-in; default "" leaves every code path below unchanged).
+    let reassemble = ($reassemble_from != "")
+    if $reassemble and $skip_release {
+        error make {msg: "--reassemble-from and --skip-release are mutually exclusive (reassemble exists to build the image)"}
+    }
+    if $reassemble and $skip_buildworld {
+        error make {msg: "--reassemble-from already implies --skip-buildworld; pass only one"}
+    }
+    # world+kernel are not rebuilt in reassemble mode
+    let skip_buildworld = ($skip_buildworld or $reassemble)
 
     # --- Resolve arch ---
     let resolved_arch = if $arch == "" {
@@ -106,6 +121,15 @@ export def main [
     # =========================================================================
     setup $src
 
+    # REASSEMBLE: restore the prior run's pkgbase repo into the obj layout.
+    # unpack validates arch/kernconf/src.conf/kernconf hashes + tar integrity
+    # and refuses (=> do a full build) on any mismatch.
+    if $reassemble {
+        print "==> Reassemble: restoring pkgbase products from a prior run"
+        let rp = ($env.FILE_PWD | path join "reassemble-plan.nu")
+        ^nu $rp unpack --obj $obj --src $src --arch $arch_target --kernconf $kernconf --from-dir $reassemble_from
+    }
+
     # =========================================================================
     # STAGE 1: buildworld
     # =========================================================================
@@ -141,7 +165,7 @@ export def main [
     # STAGE 4: make cloudware-release
     # =========================================================================
     if not $skip_release {
-        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target
+        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target $reassemble
     } else {
         print "[skip] cloudware-release (--skip-release)"
     }
@@ -488,6 +512,7 @@ def build_vm_image [
     release_conf: string
     arch_freebsd: string
     arch_target: string
+    reassemble: bool = false
 ] {
     print "==> Stage 4: make cloudware-release"
 
@@ -535,6 +560,17 @@ def build_vm_image [
 
     print $"  Command: ($cmd_args | str join ' ')"
     print $"  Release conf: ($release_conf)"
+
+    # REASSEMBLE guard: a dry run must show pure image assembly. If make would
+    # re-run `make packages` (pkgbase-repo not seen as up to date), abort now
+    # instead of silently rebuilding world inside a "5 minute" job.
+    if $reassemble {
+        let dry_out = $"($log).dryrun"
+        let dry = (do { ^make "-n" ...($cmd_args | skip 1) } | complete)
+        $dry.stdout | save -f $dry_out
+        let rp = ($env.FILE_PWD | path join "reassemble-plan.nu")
+        ^nu $rp check-dryrun $dry_out
+    }
 
     run_logged $cmd_args $log "cloudware-release"
     print "  cloudware-release complete."

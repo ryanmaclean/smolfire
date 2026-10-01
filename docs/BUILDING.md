@@ -114,6 +114,47 @@ tail -f /var/tmp/smolfire-build.log
 
 The script prints the exact path, size, sha256, and elapsed time on completion.
 
+### Image profile: `dev` (default) vs `prod`
+
+The qcow2 conf (`release/tools/smolfire-qemu*.conf`) reads `SMOLFIRE_PROFILE`:
+
+| Profile | sshd | root credential |
+|---|---|---|
+| `dev` (default) | `PermitRootLogin yes`, `PasswordAuthentication yes` | password `smolfire` (publicly known; for CI gates and local experiments only) |
+| `prod` | `PermitRootLogin prohibit-password`, `PasswordAuthentication no`, `KbdInteractiveAuthentication no` | password locked (`pw usermod root -h -`); key-only |
+
+`prod` installs the public keys from `SMOLFIRE_AUTHORIZED_KEYS` (a file, one
+or more `ssh-*`/`ecdsa-*`/`sk-*` lines) as `/root/.ssh/authorized_keys`
+(0700/0600, root:wheel) at build time. The build fails closed — before
+buildworld when using the script — if `prod` is requested without a readable
+key file, or with an unknown profile name.
+
+```sh
+sudo nu bin/build-smolfire-vm.nu --profile prod --authorized-keys ~/.ssh/id_ed25519.pub
+# direct make: add  SMOLFIRE_PROFILE=prod SMOLFIRE_AUTHORIZED_KEYS=/abs/path/keys.pub
+# to the cloudware-release invocation (absolute path). Whether make hands
+# command-line variables to the conf hook is only proven by the first CI prod
+# build; the script also exports them in the environment.
+```
+
+**Fail-closed does not depend on the hook's return code.** The conf hook writes
+`/etc/smolfire-profile` (`dev`/`prod`) only after every profile step succeeded,
+and prepends the prod sshd directives (sshd is first-value-wins). The script
+(a) deletes every stale `*.qcow2` in the objdir before stage 4, so a failed
+build can never deliver an older image, and (b) after the build mounts the
+produced image read-only and runs `check_prod_rootfs` (marker == `prod`,
+effective sshd values, root hash locked, `authorized_keys` present); any
+failure aborts the build. A direct `make SMOLFIRE_PROFILE=prod ...` bypasses
+(a)/(b), so check such an image with
+`sudo nu bin/build-smolfire-vm.nu verify-image <image.qcow2>`.
+
+The profile is baked into the image: there is no run-time switch. Images built
+without the flag are `dev`, so the CI gates that log in with the password keep
+working. `tests/prod-profile-test.nu` proves both outputs with a fake DESTDIR.
+The pi5/rk3588 confs and the non-qcow2 microVM path are unchanged (still
+`dev`-style). Run-time key injection via nuageinit/cloud-init (used by the
+build-VM workflows) is a separate mechanism and is not needed for `prod`.
+
 ## Building in CI / pipelines
 
 The microVM and qcow2 paths are intentionally separate so microVM regressions do

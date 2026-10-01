@@ -368,3 +368,18 @@ jobs:
             echo "PASS: empty DESTDIR guard fired correctly"
           fi
           exit "$fail"
+
+      - name: Install Nushell
+        run: |
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          TRIPLE="$(uname -m)-unknown-linux-musl"
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # dev/prod image profile: sshd effective values, root lock call, marker,
+      # fail-closed, stale-image purge, prod rootfs verifier (fake DESTDIR).
+      - name: SMOLFIRE_PROFILE dev/prod conf test
+        run: nu tests/prod-profile-test.nu

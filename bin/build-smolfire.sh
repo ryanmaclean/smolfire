@@ -11,14 +11,15 @@
 # SPDX-License-Identifier: Apache-2.0
 set -eu
 
-SRC=/usr/src
+SRC=${SRC:-/usr/src}
+OBJ=${OBJ:-/usr/obj}
 # RESCUE_SRC and ROOT are env-overridable so the rootfs-assembly section
 # (pure POSIX sh) can run — and be tested — outside the FreeBSD build VM.
 RESCUE_SRC=${RESCUE_SRC:-/rescue/rescue}
 ROOT=${ROOT:-/root/smolfire-root}
-IMG=/root/smolfire-mfs.img
-OUT=/root/smolfire-kernel
-LOG=/var/tmp/smolfire-build.log
+IMG=${IMG:-/root/smolfire-mfs.img}
+OUT=${OUT:-/root/smolfire-kernel}
+LOG=${LOG:-/var/tmp/smolfire-build.log}
 # SMOLFIRE_TSLOG=1: additionally build SMOLFIRE-TSLOG with the TSLOG rc.
 # With --rootfs-only it selects which rc variant is assembled (tests).
 TSLOG=no
@@ -31,9 +32,29 @@ OUT_TSLOG=/root/smolfire-kernel-tslog
 # --rootfs-only: stop after the rootfs is assembled, before the
 # FreeBSD-only makefs/buildkernel steps (lets CI test assembly on Linux).
 ROOTFS_ONLY=no
-if [ "${1:-}" = "--rootfs-only" ]; then
-    ROOTFS_ONLY=yes
+# --arch aarch64: the aarch64 one-file microVM (arm64 Image, QEMU virt
+# `-kernel` path) — docs/SMOLFIRE-A64-FEASIBILITY.md. EXPERIMENTAL: needs an
+# aarch64 /rescue/rescue via RESCUE_SRC; amd64 (default) is unchanged.
+ARCH=amd64
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rootfs-only) ROOTFS_ONLY=yes ;;
+        --arch) shift; ARCH=${1:-} ;;
+        --arch=*) ARCH=${1#--arch=} ;;
+        *) ;;   # historic behaviour: unknown arguments were ignored
+    esac
+    [ $# -gt 0 ] && shift
+done
+case "$ARCH" in
+    amd64) ;;
+    aarch64|arm64) ARCH=aarch64 ;;
+    *) echo "ERROR: --arch must be amd64 or aarch64 (got '$ARCH')" >&2; exit 64 ;;
+esac
+if [ "$ARCH" = aarch64 ] && [ "$TSLOG" = yes ]; then
+    echo "ERROR: SMOLFIRE_TSLOG=1 is amd64-only (TSC/tslog rc variant)" >&2
+    exit 64
 fi
+REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
 emit_metric() {
     printf 'SMOLFIRE_METRIC %s=%s\n' "$1" "$2"
@@ -52,6 +73,17 @@ emit_section_metrics() {
 }
 
 RESCUE_DIR=$(dirname "$RESCUE_SRC")
+if [ "$ARCH" = aarch64 ]; then
+    # Never embed a foreign-ISA userland: ELF e_machine (offset 18, LE) must
+    # be EM_AARCH64 = 0xb7. The build VM's own /rescue is amd64 when
+    # cross-building, so RESCUE_SRC must point at an arm64 rescue (e.g. the
+    # ./rescue/rescue member of the 15.0-RELEASE arm64 base.txz).
+    emach=$(od -An -tx1 -j18 -N2 "$RESCUE_SRC" 2>/dev/null | tr -d ' \n')
+    [ "$emach" = b700 ] || {
+        echo "ERROR: $RESCUE_SRC is not an aarch64 ELF (e_machine='$emach', want b700) — set RESCUE_SRC to an arm64 rescue/rescue" >&2
+        exit 1
+    }
+fi
 echo "==> rootfs: static /rescue crunchgen userland ($(du -sh "$RESCUE_DIR" | cut -f1))"
 rm -rf "$ROOT"
 mkdir -p "$ROOT/dev" "$ROOT/etc" "$ROOT/rescue" "$ROOT/sbin" "$ROOT/bin" \
@@ -159,6 +191,10 @@ done
 
 # Below this point is FreeBSD-only (sysctl hw.ncpu, makefs, buildkernel).
 NCPU=$(sysctl -n hw.ncpu)
+
+# The pv.c (Xen PVH) and tsc.c (x86 TSC) patches below are amd64-only: the
+# aarch64 kernel boots via the arm64 Image protocol and uses the generic timer.
+if [ "$ARCH" = amd64 ]; then
 
 # PVH early-delay patch (upstream-shaped): dispatch early_delay /
 # early_clock_source_init on isxen() at runtime instead of using
@@ -282,6 +318,8 @@ else
     exit 1
 fi
 
+fi # ARCH = amd64
+
 echo "==> makefs (UFS image with free-space headroom)"
 # -b 10%: without it makefs sizes the image to its contents and the
 # root filesystem boots ~100% full — any runtime write would fail.
@@ -289,18 +327,51 @@ makefs -t ffs -o version=2 -o label=smolfire -b 10% "$IMG" "$ROOT"
 ls -lh "$IMG"
 emit_metric mfs.bytes "$(wc -c < "$IMG")"
 
+if [ "$ARCH" = aarch64 ]; then
+    # Cross-build the arm64 kernel (also native on an aarch64 host).
+    TARGET=arm64 TARGET_ARCH=aarch64
+    export TARGET TARGET_ARCH
+    OUT=${OUT_A64:-/root/smolfire-kernel-aarch64}
+    test -f "$SRC/sys/arm64/conf/SMOLFIRE" \
+        || { echo "ERROR: $SRC/sys/arm64/conf/SMOLFIRE missing — copy sys/arm64/conf/SMOLFIRE* into the tree"; exit 1; }
+fi
 echo "==> kernel-toolchain + buildkernel SMOLFIRE (log: $LOG)"
 # kernel-toolchain is the small buildworld subset buildkernel needs.
 make -C "$SRC" -j "$NCPU" kernel-toolchain >> "$LOG" 2>&1
 make -C "$SRC" -j "$NCPU" buildkernel \
     KERNCONF=SMOLFIRE MFS_IMAGE="$IMG" >> "$LOG" 2>&1
 
-KERNEL="/usr/obj${SRC}/amd64.amd64/sys/SMOLFIRE/kernel"
+if [ "$ARCH" = aarch64 ]; then
+    KDIR="${OBJ}${SRC}/arm64.aarch64/sys/SMOLFIRE"
+    KERNEL="$KDIR/kernel"
+else
+    KERNEL="/usr/obj${SRC}/amd64.amd64/sys/SMOLFIRE/kernel"
+fi
 test -f "$KERNEL" || { echo "ERROR: no kernel at $KERNEL"; tail -50 "$LOG"; exit 1; }
-cp "$KERNEL" "$OUT"
+if [ "$ARCH" = aarch64 ]; then
+    # QEMU/Firecracker cannot load the arm64 ELF (p_paddr == KERNBASE VA);
+    # wrap it exactly like sys/conf/Makefile.arm64's kernel.bin rule.
+    cp "$KERNEL" "$OUT.elf"
+    ARM_BOOTHDR_AWK=${ARM_BOOTHDR_AWK:-$SRC/sys/tools/arm_kernel_boothdr.awk}
+    export ARM_BOOTHDR_AWK
+    sh "$REPO_DIR/bin/mk-arm64-image.sh" "$KDIR/kernel.full" "$OUT" \
+        || { echo "ERROR: arm64 Image wrap failed"; exit 1; }
+    emit_metric elf.bytes "$(wc -c < "$OUT.elf")"
+    # The Image is a flat binary (booti header + objcopy -O binary): size(1)
+    # rejects it and emit_section_metrics would kill this set -e script
+    # AFTER makefs/buildkernel succeeded. Section sizes come from the ELF
+    # instead (the stripped `kernel`; kernel.full only as a fallback).
+    emit_section_metrics "$OUT.elf" || emit_section_metrics "$KDIR/kernel.full" \
+        || echo "WARN: no section metrics available for the arm64 kernel" >&2
+else
+    cp "$KERNEL" "$OUT"
+fi
 echo "==> smolfire kernel: $(du -h "$OUT" | cut -f1) (rootfs embedded)"
 emit_metric kernel.bytes "$(wc -c < "$OUT")"
-emit_section_metrics "$OUT"
+# amd64 kernel is an ELF; the aarch64 Image is not (handled above).
+if [ "$ARCH" = amd64 ]; then
+    emit_section_metrics "$OUT"
+fi
 
 if [ "$TSLOG" = yes ]; then
     # Measurement-only second kernel: same tree, same objdir toolchain

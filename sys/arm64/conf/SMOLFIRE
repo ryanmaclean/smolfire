@@ -1,0 +1,40 @@
+# SMOLFIRE (arm64) — one-file aarch64 microVM kernel: direct `-kernel` boot
+# (QEMU virt; Firecracker aarch64 unproven) of a Linux-style arm64 Image with
+# the static /rescue userland embedded as the MD_ROOT MFS. No loader, no EFI,
+# no disk. EXPERIMENTAL — docs/SMOLFIRE-A64-FEASIBILITY.md has the evidence
+# and the open risks. aarch64 twin of sys/amd64/conf/SMOLFIRE.
+#
+# Why this works with stock releng/15.0 support (nothing to patch):
+#   * std.arm64 already has `options LINUX_BOOT_ABI` — locore.S/machdep_boot.c
+#     take the DTB physical address from x0 (the arm64 Image protocol) and
+#     memory/CPUs/console come from the FDT (no EFI map needed).
+#   * std.arm64 already has `options MD_ROOT` and std.dev `device md`; the
+#     MFS is linked in by `make buildkernel MFS_IMAGE=...` (kern.post.mk +
+#     dev/md/embedfs.S, MI) and md(4) mounts it as ufs:/dev/md0.
+#   * `make kernel.bin`-style wrapping (sys/conf/Makefile.arm64) turns the
+#     ELF into the Image: bin/mk-arm64-image.sh.
+#
+# Base: SMOLFIRE-VM (CI-proven arm64 build: std.arm64 + std.dev + std.virt,
+# physical-hardware drivers stripped, de-debugged, MODULES_OVERRIDE trimmed).
+#
+# The cmdline (QEMU -append / Firecracker boot_args) is only parsed when it
+# starts with "FreeBSD:" (machdep_boot.c CMDLINE_GUARD), e.g.
+#   -append "FreeBSD: smolfire.ip=10.0.2.15/24 smolfire.gw=10.0.2.2"
+#
+# SPDX-License-Identifier: Apache-2.0
+
+include SMOLFIRE-VM
+ident SMOLFIRE
+
+# Firecracker's aarch64 serial is an MMIO ns16550a (std.virt only carries
+# pl011, which is what QEMU virt uses). No effect on the QEMU path.
+device		uart_ns8250
+
+# --- Production de-debug (mirrors the amd64 SMOLFIRE block) -------------
+# SMOLFIRE-VM already drops WITNESS/INVARIANTS/BUF_TRACKING; the rest are
+# harmless no-ops if unset (config(8) nooptions of an unset option is a
+# no-op) and keep the two kernels' debug posture identical.
+nooptions 	DEADLKRES
+nooptions 	QUEUE_MACRO_DEBUG_TRASH
+nooptions 	GDB
+nooptions 	NETGDB

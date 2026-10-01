@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Permanent, hardened workflow dispatcher (docs/DISPATCH.md).
+#
+# Why: the session/MCP token cannot call workflow_dispatch (HTTP 403), but a
+# workflow's own GITHUB_TOKEN with actions:write can (the documented exception
+# to the no-recursion rule). This replaces the old "temporary self-triggering
+# push workflow" pattern: push a request file
+#   .github/dispatch/<name>.json
+# on a claude/** branch and this workflow validates it against a strict
+# allowlist and dispatches the target workflow.
+#
+# Trust model:
+#   * The validator (bin/dispatch-request.nu) always runs from the DEFAULT
+#     branch checkout ("trusted/"), never from the pushed commit.
+#   * The request file and the target workflow YAML are only ever read as
+#     DATA (from.json / from yaml), never executed.
+#   * Request values reach `gh` only as argv elements / a JSON body on stdin
+#     inside nu -- no shell, no ${{ }} interpolation of request data.
+#   * Token scope: actions:write + contents:read, nothing else.
+#   * Caveat (see docs/DISPATCH.md "Threat model"): anyone who can push a
+#     branch can also push a modified copy of THIS file; GitHub runs the
+#     workflow as defined at the pushed commit. The security boundary is
+#     therefore repo write access, same as for any workflow here.
+
+name: Dispatch request
+
+on:
+  push:
+    branches: ["claude/**"]
+    paths: [".github/dispatch/*.json"]
+  workflow_dispatch:
+    inputs:
+      request_json:
+        description: 'Request as JSON, e.g. {"workflow":"smolfire.yml","ref":"main","inputs":{"tslog":"true"},"watch":true}'
+        required: true
+
+permissions:
+  actions: write
+  contents: read
+
+# One dispatch at a time per branch; never cancel a request mid-flight.
+concurrency:
+  group: dispatch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Validate and dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Trusted tooling: default branch, regardless of what was pushed.
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Install Nushell
+        run: |
+          NU_VERSION="$(tr -d '[:space:]' < trusted/.github/nu-version)"
+          ARCH=$(uname -m)
+          TRIPLE="${ARCH}-unknown-linux-musl"
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The pushed commit: used ONLY to read the request file (data).
+      - uses: actions/checkout@v4.2.2
+        if: ${{ github.event_name == 'push' }}
+        with:
+          ref: ${{ github.sha }}
+          path: pushed
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Locate and pre-validate request
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DISPATCH_EVENT: ${{ github.event_name }}
+          REQUEST_JSON: ${{ github.event.inputs.request_json }}
+        run: nu trusted/bin/dispatch-request.nu prepare --pushed-dir pushed --out "$RUNNER_TEMP/request.json"
+
+      # Target ref (already format- and existence-checked) supplies the
+      # workflow YAML whose declared inputs the request is validated against.
+      # `ref:` takes a plain value, it is not shell-interpolated.
+      - uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ steps.prepare.outputs.ref }}
+          path: target
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+
+      - name: Validate, dispatch, report run URL
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: nu trusted/bin/dispatch-request.nu run --file "$RUNNER_TEMP/request.json" --workflows-dir target/.github/workflows

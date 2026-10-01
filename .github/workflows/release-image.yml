@@ -1,134 +1,307 @@
 # SPDX-License-Identifier: Apache-2.0
-# release-image.yml — publish a built smolfire qcow2 as a GitHub Release.
+# release-image.yml — publish smolfire release assets FROM VALIDATED RUNS.
 #
 # Closes the newcomer gap called out in README Quickstart: workflow artifacts
 # expire and need a GitHub login; Releases are permanent, anonymous downloads.
 #
-# Flow: dispatch with the run ID of a green "Build smolfire Image (hosted
-# runner)" run (the run whose size + boot gates you trust) and a tag. The
-# workflow downloads that run's smolfire-amd64 artifact, checksums it, and
-# publishes qcow2 + sha256 to the Release.
+# Two modes (input `mode`):
+#   release        create release <tag> from the artifacts of already-green
+#                  build runs (amd64_run, aarch64_run, optional kernel_run).
+#   replace-asset  re-upload ONE asset class (whichever *_run you supply) into
+#                  an existing release with --clobber, regenerate SHA256SUMS,
+#                  and ASSERT the asset's digest on GitHub changed and equals
+#                  the sha256 of the validated local file.
 #
-# Deliberately manual: a release is a human judgement (gates green? size
-# acceptable?), not an automatic side effect of a build.
+# Refusal rules (pure logic + tests: bin/release-plan.nu,
+# tests/release-plan-test.nu): every supplied run must have status=completed,
+# conclusion=success, and its head_sha must be an ancestor of (or equal to)
+# main. The tag target must also be on main: GITHUB_TOKEN cannot create tags
+# on commits whose workflow files differ from main (docs/UR-BSD-VERIFY.md,
+# "Release publishing: the 403 is a workflows-permission check").
+#
+# Every uploaded asset gets a build-provenance attestation; verify with
+# `gh attestation verify` (docs/RELEASING.md).
+#
+# Backward compatible: `run_id` (the old single-run input) is still accepted
+# as an alias for amd64_run. Deliberately manual: a release is a human
+# judgement (gates green? size acceptable?), not an automatic side effect.
 
 name: Release smolfire Image
 
 on:
   workflow_dispatch:
     inputs:
-      run_id:
-        description: "Build run ID whose smolfire-amd64 artifact to publish"
-        required: true
+      mode:
+        description: "release = create a new release; replace-asset = swap one asset class in an existing release"
+        type: choice
+        options: [release, replace-asset]
+        default: release
       tag:
-        description: "Release tag (e.g. v0.1.0)"
+        description: "Release tag (e.g. v0.6.0)"
         required: true
+      amd64_run:
+        description: "Build run ID whose smolfire-amd64 artifact to publish"
+        required: false
+      run_id:
+        description: "DEPRECATED alias for amd64_run (kept for older docs)"
+        required: false
+      aarch64_run:
+        description: "Build run ID whose smolfire-aarch64 artifact to publish (optional)"
+        required: false
+      kernel_run:
+        description: "Run ID holding the one-ELF SMOLFIRE kernel artifact (optional)"
+        required: false
+      kernel_artifact:
+        description: "Artifact name inside kernel_run (smolfire-kernel or smolfire-kernel-current)"
+        required: false
+        default: smolfire-kernel
+      target_sha:
+        description: "Commit to tag (must be on main). Default: head_sha of the first supplied run"
+        required: false
+      notes:
+        description: "Release notes body text, prepended to the generated asset table"
+        required: false
+      notes_file:
+        description: "Repo-relative path to a notes file (read from the dispatched ref); used if notes is empty"
+        required: false
       prerelease:
         description: "Mark as pre-release"
         type: boolean
         default: true
 
 permissions:
-  contents: write   # create the release + upload assets
-  actions: read     # download-artifact across runs + resolve the run's head SHA
-                    # (an explicit permissions map drops all unlisted scopes)
+  contents: write       # create the release + upload assets
+  actions: read         # gh run download across runs + resolve run head SHAs
+  id-token: write       # OIDC token for build provenance attestation
+  attestations: write   # store the attestation
+                        # (an explicit permissions map drops all unlisted scopes)
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   release:
-    name: Publish ${{ inputs.tag }}
+    name: ${{ inputs.mode }} ${{ inputs.tag }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
-
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      MODE: ${{ inputs.mode }}
+      TAG: ${{ inputs.tag }}
+      AMD64_RUN: ${{ inputs.amd64_run || inputs.run_id }}
+      AARCH64_RUN: ${{ inputs.aarch64_run }}
+      KERNEL_RUN: ${{ inputs.kernel_run }}
+      KERNEL_ARTIFACT: ${{ inputs.kernel_artifact }}
+      TARGET_SHA: ${{ inputs.target_sha }}
+      NOTES_BODY: ${{ inputs.notes }}
+      NOTES_FILE: ${{ inputs.notes_file }}
+      PRERELEASE: ${{ inputs.prerelease }}
     steps:
-      - name: Validate inputs
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # The validator (bin/release-plan.nu) is run from this checkout, so a
+      # dispatch from any other ref could ship a weakened validator.
+      - name: Require dispatch from main
         run: |
-          # Guard against the observed failure mode (release run #1): the tag
-          # typed into run_id -> download-artifact fails with a bare
-          # 'Not Found' 11 seconds in. Fail fast with the fix instead.
-          if ! [[ "${{ inputs.run_id }}" =~ ^[0-9]+$ ]]; then
-            echo "ERROR: run_id must be the numeric Actions run ID (got '${{ inputs.run_id }}')."
-            echo "Did you swap run_id and tag? Recent successful build runs:"
-            gh run list --repo "${{ github.repository }}" \
-              --workflow build-image-hosted.yml --status success --limit 5 \
-              --json databaseId,displayTitle,createdAt \
-              --template '{{range .}}{{.databaseId}}  {{.createdAt}}  {{.displayTitle}}{{"\n"}}{{end}}'
-            exit 1
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "ERROR: dispatch this workflow from main (got $GITHUB_REF)."; exit 1
           fi
-          # Confirm the run actually has the artifact before downloading.
-          if ! gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}/artifacts" \
-               --jq '.artifacts[].name' | grep -qx 'smolfire-amd64'; then
-            echo "ERROR: run ${{ inputs.run_id }} has no 'smolfire-amd64' artifact (expired, failed, or wrong run)."
-            echo "Recent successful build runs:"
-            gh run list --repo "${{ github.repository }}" \
-              --workflow build-image-hosted.yml --status success --limit 5 \
-              --json databaseId,displayTitle,createdAt \
-              --template '{{range .}}{{.databaseId}}  {{.createdAt}}  {{.displayTitle}}{{"\n"}}{{end}}'
-            exit 1
-          fi
-          echo "run_id ${{ inputs.run_id }} valid; artifact present."
 
-      - name: Fetch built image artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4.2.2
         with:
-          name: smolfire-amd64
-          run-id: ${{ inputs.run_id }}
-          github-token: ${{ github.token }}
+          ref: main
 
-      - name: Checksum and rename
+      - name: Install Nushell
         run: |
-          # Locate rather than assume: upload-artifact archives relative to the
-          # least common ancestor of its paths, which could change layout.
-          ART=$(find . -name 'smolfire-amd64.qcow2' -type f | head -1)
-          test -n "$ART" || { echo "ERROR: artifact has no smolfire-amd64.qcow2"; find . -maxdepth 3 -type f; exit 1; }
-          mv "$ART" "smolfire-amd64-${{ inputs.tag }}.qcow2"
-          sha256sum "smolfire-amd64-${{ inputs.tag }}.qcow2" | tee "smolfire-amd64-${{ inputs.tag }}.qcow2.sha256"
-          ls -lh smolfire-amd64-*
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          TRIPLE="$(uname -m)-unknown-linux-musl"
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Create release with assets
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Install qemu-utils
+        run: sudo apt-get install -y --no-install-recommends qemu-utils
+
+      - name: Validate inputs and runs
         run: |
-          # Tag the commit the artifact was built from — without --target,
-          # gh tags the default branch HEAD, which may have moved since.
-          BUILD_SHA=$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}" --jq .head_sha)
-          echo "Tagging build commit $BUILD_SHA"
-          BYTES=$(wc -c < "smolfire-amd64-${{ inputs.tag }}.qcow2")
-          MIB=$((BYTES / 1048576))
-          {
-            echo "smolfire amd64 qcow2 — built by run ${{ inputs.run_id }} of the hosted pipeline."
-            echo ""
-            echo "- Download size: ${MIB} MiB (compressed qcow2 — boots as-is in any qemu; raw-size target: <= 512 MiB)"
-            echo "- Boot: \`qemu-system-x86_64 -M q35 -accel kvm -cpu host -m 512M -drive file=smolfire-amd64-${{ inputs.tag }}.qcow2,format=qcow2,if=virtio -nic user,model=virtio-net-pci -nographic\`"
-            echo "- Login: root / smolfire — **dev image**: change the password on first login;"
-            echo "  never expose it beyond QEMU user-mode networking."
-            echo "- Verify: \`sha256sum -c smolfire-amd64-${{ inputs.tag }}.qcow2.sha256\`"
-          } > notes.md
-          if ! gh release create "${{ inputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --target "$BUILD_SHA" \
-            --title "smolfire ${{ inputs.tag }}" \
-            --notes-file notes.md \
-            $([ "${{ inputs.prerelease }}" = "true" ] && echo --prerelease) \
-            "smolfire-amd64-${{ inputs.tag }}.qcow2" \
-            "smolfire-amd64-${{ inputs.tag }}.qcow2.sha256"; then
-            echo ""
-            echo "Release creation failed. If the error above is HTTP 403"
-            echo "'Resource not accessible by integration': GITHUB_TOKEN"
-            echo "cannot create a tag pointing at a commit whose WORKFLOW"
-            echo "FILES differ from main (the 'workflows' permission check —"
-            echo "verified 2026-07-28; it is NOT a tag ruleset). This bites"
-            echo "when run_id built a BRANCH commit with workflow changes."
-            echo "Fixes:"
-            echo "  1. merge the branch first and release a main-built run"
-            echo "     (or pass a run whose commit is on main); or"
-            echo "  2. create the tag yourself and re-run — an existing tag"
-            echo "     needs no ref creation:"
-            echo "       git tag ${{ inputs.tag }} $BUILD_SHA && git push origin ${{ inputs.tag }}"
+          set -euo pipefail
+          mkdir -p plan assets
+          nu bin/release-plan.nu validate-tag "$TAG"
+          nu bin/release-plan.nu validate-notes-file "$NOTES_FILE"
+          if [ -n "$NOTES_FILE" ] && [ ! -f "$NOTES_FILE" ]; then
+            echo "ERROR: notes_file '$NOTES_FILE' not found in main"; exit 1
+          fi
+          if [ -z "$AMD64_RUN$AARCH64_RUN$KERNEL_RUN" ]; then
+            echo "ERROR: supply at least one of amd64_run / aarch64_run / kernel_run."
             exit 1
           fi
-          echo "Release ${{ inputs.tag }} published."
+          if [ "$MODE" = replace-asset ]; then
+            n=0
+            for r in "$AMD64_RUN" "$AARCH64_RUN" "$KERNEL_RUN"; do [ -z "$r" ] || n=$((n+1)); done
+            [ "$n" -eq 1 ] || { echo "ERROR: replace-asset swaps exactly one asset class; supply exactly one *_run."; exit 1; }
+          fi
+
+          EXISTS=0
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && EXISTS=1
+          if [ "$MODE" = release ] && [ "$EXISTS" = 1 ]; then
+            echo "ERROR: release $TAG already exists. Use mode=replace-asset to swap an asset."; exit 1
+          fi
+          if [ "$MODE" = replace-asset ] && [ "$EXISTS" = 0 ]; then
+            echo "ERROR: release $TAG does not exist; use mode=release."; exit 1
+          fi
+
+          FIRST_SHA=""
+          check_run() { # label run artifact
+            label="$1"; run="$2"; art="$3"
+            [[ "$run" =~ ^[0-9]+$ ]] || { echo "ERROR: $label run '$run' is not a numeric run ID (tag/run swapped?)"; exit 1; }
+            gh api "repos/$REPO/actions/runs/$run" > "plan/$label.run.json"
+            SHA=$(jq -r .head_sha "plan/$label.run.json")
+            gh api "repos/$REPO/compare/main...$SHA" > "plan/$label.compare.json"
+            gh api "repos/$REPO/actions/runs/$run/artifacts" > "plan/$label.artifacts.json"
+            nu bin/release-plan.nu validate-run --label "$label" \
+              --run "plan/$label.run.json" --compare "plan/$label.compare.json" \
+              --artifacts "plan/$label.artifacts.json" --artifact-name "$art"
+            [ -n "$FIRST_SHA" ] || FIRST_SHA="$SHA"
+          }
+          [ -z "$AMD64_RUN" ]   || check_run amd64   "$AMD64_RUN"   smolfire-amd64
+          [ -z "$AARCH64_RUN" ] || check_run aarch64 "$AARCH64_RUN" smolfire-aarch64
+          [ -z "$KERNEL_RUN" ]  || check_run kernel  "$KERNEL_RUN"  "$KERNEL_ARTIFACT"
+
+          TARGET="${TARGET_SHA:-$FIRST_SHA}"
+          if [ "$MODE" = release ]; then
+            # The tag target must itself be reachable from main.
+            printf '{"id":0,"status":"completed","conclusion":"success","head_sha":"%s"}' "$TARGET" > plan/target.run.json
+            gh api "repos/$REPO/compare/main...$TARGET" > plan/target.compare.json
+            nu bin/release-plan.nu validate-run --label target-sha \
+              --run plan/target.run.json --compare plan/target.compare.json
+          fi
+          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+          echo "All supplied runs validated (success, head_sha reachable from main)."
+
+      - name: Fetch and check artifacts
+        run: |
+          set -euo pipefail
+          fetch() { # label run artifact
+            mkdir -p "dl/$1"
+            gh run download "$2" --repo "$REPO" -n "$3" -D "dl/$1"
+          }
+          [ -z "$AMD64_RUN" ]   || fetch amd64   "$AMD64_RUN"   smolfire-amd64
+          [ -z "$AARCH64_RUN" ] || fetch aarch64 "$AARCH64_RUN" smolfire-aarch64
+          [ -z "$KERNEL_RUN" ]  || fetch kernel  "$KERNEL_RUN"  "$KERNEL_ARTIFACT"
+
+          # Locate rather than assume: upload-artifact archives relative to the
+          # least common ancestor of its paths.
+          stage_qcow2() {
+            arch="$1"
+            f=$(find "dl/$arch" -name "smolfire-$arch.qcow2" -type f | head -1)
+            test -n "$f" || { echo "ERROR: $arch artifact has no smolfire-$arch.qcow2"; find "dl/$arch" -type f; exit 1; }
+            out="assets/$(nu bin/release-plan.nu names --tag "$TAG" --arch "$arch")"
+            mv "$f" "$out"
+            qemu-img check "$out"
+            qemu-img info "$out"
+          }
+          [ -z "$AMD64_RUN" ]   || stage_qcow2 amd64
+          [ -z "$AARCH64_RUN" ] || stage_qcow2 aarch64
+          if [ -n "$KERNEL_RUN" ]; then
+            f=$(find dl/kernel -name smolfire-kernel -type f | head -1)
+            test -n "$f" || { echo "ERROR: kernel artifact has no smolfire-kernel ELF"; find dl/kernel -type f; exit 1; }
+            [ "$(head -c4 "$f" | od -An -c | tr -d ' ')" = '177ELF' ] || { echo "ERROR: smolfire-kernel is not an ELF"; exit 1; }
+            mv "$f" "assets/$(nu bin/release-plan.nu names --tag "$TAG" --kernel)"
+          fi
+          ls -lh assets
+
+      - name: Checksums and notes
+        run: |
+          set -euo pipefail
+          # Checksums always cover the WHOLE release set. In replace mode the
+          # untouched assets are pulled down so SHA256SUMS stays complete.
+          mkdir -p all
+          if [ "$MODE" = replace-asset ]; then
+            # Fail closed: download each untouched asset by exact name, then
+            # assert nothing on the release is missing from the checksum set.
+            gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name}]' > plan/release-assets.json
+            nu bin/release-plan.nu release-fetch --assets plan/release-assets.json --staged-dir assets > plan/fetch.txt
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              gh release download "$TAG" --repo "$REPO" --dir all --pattern "$name"
+              [ -f "all/$name" ] || { echo "ERROR: failed to download release asset $name"; exit 1; }
+            done < plan/fetch.txt
+          fi
+          cp -f assets/* all/    # staged (validated) files win over old ones
+          rm -f all/*.sha256 all/SHA256SUMS
+          if [ "$MODE" = replace-asset ]; then
+            nu bin/release-plan.nu release-complete --assets plan/release-assets.json --dir all
+          fi
+          nu bin/release-plan.nu checksums --dir all | tee plan/SHA256SUMS.txt
+          cp -f all/SHA256SUMS assets/SHA256SUMS
+          for f in assets/*.qcow2 assets/smolfire-kernel-*; do
+            [ -f "$f" ] || continue
+            case "$f" in *.sha256) continue ;; esac
+            cp -f "all/$(basename "$f").sha256" "assets/"
+          done
+          ls -l assets
+          if [ "$MODE" = release ]; then
+            if [ -n "$NOTES_BODY" ]; then printf '%s\n' "$NOTES_BODY" > plan/body.md
+            elif [ -n "$NOTES_FILE" ]; then cp -- "$NOTES_FILE" plan/body.md
+            else : > plan/body.md; fi
+            FLAGS=""; [ "$PRERELEASE" = true ] && FLAGS="--prerelease"
+            nu bin/release-plan.nu notes --tag "$TAG" --dir assets --body-file plan/body.md \
+              --amd64-run "$AMD64_RUN" --aarch64-run "$AARCH64_RUN" --kernel-run "$KERNEL_RUN" $FLAGS > notes.md
+            cat notes.md
+          fi
+
+      # Attest BEFORE anything becomes public: a failure here leaves the release
+      # untouched and the job simply re-runnable. Attestations cover digests, so
+      # the order relative to upload does not change what is attested.
+      # SHA pin: actions/attest-build-provenance v4.2.2 (git ls-remote, 2026-10-01).
+      # Re-verify tag -> SHA before merging if the pin is bumped.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: assets/*
+
+      - name: Create release
+        if: ${{ inputs.mode == 'release' }}
+        run: |
+          set -euo pipefail
+          echo "Tagging $TARGET (validated as reachable from main)"
+          FLAGS=""; [ "$PRERELEASE" = true ] && FLAGS="--prerelease"
+          gh release create "$TAG" --repo "$REPO" --target "$TARGET" \
+            --title "smolfire $TAG" --notes-file notes.md $FLAGS \
+            assets/*
+          echo "Release $TAG published."
+
+      - name: Replace assets and assert digests changed
+        if: ${{ inputs.mode == 'replace-asset' }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, digest}]' > plan/before.json
+          gh release upload "$TAG" --repo "$REPO" --clobber assets/*
+          gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, digest}]' > plan/after.json
+          fail=0
+          for f in assets/*; do
+            n=$(basename "$f")
+            [ "$n" = SHA256SUMS ] && continue
+            nu bin/release-plan.nu digest-changed --before plan/before.json --after plan/after.json --name "$n" || fail=1
+            want="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+            got=$(jq -r --arg n "$n" '.[] | select(.name==$n) | .digest' plan/after.json)
+            [ "$want" = "$got" ] || { echo "ERROR: $n digest on GitHub ($got) != local ($want)"; fail=1; }
+          done
+          [ "$fail" = 0 ] || exit 1
+          echo "Replaced assets verified: digests changed and match validated local files."
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${MODE} ${TAG}"
+            echo ""
+            echo '```'
+            cat plan/SHA256SUMS.txt
+            echo '```'
+            echo "Verify: \`gh attestation verify <asset> --repo ${REPO}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

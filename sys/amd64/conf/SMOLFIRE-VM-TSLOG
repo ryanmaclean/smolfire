@@ -1,0 +1,22 @@
+# SMOLFIRE-VM-TSLOG — measurement-only variant of amd64 SMOLFIRE-VM (the full
+# qcow2 image kernel) with TSLOG boot tracing (docs/BOOT-TIME-ROADMAP.md
+# section 2.9). amd64 twin of sys/arm64/conf/SMOLFIRE-VM-TSLOG; distinct from
+# SMOLFIRE-TSLOG, which traces the Firecracker SMOLFIRE ELF. NEVER ships:
+# TSLOG adds a timestamp record on every SYSINIT, device attach, DELAY and
+# sleep, so its wall clock is not the release wall clock.
+#
+# Purpose: kernel-only validation of the SMOLFIRE-VM legacy-probe cuts
+# (atkbdc/atkbd/psm removal) before the full-image boot run. Build with
+# build-image-hosted.yml kernconf=SMOLFIRE-VM-TSLOG kernel_only=true.
+# Dump post-boot, outside the measured window: `sysctl -b debug.tslog` and
+# `sysctl -n debug.tslog_user`; bin/tslog-phases.nu builds the phase table.
+#
+# TSLOGSIZE matches the other TSLOG kernconfs (default 262144 records).
+#
+# SPDX-License-Identifier: Apache-2.0
+
+include SMOLFIRE-VM
+ident SMOLFIRE-VM-TSLOG
+
+options 	TSLOG
+options 	TSLOGSIZE=262144

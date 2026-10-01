@@ -302,6 +302,8 @@ def test-irc-fallback-file-written [] {
     let name = "escalate: HALT marker written even when IRC fallback not available"
     let root = make-temp-root
 
+    # Hermetic: never let an ambient SMOLFIRE_IRC_HOST reach a real network.
+    hide-env -i SMOLFIRE_IRC_HOST
     let r = run-escalate $root "task-irc" "retry-exhausted" "fail" 3
 
     let halt_path = [$root, "var", "mail", "HALT.task-irc"] | path join
@@ -318,22 +320,17 @@ def test-irc-fallback-file-written [] {
         return {name: $name, status: "fail", detail: $"exception: ($e.msg)"}
     }
 
-    # Check whether fallback_fired / fallback_status are already recorded.
-    # These fields are OPTIONAL in the current implementation; their absence is
-    # documented as a known gap vs spec §13 (they will be added when IRC code lands).
-    let halt_raw = try { open --raw $halt_path } catch { "" }
-    let has_ff = $halt_raw | str contains "fallback_fired"
-    let has_fs = $halt_raw | str contains "fallback_status"
-    let has_fallback_fields = $has_ff and $has_fs
+    # Spec §13: fallback_fired / fallback_status are MANDATORY in the marker
+    # (parity with coord-tick.nu's try-irc-dm; the old known gap is closed).
+    # SMOLFIRE_IRC_HOST is unset in this hermetic run => inert "no-route".
+    let halt = try { open --raw $halt_path | from toml } catch { {} }
+    let has_fallback_fields = ($halt | get fallback_fired? | default null) == true and ($halt | get fallback_status? | default "") == "no-route"
 
     cleanup $root
-    if $ok {
-        let note = if $has_fallback_fields {
-            "HALT marker present; fallback_fired + fallback_status recorded"
-        } else {
-            "HALT marker present (IRC fallback fields not yet implemented — spec §13 gap)"
-        }
-        {name: $name, status: "pass", detail: $note}
+    if $ok and $has_fallback_fields {
+        {name: $name, status: "pass", detail: "HALT marker present; fallback_fired=true, fallback_status=no-route"}
+    } else if $ok {
+        {name: $name, status: "fail", detail: "HALT marker lacks spec §13 fallback_fired/fallback_status"}
     } else {
         {name: $name, status: "fail", detail: "HALT marker not written"}
     }
@@ -511,6 +508,74 @@ def test-stdout-logs-steps [] {
     }
 }
 
+# ── Test 12: HALT marker parity with coord-tick.nu write-halt-marker ──────────
+
+def test-halt-marker-parity [] {
+    let name = "escalate: HALT marker has every coord-tick write-halt-marker field + fallback fields"
+    let root = make-temp-root
+    hide-env -i SMOLFIRE_IRC_HOST
+    let r = run-escalate $root "t-par" "retry-exhausted" "fail" 3
+    let halt = try { open --raw ([$root, "var", "mail", "HALT.t-par"] | path join) | from toml } catch { {} }
+    cleanup $root
+    let want = [task_id verdict message_id halted_at reason attempts halt_msgid resume_tag fallback_fired fallback_status]
+    let missing = $want | where {|k| not ($k in ($halt | columns)) }
+    if $r.exit_code != 0 or ($missing | length) > 0 {
+        return {name: $name, status: "fail", detail: $"exit=($r.exit_code) missing=($missing | str join ',')"}
+    }
+    let vals_ok = ($halt.halt_msgid == "<halt-t-par.coord@smolfire.local>") and ($halt.resume_tag == "resume-t-par") and ($halt.message_id | str starts-with "<escalate.t-par.") and ($halt.halted_at =~ '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+    if $vals_ok {
+        {name: $name, status: "pass", detail: "all parity fields present with coord-tick-compatible values"}
+    } else {
+        {name: $name, status: "fail", detail: $"bad values: ($halt | to nuon)"}
+    }
+}
+
+# ── Test 13: triple failure -> panic JSON on stderr, exit 78 (EX_CONFIG) ───────
+#
+# Spool path is a directory (append fails), IRC is inert (no route), and the
+# per-task HALT path is a directory (marker write fails). Running as root
+# defeats permission-based fixtures, so directory-in-the-way is used instead.
+
+def test-triple-failure-exit-78 [] {
+    let name = "escalate: triple failure exits 78 with structured panic JSON on stderr"
+    let root = make-temp-root
+    hide-env -i SMOLFIRE_IRC_HOST
+    mkdir ([$root, "var", "mail", "spoolasdir"] | path join)
+    mkdir ([$root, "var", "mail", "HALT.t-tf"] | path join)
+    let r = (^nu --no-config-file bin/coord-escalate.nu --root $root --spool "var/mail/spoolasdir" --task-id t-tf --reason retry-exhausted --attempts 3) | complete
+    cleanup $root
+    if $r.exit_code != 78 {
+        return {name: $name, status: "fail", detail: $"exit=($r.exit_code) stderr=($r.stderr | str substring ..300)"}
+    }
+    let line = $r.stderr | lines | where {|l| $l | str contains "smolbsd-coord-panic" } | first
+    let j = try { $line | from json } catch { return {name: $name, status: "fail", detail: $"panic line not JSON: ($line)"} }
+    let ok = ($j.event == "smolbsd-coord-panic") and ($j.task_id == "t-tf") and ($j.spool_writable == false) and ($j.irc_reachable == false) and ($j.halt_writable == false) and (($j.ts | str length) > 0)
+    if $ok {
+        {name: $name, status: "pass", detail: "exit 78 + panic JSON with all spec fields"}
+    } else {
+        {name: $name, status: "fail", detail: $"panic JSON wrong: ($j | to nuon)"}
+    }
+}
+
+# ── Test 14: partial failure is NOT the panic path ────────────────────────────
+
+def test-partial-failure-not-78 [] {
+    let name = "escalate: HALT write failure alone exits 1, not 78, with no panic JSON"
+    let root = make-temp-root
+    hide-env -i SMOLFIRE_IRC_HOST
+    "" | save ([$root, "var", "mail", "spool"] | path join)
+    mkdir ([$root, "var", "mail", "HALT.t-pf"] | path join)
+    let r = run-escalate $root "t-pf" "retry-exhausted" "fail" 3
+    let spool_raw = open --raw ([$root, "var", "mail", "spool"] | path join)
+    cleanup $root
+    let ok = ($r.exit_code == 1) and (not ($r.stderr | str contains "smolbsd-coord-panic")) and ($spool_raw | str contains "[ESCALATE] t-pf")
+    if $ok {
+        {name: $name, status: "pass", detail: "exit 1; spool message still appended; no panic JSON"}
+    } else {
+        {name: $name, status: "fail", detail: $"exit=($r.exit_code) stderr=($r.stderr | str substring ..200)"}
+    }
+}
+
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 # Run all escalation unit tests. Returns a list of {name, status, detail}.
@@ -530,6 +595,9 @@ export def run-coord-escalate-tests [] {
     $results = $results | append (try { test-reason-guard-present }           catch {|e| {name: "escalate: --reason guard is present in source",                            status: "fail", detail: $"exception: ($e.msg)"}})
     $results = $results | append (try { test-message-id-contains-task-id }    catch {|e| {name: "escalate: Message-ID in spool encodes task_id",                             status: "fail", detail: $"exception: ($e.msg)"}})
     $results = $results | append (try { test-stdout-logs-steps }              catch {|e| {name: "escalate: stdout contains structured log steps",                             status: "fail", detail: $"exception: ($e.msg)"}})
+    $results = $results | append (try { test-halt-marker-parity }              catch {|e| {name: "escalate: HALT marker has every coord-tick write-halt-marker field + fallback fields", status: "fail", detail: $"exception: ($e.msg)"}})
+    $results = $results | append (try { test-triple-failure-exit-78 }          catch {|e| {name: "escalate: triple failure exits 78 with structured panic JSON on stderr",    status: "fail", detail: $"exception: ($e.msg)"}})
+    $results = $results | append (try { test-partial-failure-not-78 }          catch {|e| {name: "escalate: HALT write failure alone exits 1, not 78, with no panic JSON",     status: "fail", detail: $"exception: ($e.msg)"}})
 
     $results
 }

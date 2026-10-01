@@ -24,6 +24,10 @@
 #     (`worker_tasks_reaped`, no repeat `worker_marked_dead` — no storms).
 #   - Halt-skipped (S-002) dispatches never touch heartbeat state.
 
+# Retry-path tests here are about heartbeats, not the §12 backoff schedule
+# (tests/coord-retry-backoff-test.nu): keep retries immediate.
+$env.SMOLFIRE_RETRY_BACKOFF = "0"
+
 def "assert equal" [left: any, right: any, msg: string = ""] {
     if $left != $right {
         error make {msg: $"assert equal failed ($msg)\n  left:  ($left | to nuon)\n  right: ($right | to nuon)"}

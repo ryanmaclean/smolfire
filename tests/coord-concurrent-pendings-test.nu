@@ -10,6 +10,10 @@
 # Nushell only (no-new-python policy). No hardware touches; fleet dispatch
 # uses the stub-ssh PATH shim from coord-tick-fleet-route-test.nu.
 
+# Retry paths here test slot mechanics, not the §12 backoff schedule
+# (tests/coord-retry-backoff-test.nu): keep retries immediate.
+$env.SMOLFIRE_RETRY_BACKOFF = "0"
+
 def "assert equal" [left: any, right: any, msg: string = ""] {
     if $left != $right {
         error make {msg: $"assert equal failed ($msg)\n  left:  ($left | to nuon)\n  right: ($right | to nuon)"}

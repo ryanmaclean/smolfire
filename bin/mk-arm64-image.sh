@@ -46,7 +46,10 @@ RB=0000010000000000
 syms=$("$NM" "$K" | while read -r a _t n; do
     case "$n" in kernbase|_start|_end) printf '%s %s\n' "$a" "$n" ;; esac
 done)
-kb=$(printf '%s\n' "$syms" | while read -r a n; do [ "$n" = kernbase ] && echo "$a"; done)
+# `if`, not `[ ] && echo`: a false test as the LAST loop command would make the
+# substitution fail (rc 1) under set -e whenever kernbase is not the last symbol
+# (e.g. an address-sorted `nm -n`, where kernbase comes first).
+kb=$(printf '%s\n' "$syms" | while read -r a n; do if [ "$n" = kernbase ]; then echo "$a"; fi; done)
 if [ -n "$kb" ]; then
     khi=${kb%????????????}
     klo=${kb#????}

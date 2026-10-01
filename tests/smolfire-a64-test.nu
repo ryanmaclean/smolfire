@@ -117,6 +117,17 @@ if not $have {
             ^sh bin/mk-arm64-image.sh $"($e)/k.elf" $img | complete
         })
         if $m.exit_code != 0 { fail $"mk-arm64-image.sh failed: ($m.stderr)" }
+        # Symbol order must not matter: an address-sorted `nm -n` lists kernbase
+        # FIRST (lowest address). The kernbase extraction used to end its loop on a
+        # false `[ ]` test and die under set -e whenever kernbase was not last.
+        "#!/bin/sh\nexec nm -n \"$@\"\n" | save --force $"($e)/nm-n.sh"
+        ^chmod +x $"($e)/nm-n.sh"
+        let img_n = $"($e)/Image-nm-n"
+        let mn = (with-env {ARM_BOOTHDR_AWK: $"($env.PWD)/tests/fixtures/freebsd-releng-15.0/sys/tools/arm_kernel_boothdr.awk", NM: $"($e)/nm-n.sh"} {
+            ^sh bin/mk-arm64-image.sh $"($e)/k.elf" $img_n | complete
+        })
+        if $mn.exit_code != 0 { fail $"mk-arm64-image.sh must not depend on nm symbol order (nm -n): ($mn.stderr)" }
+        if (open --raw $img | into binary) != (open --raw $img_n | into binary) { fail "Image differs between nm orderings" }
         let d = (open --raw $img | into binary)
         let le = {|from: int, n: int| $d | bytes at $from..<($from + $n) | into int --endian little }
         # header: b _start (0x14000000 | 0x800/4), text_offset 0, image_size = _end-kernbase, flags 8, magic

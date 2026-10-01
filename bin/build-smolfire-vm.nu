@@ -30,6 +30,9 @@
 #   sudo nu bin/build-smolfire-vm.nu --check            # preflight checks only
 #   sudo nu bin/build-smolfire-vm.nu --profile prod --authorized-keys ~/.ssh/id_ed25519.pub
 #                                                       # key-only root SSH (docs/BUILDING.md)
+#   sudo nu bin/build-smolfire-vm.nu --reassemble-from DIR  # image step only, reusing a
+#                                                       # prior run's pkgbase repo (see
+#                                                       # bin/reassemble-plan.nu, docs/BUILDING.md)
 
 export def main [
     --arch: string = ""              # aarch64 | amd64 | riscv64-experimental (auto-detect if empty)
@@ -43,12 +46,23 @@ export def main [
     --check                          # preflight only, no build
     --profile: string = "dev"        # dev (password root login, CI default) | prod (key-only, needs --authorized-keys)
     --authorized-keys: string = ""   # public-key file installed as /root/.ssh/authorized_keys (prod)
+    --reassemble-from: string = ""   # dir with manifest.json + reassemble-products.tar from a prior green run; skips world+kernel
     --log: string = "/var/tmp/smolfire-build.log"
 ] {
     let t_start = (date now)
 
     # Validate the image profile up front — before hours of buildworld.
     let profile_args = (profile_make_args $profile $authorized_keys)
+    # Reassemble mode (opt-in; default "" leaves every code path below unchanged).
+    let reassemble = ($reassemble_from != "")
+    if $reassemble and $skip_release {
+        error make {msg: "--reassemble-from and --skip-release are mutually exclusive (reassemble exists to build the image)"}
+    }
+    if $reassemble and $skip_buildworld {
+        error make {msg: "--reassemble-from already implies --skip-buildworld; pass only one"}
+    }
+    # world+kernel are not rebuilt in reassemble mode
+    let skip_buildworld = ($skip_buildworld or $reassemble)
 
     # --- Resolve arch ---
     let resolved_arch = if $arch == "" {
@@ -113,6 +127,15 @@ export def main [
     # =========================================================================
     setup $src
 
+    # REASSEMBLE: restore the prior run's pkgbase repo into the obj layout.
+    # unpack validates arch/kernconf/src.conf/kernconf hashes + tar integrity
+    # and refuses (=> do a full build) on any mismatch.
+    if $reassemble {
+        print "==> Reassemble: restoring pkgbase products from a prior run"
+        let rp = ($env.FILE_PWD | path join "reassemble-plan.nu")
+        ^nu $rp unpack --obj $obj --src $src --arch $arch_target --kernconf $kernconf --from-dir $reassemble_from
+    }
+
     # =========================================================================
     # STAGE 1: buildworld
     # =========================================================================
@@ -156,7 +179,7 @@ export def main [
         if ($purged | length) > 0 {
             print $"  Removed ($purged | length) stale qcow2 from ($obj) before the build"
         }
-        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target $profile_args
+        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target $profile_args $reassemble_from
     } else {
         print "[skip] cloudware-release (--skip-release)"
     }
@@ -538,8 +561,10 @@ def build_vm_image [
     arch_freebsd: string
     arch_target: string
     profile_args: list<string>
+    reassemble_from: string = ""
 ] {
     print "==> Stage 4: make cloudware-release"
+    let reassemble = ($reassemble_from != "")
 
     # FIX-2: verify still root
     let euid = (^id -u | str trim | into int)
@@ -586,6 +611,26 @@ def build_vm_image [
 
     print $"  Command: ($cmd_args | str join ' ')"
     print $"  Release conf: ($release_conf)"
+
+    # Record the make variables of this build (the emit side of reassemble mode
+    # reads them in `reassemble-plan.nu pack`; harmless otherwise).
+    let vars_file = "/var/tmp/smolfire-pkg-make-vars.json"
+    $make_args | to json | save -f $vars_file
+
+    # REASSEMBLE guards (all fail closed).
+    if $reassemble {
+        let rp = ($env.FILE_PWD | path join "reassemble-plan.nu")
+        # 1. package-affecting make variables must equal the source run's.
+        ^nu $rp check-make-vars --from-dir $reassemble_from --vars-file $vars_file
+        # 2. a dry run must show pure image assembly. If make would re-run
+        # `make packages` (pkgbase-repo not seen as up to date), or the dry run
+        # failed / printed nothing, abort now instead of silently rebuilding
+        # world inside a "5 minute" job. stderr is kept in the file too.
+        let dry_out = $"($log).dryrun"
+        let dry = (do { ^make "-n" ...($cmd_args | skip 1) } | complete)
+        $"($dry.stdout)\n($dry.stderr)\n" | save -f $dry_out
+        ^nu $rp check-dryrun $dry_out --exit-code $dry.exit_code
+    }
 
     # Export the profile variables into the environment too (not only as make
     # command-line vars) so the conf hook sees them regardless of how make

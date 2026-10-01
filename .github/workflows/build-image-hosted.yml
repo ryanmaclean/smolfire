@@ -34,6 +34,7 @@ name: Build smolfire qcow2 compatibility image
 
 permissions:
   contents: read
+  actions: read   # reassemble_from_run: read the source run + download its artifact (same repo)
 
 # (Post-rename revalidation: run 35834636637 GREEN 2026-09-23 — SMOLFIRE-VM
 # kernel ident, hostname smolfire, 66.6 MiB raw / 26.6 MiB compressed,
@@ -72,6 +73,13 @@ on:
       softgate_budget:
         description: "aarch64 TCG boot gate login budget, seconds (default 900; recalibration target ~2x p95 TIME_TO_LOGIN)"
         default: "900"
+      emit_reassemble:
+        description: "Also upload the reusable pkgbase products (artifact smolfire-reassemble-<arch>-<kernconf>, 7-day retention) so a later config-only change can use reassemble_from_run. Opt-in: costs artifact storage"
+        type: boolean
+        default: false
+      reassemble_from_run:
+        description: "Reassemble: numeric id of a GREEN run of this workflow that ran with emit_reassemble (same arch + kernconf). Skips buildworld+buildkernel and only re-runs cloudware-release + gates (~15 min vs ~35). Refused if src.conf/kernconf changed. Empty = full build"
+        default: ""
   # (Rename phase-3b temporary push trigger retired after run #9 went green:
   #  smolfire.ufs.qcow2 built via CLOUDWARE=smolfire + KERNCONF=SMOLFIRE-VM,
   #  size gate and KVM boot gate passed with the new root password.)
@@ -100,6 +108,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ---- Reassemble mode (opt-in; every "Reassemble —" step is skipped when
+      # neither reassemble input is set, leaving the default pipeline as-is).
+      # Arg/plumbing/validation logic is Nushell: bin/reassemble-plan.nu,
+      # tests/reassemble-plan-test.nu. Design: docs/BUILDING.md "Reassemble mode".
+      - name: Reassemble — plan and validate source run
+        id: rplan
+        if: ${{ inputs.reassemble_from_run != '' || inputs.emit_reassemble }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_INPUT: ${{ inputs.reassemble_from_run }}
+          EMIT_INPUT: ${{ inputs.emit_reassemble }}
+          KONLY_INPUT: ${{ inputs.kernel_only }}
+          ARCH_INPUT: ${{ inputs.arch || 'amd64' }}
+          KERNCONF_INPUT: ${{ inputs.kernconf || 'SMOLFIRE-VM' }}
+        run: |
+          set -e
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          TRIPLE="x86_64-unknown-linux-musl"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/nu-${NU_VERSION}-${TRIPLE}.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" --strip-components=1 "nu-${NU_VERSION}-${TRIPLE}/nu"
+          export PATH="$HOME/.local/bin:$PATH"
+          nu --version
+          ARGS=(--reassemble-from-run "$RUN_INPUT" --arch "$ARCH_INPUT" --kernconf "$KERNCONF_INPUT")
+          [ "$EMIT_INPUT" = "true" ] && ARGS+=(--emit)
+          [ "$KONLY_INPUT" = "true" ] && ARGS+=(--kernel-only)
+          nu bin/reassemble-plan.nu plan "${ARGS[@]}" | tee plan.out
+          cat plan.out >> "$GITHUB_OUTPUT"
+          if [ -n "$RUN_INPUT" ]; then
+            gh run view "$RUN_INPUT" --repo "$GITHUB_REPOSITORY" \
+              --json status,conclusion,workflowName,databaseId > source-run.json
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_INPUT/artifacts?per_page=100" > source-artifacts.json
+            nu bin/reassemble-plan.nu validate-source --run source-run.json --artifacts source-artifacts.json \
+              --arch "$ARCH_INPUT" --kernconf "$KERNCONF_INPUT" --this-run "$GITHUB_RUN_ID" | tee validate.out
+            # artifact_id (exact id of the artifact that was validated) feeds the download step
+            cat validate.out >> "$GITHUB_OUTPUT"
+            {
+              echo "### reassemble from run $RUN_INPUT"
+              sed 's/^/    /' validate.out
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Preflight — KVM, disk, packages
         run: |
           set -e
@@ -120,6 +170,18 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils expect xz-utils genisoimage openssh-client
+
+      - name: Reassemble — download source run products
+        if: ${{ inputs.reassemble_from_run != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          # exact id of the artifact validate-source checked (size/expiry), not "by name"
+          artifact-ids: ${{ steps.rplan.outputs.artifact_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.reassemble_from_run }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: ${{ env.WORK }}/reassemble
 
       - name: Fetch FreeBSD 15.0 base image
         run: |
@@ -206,6 +268,30 @@ jobs:
                   cp /root/smolfire/sys/$d/conf/SMOLFIRE* /usr/src/sys/$d/conf/ 2>/dev/null || true
                 done; ls /usr/src/sys/*/conf/SMOLFIRE*'
 
+      - name: Reassemble — ship products into the VM
+        if: ${{ inputs.reassemble_from_run != '' }}
+        run: |
+          set -e
+          cd "$WORK"
+          ls -l reassemble/
+          SSH="ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+               -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@127.0.0.1"
+          $SSH 'mkdir -p /var/tmp/reassemble'
+          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -P "$SSH_PORT" reassemble/manifest.json reassemble/reassemble-products.tar \
+              root@127.0.0.1:/var/tmp/reassemble/
+          # FATAL: /usr/src must be exactly the commit the packages were built
+          # from (unpack re-checks it against the manifest and refuses on any
+          # mismatch). A failed pin means a full build is required.
+          SRC_COMMIT=$(grep -o '"src_commit": *"[0-9a-f]*"' reassemble/manifest.json | grep -o '[0-9a-f]\{7,40\}' || true)
+          if [ -z "$SRC_COMMIT" ]; then
+            echo "::error::manifest carries no src_commit; a full build is required"; exit 1
+          fi
+          $SSH "cd /usr/src && git fetch --depth 1 origin $SRC_COMMIT && git checkout -q FETCH_HEAD" \
+            && echo "src pinned to $SRC_COMMIT" \
+            || { echo "::error::could not pin /usr/src to $SRC_COMMIT; a full build is required"; exit 1; }
+          # The checkout above must not clobber the smolfire kernconfs (untracked, kept).
+
       - name: Build kernel only (kernel-toolchain + buildkernel) inside VM
         if: ${{ inputs.kernel_only }}
         env:
@@ -263,6 +349,7 @@ jobs:
         env:
           VMSIZE_INPUT: ${{ inputs.vmsize || '2g' }}
           KERNCONF_INPUT: ${{ inputs.kernconf || 'SMOLFIRE-VM' }}
+          REASSEMBLE_FLAGS: ${{ steps.rplan.outputs.build_flags }}   # empty unless reassemble_from_run is set
         run: |
           set -e
           cd "$WORK"
@@ -274,7 +361,7 @@ jobs:
           BUILD_RC=0
           $SSH "cd /root/smolfire && nu bin/build-smolfire-vm.nu \
                   --arch '${{ inputs.arch || 'amd64' }}' --vmsize '$VMSIZE_INPUT' \
-                  --kernconf '$KERNCONF_INPUT'" \
+                  --kernconf '$KERNCONF_INPUT'${REASSEMBLE_FLAGS:+ $REASSEMBLE_FLAGS}" \
             2>&1 | tee build.log || BUILD_RC=$?
           # Locate the artifact (FIX-9: cloudware-release writes
           # <objdir>/usr/src/release/smolfire.ufs.qcow2)
@@ -297,6 +384,27 @@ jobs:
               -P "$SSH_PORT" "root@127.0.0.1:$ART" \
               "$WORK/smolfire-${{ inputs.arch || 'amd64' }}.qcow2"
           ls -lh "$WORK/smolfire-${{ inputs.arch || 'amd64' }}.qcow2"
+
+      - name: Reassemble — pack reusable products (emit_reassemble)
+        id: rpack
+        if: ${{ inputs.emit_reassemble && !inputs.kernel_only }}
+        continue-on-error: true   # optional product: never fail the image build over it
+        run: |
+          set -e
+          cd "$WORK"
+          SSH="ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+               -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@127.0.0.1"
+          $SSH "cd /root/smolfire && nu bin/reassemble-plan.nu pack --arch '${{ inputs.arch || 'amd64' }}' \
+                  --kernconf '${{ inputs.kernconf || 'SMOLFIRE-VM' }}' --out-dir /var/tmp/reassemble-out \
+                  --src-commit \$(git -C /usr/src rev-parse HEAD) --smolfire-sha '$GITHUB_SHA'" | tee pack.out
+          mkdir -p reassemble-out
+          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -P "$SSH_PORT" "root@127.0.0.1:/var/tmp/reassemble-out/*" reassemble-out/
+          ls -l reassemble-out
+          {
+            echo "### reassemble products (measured)"
+            sed 's/^/    /' pack.out
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compress qcow2 (in place)
         if: ${{ !inputs.kernel_only }}
@@ -384,6 +492,18 @@ jobs:
             /mnt/smolfire-ci/build.log
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log
+
+      - name: Reassemble — upload reusable products
+        if: ${{ inputs.emit_reassemble && !inputs.kernel_only && steps.rpack.outcome == 'success' && success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.rplan.outputs.artifact_name }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0   # *.pkg are already compressed
+          path: |
+            /mnt/smolfire-ci/reassemble-out/reassemble-products.tar
+            /mnt/smolfire-ci/reassemble-out/manifest.json
 
       - name: Teardown VM
         if: always()

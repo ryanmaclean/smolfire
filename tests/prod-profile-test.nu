@@ -66,7 +66,7 @@ def run-hook [conf: string, extra: record] {
         PATH: ($env.PATH | prepend $fx.bin)
     } | merge $extra)
     let r = (with-env $env_rec {
-        ^bash -c $". ($conf); vm_extra_pre_umount" | complete
+        "" | ^bash -c $". ($conf); vm_extra_pre_umount" | complete
     })
     let sshd = ($fx.dest | path join "etc/ssh/sshd_config")
     let akp = ($fx.dest | path join "root/.ssh/authorized_keys")
@@ -106,7 +106,7 @@ def main [] {
             DESTDIR: $fx.dest, STUBLOG: $fx.log, PATH: ($env.PATH | prepend $fx.bin)
             SMOLFIRE_PROFILE: "prod", SMOLFIRE_AUTHORIZED_KEYS: $fx.keys
         }
-        let r = (with-env $env_rec { ^bash -c $". ($conf); vm_extra_pre_umount" | complete })
+        let r = (with-env $env_rec { "" | ^bash -c $". ($conf); vm_extra_pre_umount" | complete })
         let sshd = (open --raw ($fx.dest | path join "etc/ssh/sshd_config"))
         for must in ["PermitRootLogin prohibit-password" "PasswordAuthentication no" "KbdInteractiveAuthentication no"] {
             if not ($sshd | str contains $must) { fail $"($name): prod sshd_config missing '($must)'" }
@@ -144,7 +144,7 @@ def main [] {
         ] {
             let fx2 = (fixture)
             let e = ({DESTDIR: $fx2.dest, STUBLOG: $fx2.log, PATH: ($env.PATH | prepend $fx2.bin)} | merge $bad)
-            let r2 = (with-env $e { ^bash -c $". ($conf); vm_extra_pre_umount" | complete })
+            let r2 = (with-env $e { "" | ^bash -c $". ($conf); vm_extra_pre_umount" | complete })
             if $r2.exit_code == 0 { fail $"($name): ($bad | to nuon) should fail closed" }
             let s2 = ($fx2.dest | path join "etc/ssh/sshd_config")
             if (open --raw $s2) != $stock_sshd and ((open --raw $s2) | str contains "PermitRootLogin yes") {

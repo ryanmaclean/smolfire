@@ -15,6 +15,10 @@
 # SHARED-TRIM stage is covered by ci.yml conf-hook-test and is not asserted here.
 # Run from the repo root: nu tests/prod-profile-test.nu
 
+const stock_sshd = "# stock\n#PermitRootLogin no\n#PasswordAuthentication yes\n#KbdInteractiveAuthentication yes\nPasswordAuthentication yes\nSubsystem sftp /usr/libexec/sftp-server\nMatch User nobody\n    PasswordAuthentication yes\n"
+
+use ../bin/build-smolfire-vm.nu [check_prod_rootfs purge_stale_images profile_env effective_sshd]
+
 def fail [msg: string] {
     print $"prod-profile-test: FAIL — ($msg)"
     exit 1
@@ -31,6 +35,11 @@ def fixture [] {
         mkdir ($dest | path join $d)
     }
     mkdir $bin
+    # Stock-like sshd_config: commented defaults plus an UNcommented hostile
+    # PasswordAuthentication yes (and one inside a Match block), to prove prod
+    # wins by being FIRST (sshd is first-value-wins), not by the stock file
+    # happening to be all comments.
+    $stock_sshd | save -f ($dest | path join "etc/ssh/sshd_config")
     let stubs = {
         pw: "printf '%s\\n' \"$*\" >> \"$STUBLOG\"; cat >> \"$STUBLOG\" 2>/dev/null || true",
         chown: "printf 'chown %s\\n' \"$*\" >> \"$STUBLOG\"",
@@ -102,9 +111,22 @@ def main [] {
         for must in ["PermitRootLogin prohibit-password" "PasswordAuthentication no" "KbdInteractiveAuthentication no"] {
             if not ($sshd | str contains $must) { fail $"($name): prod sshd_config missing '($must)'" }
         }
-        for mustnt in ["PermitRootLogin yes" "PasswordAuthentication yes"] {
-            if ($sshd | str contains $mustnt) { fail $"($name): prod sshd_config contains '($mustnt)'" }
-        }
+        # sshd is first-value-wins: assert the EFFECTIVE values, with a hostile
+        # uncommented stock line and a Match block present in the fixture.
+        let eff = (effective_sshd $sshd)
+        if $eff.passwordauthentication != "no" { fail $"($name): effective PasswordAuthentication is ($eff.passwordauthentication) with hostile stock line" }
+        if $eff.permitrootlogin != "prohibit-password" { fail $"($name): effective PermitRootLogin is ($eff.permitrootlogin)" }
+        if not ($sshd | str contains "Subsystem sftp") { fail $"($name): prod dropped the stock sshd_config content" }
+        let marker = (open --raw ($fx.dest | path join "etc/smolfire-profile") | str trim)
+        if $marker != "prod" { fail $"($name): prod marker is '($marker)'" }
+        # simulate what the real `pw -h -` does to master.passwd, then the
+        # post-build verifier must accept the staged rootfs
+        "root:*:0:0::0:0:Charlie &:/root:/bin/sh\n" | save -f ($fx.dest | path join "etc/master.passwd")
+        let probs = (check_prod_rootfs $fx.dest)
+        if ($probs | length) > 0 { fail $"($name): check_prod_rootfs rejected a good prod rootfs: ($probs | str join '; ')" }
+        # ...and must reject it when root is not locked (rc-ignored/failed pw)
+        "root:$6$abc$def:0:0::0:0:Charlie &:/root:/bin/sh\n" | save -f ($fx.dest | path join "etc/master.passwd")
+        if (check_prod_rootfs $fx.dest | is-empty) { fail $"($name): check_prod_rootfs accepted an unlocked root" }
         let log = (open --raw $fx.log)
         if not ($log | str contains "usermod root -h -") { fail $"($name): prod must lock root password via -h -" }
         if ($log | str contains "smolfire") { fail $"($name): prod must not feed the dev password to pw" }
@@ -125,12 +147,54 @@ def main [] {
             let r2 = (with-env $e { ^bash -c $". ($conf); vm_extra_pre_umount" | complete })
             if $r2.exit_code == 0 { fail $"($name): ($bad | to nuon) should fail closed" }
             let s2 = ($fx2.dest | path join "etc/ssh/sshd_config")
-            if ($s2 | path exists) and ((open --raw $s2) | str contains "PasswordAuthentication yes") {
+            if (open --raw $s2) != $stock_sshd and ((open --raw $s2) | str contains "PermitRootLogin yes") {
                 fail $"($name): ($bad | to nuon) left a permissive sshd_config"
             }
+            # Fail closed WITHOUT relying on the caller honouring the return
+            # code: no marker is written, so the image verifier rejects it.
+            if ($fx2.dest | path join "etc/smolfire-profile" | path exists) { fail $"($name): ($bad | to nuon) wrote a profile marker despite failing" }
+            if (check_prod_rootfs $fx2.dest | is-empty) { fail $"($name): ($bad | to nuon) rootfs passed check_prod_rootfs although the hook failed" }
         }
         ok $"($name): prod without keys / unknown profile fails closed"
     }
+
+    # --- dev writes marker "dev"; check_prod_rootfs rejects a dev rootfs
+    let dv = (fixture)
+    with-env {DESTDIR: $dv.dest, STUBLOG: $dv.log, PATH: ($env.PATH | prepend $dv.bin)} {
+        ^bash -c ". release/tools/smolfire-qemu.conf; vm_extra_pre_umount" | complete | ignore
+    }
+    if (open --raw ($dv.dest | path join "etc/smolfire-profile") | str trim) != "dev" { fail "dev marker not 'dev'" }
+    if (check_prod_rootfs $dv.dest | is-empty) { fail "check_prod_rootfs accepted a dev rootfs as prod" }
+    ok "dev marker + stale-dev-image rootfs rejected by the prod verifier"
+
+    # --- the SHARED-TRIM region must stay byte-identical across the confs
+    let region = {|f| open --raw $f | lines | skip until {|l| $l | str contains ">>> SHARED-TRIM >>>" } | take until {|l| $l | str contains "<<< SHARED-TRIM <<<" } | str join "\n" }
+    let base = (do $region release/tools/smolfire-qemu.conf)
+    for c in ["release/tools/smolfire-qemu-aarch64.conf"] {
+        if (do $region $c) != $base { fail $"SHARED-TRIM differs in ($c)" }
+    }
+    ok "SHARED-TRIM byte-identical"
+
+    # --- stale images are purged so a failed build cannot deliver an older one
+    let od = (mktemp -d)
+    mkdir ($od | path join "usr/src/release")
+    "old dev image" | save -f ($od | path join "usr/src/release/smolfire.ufs.qcow2")
+    "keep" | save -f ($od | path join "usr/src/release/notes.txt")
+    let gone = (purge_stale_images $od)
+    if ($gone | length) != 1 or (glob $"($od)/**/*.qcow2" | length) != 0 { fail "purge_stale_images left a qcow2 behind" }
+    if not ($od | path join "usr/src/release/notes.txt" | path exists) { fail "purge_stale_images removed a non-qcow2" }
+    ok "purge_stale_images removes every qcow2 and nothing else"
+
+    # --- env export of profile vars
+    let pe = (profile_env ["SMOLFIRE_PROFILE=prod" "SMOLFIRE_AUTHORIZED_KEYS=/a=b/k.pub"])
+    if $pe.SMOLFIRE_PROFILE != "prod" or $pe.SMOLFIRE_AUTHORIZED_KEYS != "/a=b/k.pub" { fail $"profile_env -> ($pe | to nuon)" }
+
+    # --- the script still parses with the verify-image subcommand
+    let h = (^nu bin/build-smolfire-vm.nu verify-image --help | complete)
+    if $h.exit_code != 0 { fail "build-smolfire-vm.nu verify-image --help failed" }
+    let h2 = (^nu bin/build-smolfire-vm.nu --help | complete)
+    if $h2.exit_code != 0 or not ($h2.stdout | str contains "--profile") { fail "build-smolfire-vm.nu --help broken" }
+    ok "verify-image subcommand wired"
 
     # --- build script plumbing
     let b = (nu -c "use bin/build-smolfire-vm.nu profile_make_args; profile_make_args dev '' | to nuon" | str trim)

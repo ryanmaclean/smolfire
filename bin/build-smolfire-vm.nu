@@ -148,6 +148,14 @@ export def main [
     # STAGE 4: make cloudware-release
     # =========================================================================
     if not $skip_release {
+        # A failed build must never be able to hand back an OLDER image
+        # (e.g. a dev image with the public root password after a failed prod
+        # build): remove every stale qcow2 before make runs, so any qcow2 that
+        # exists afterwards was produced by THIS build.
+        let purged = (purge_stale_images $obj)
+        if ($purged | length) > 0 {
+            print $"  Removed ($purged | length) stale qcow2 from ($obj) before the build"
+        }
         build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target $profile_args
     } else {
         print "[skip] cloudware-release (--skip-release)"
@@ -172,7 +180,13 @@ export def main [
             ^sh -c $"ls -la ($obj)/usr/src/*/release/ ($obj)/*/usr/src/release/ 2>/dev/null || true"
             error make {msg: $"cloudware-release produced no qcow2 under ($obj) — see log tail above."}
         }
-        print_summary $arch_target $kernconf $qcow2 $elapsed_secs
+        # prod fails closed HERE, independent of whether make / mk-vmimage.sh
+        # honoured vm_extra_pre_umount's return code: inspect the produced image.
+        if $profile == "prod" {
+            verify_image_rootfs $qcow2 "prod"
+            print "  prod image verified: marker, key-only sshd, locked root, authorized_keys."
+        }
+        print_summary $arch_target $kernconf $qcow2 $elapsed_secs $profile
     } else {
         let elapsed_fmt = format_elapsed $elapsed_secs
         print $"Build stages complete — elapsed: ($elapsed_fmt)"
@@ -573,7 +587,13 @@ def build_vm_image [
     print $"  Command: ($cmd_args | str join ' ')"
     print $"  Release conf: ($release_conf)"
 
-    run_logged $cmd_args $log "cloudware-release"
+    # Export the profile variables into the environment too (not only as make
+    # command-line vars) so the conf hook sees them regardless of how make
+    # propagates command-line variables to the release scripts.
+    let env_rec = (profile_env $profile_args)
+    with-env $env_rec {
+        run_logged $cmd_args $log "cloudware-release"
+    }
     print "  cloudware-release complete."
     print ""
 }
@@ -635,6 +655,129 @@ def run_or_fail [label: string cmd_args: list<string> _log: string] {
     }
 }
 
+# "K=V" make args -> env record
+export def profile_env [args: list<string>] {
+    $args | reduce -f {} {|a, acc|
+        let kv = ($a | split row -n 2 '=')
+        $acc | merge {($kv | get 0): ($kv | get 1)}
+    }
+}
+
+# Delete every *.qcow2 under the objdir; returns the removed paths.
+export def purge_stale_images [obj: string] {
+    if not ($obj | path exists) { return [] }
+    let found = (do { ^find $obj -name '*.qcow2' -type f } | complete | get stdout
+        | lines | where { |l| ($l | str trim) != "" })
+    for f in $found { rm -f $f }
+    $found
+}
+
+# sshd keyword -> FIRST value outside Match blocks (sshd keeps the first
+# value it sees; keywords are case-insensitive). Comments/blank lines ignored.
+export def effective_sshd [text: string] {
+    mut out = {}
+    for raw in ($text | lines) {
+        let l = ($raw | str trim)
+        if $l == "" or ($l | str starts-with "#") { continue }
+        let parts = ($l | split row -r '\s+')
+        let kw = ($parts | first | str lowercase)
+        if $kw == "match" { break }
+        if ($parts | length) < 2 { continue }
+        if not ($out | columns | any {|c| $c == $kw }) {
+            $out = ($out | insert $kw ($parts | get 1 | str lowercase))
+        }
+    }
+    $out
+}
+
+# Pure check of a mounted/staged prod rootfs; returns a list of problems
+# (empty == good). Needs no FreeBSD, so tests run it on a fixture dir.
+export def check_prod_rootfs [root: string] {
+    mut bad = []
+    let marker = ($root | path join "etc/smolfire-profile")
+    if not ($marker | path exists) {
+        $bad = ($bad | append "etc/smolfire-profile marker missing (prod hook did not complete)")
+    } else {
+        let m = (open --raw $marker | str trim)
+        if $m != "prod" { $bad = ($bad | append $"etc/smolfire-profile is '($m)', expected 'prod'") }
+    }
+    let sshd = ($root | path join "etc/ssh/sshd_config")
+    if not ($sshd | path exists) {
+        $bad = ($bad | append "etc/ssh/sshd_config missing")
+    } else {
+        let e = (effective_sshd (open --raw $sshd))
+        for want in [
+            {k: "passwordauthentication", v: "no"}
+            {k: "permitrootlogin", v: "prohibit-password"}
+            {k: "kbdinteractiveauthentication", v: "no"}
+            {k: "permitemptypasswords", v: "no"}
+        ] {
+            let got = ($e | get -o $want.k | default "<unset>")
+            if $got != $want.v { $bad = ($bad | append $"sshd effective ($want.k) = ($got), expected ($want.v)") }
+        }
+    }
+    let mp = ($root | path join "etc/master.passwd")
+    if not ($mp | path exists) {
+        $bad = ($bad | append "etc/master.passwd missing")
+    } else {
+        let rootline = (open --raw $mp | lines | where {|l| $l | str starts-with "root:" } | get -o 0)
+        if $rootline == null {
+            $bad = ($bad | append "no root entry in master.passwd")
+        } else {
+            let hash = ($rootline | split row ':' | get -o 1 | default "")
+            if not ($hash | str starts-with "*") {
+                $bad = ($bad | append "root password is not locked (master.passwd root hash does not start with '*')")
+            }
+        }
+    }
+    let ak = ($root | path join "root/.ssh/authorized_keys")
+    if not ($ak | path exists) {
+        $bad = ($bad | append "root/.ssh/authorized_keys missing")
+    } else if (open --raw $ak | lines | where {|l| $l =~ '^(ssh-|ecdsa-|sk-)' } | is-empty) {
+        $bad = ($bad | append "root/.ssh/authorized_keys has no public key")
+    }
+    $bad
+}
+
+# Mount the produced qcow2 read-only (FreeBSD + root: qemu-img, mdconfig,
+# gpart) and run check_prod_rootfs; errors (the build FAILS) on any problem.
+export def verify_image_rootfs [qcow2: string, profile: string] {
+    if $profile != "prod" { return }
+    let work = (^mktemp -d /var/tmp/smolfire-verify.XXXXXX | str trim)
+    let raw = ($work | path join "img.raw")
+    let mnt = ($work | path join "mnt")
+    mkdir $mnt
+    let conv = (^qemu-img convert -O raw $qcow2 $raw | complete)
+    if $conv.exit_code != 0 { rm -rf $work; error make {msg: $"verify-image: qemu-img convert failed: ($conv.stderr)"} }
+    let md = (^mdconfig -a -t vnode -f $raw | complete)
+    if $md.exit_code != 0 { rm -rf $work; error make {msg: $"verify-image: mdconfig failed: ($md.stderr)"} }
+    let mdname = ($md.stdout | str trim)
+    let res = (try {
+        let parts = (^gpart show -p $mdname | lines | where {|l| $l =~ 'freebsd-ufs' }
+            | each {|l| $l | split row -r '\s+' | where {|x| $x != "" } | get 2 })
+        if ($parts | is-empty) { error make {msg: "no freebsd-ufs partition found in image"} }
+        let m = (^mount -o ro $"/dev/($parts | first)" $mnt | complete)
+        if $m.exit_code != 0 { error make {msg: $"mount failed: ($m.stderr)"} }
+        let problems = (check_prod_rootfs $mnt)
+        ^umount $mnt | complete | ignore
+        {problems: $problems}
+    } catch {|e|
+        ^umount $mnt | complete | ignore
+        {problems: [$"verify-image could not inspect the image: ($e.msg)"]}
+    })
+    ^mdconfig -d -u $mdname | complete | ignore
+    rm -rf $work
+    if ($res.problems | length) > 0 {
+        error make {msg: $"prod image FAILED verification ($qcow2): ($res.problems | str join '; ')"}
+    }
+}
+
+# Standalone check: sudo nu bin/build-smolfire-vm.nu verify-image <qcow2> [--profile prod]
+export def "main verify-image" [qcow2: string, --profile: string = "prod"] {
+    verify_image_rootfs $qcow2 $profile
+    print $"verify-image: ($qcow2) OK for profile ($profile)"
+}
+
 # Find the built qcow2 image
 def find_qcow2 [obj: string arch_freebsd: string arch_target: string] {
     # Standard FreeBSD release output paths.
@@ -678,7 +821,7 @@ def format_elapsed [secs: int] {
     }
 }
 
-def print_summary [arch: string kernconf: string qcow2: string elapsed_secs: int] {
+def print_summary [arch: string kernconf: string qcow2: string elapsed_secs: int profile: string] {
     let elapsed = (format_elapsed $elapsed_secs)
     let size_str = if ($qcow2 | path exists) {
         let sz = (ls $qcow2 | get size | first)
@@ -699,6 +842,7 @@ def print_summary [arch: string kernconf: string qcow2: string elapsed_secs: int
     print "╠══════════════════════════════════════════╣"
     print $"║  arch:    ($arch | fill -w 32)║"
     print $"║  kernel:  ($kernconf | fill -w 32)║"
+    print $"║  profile: ($profile | fill -w 32)║"
     print $"║  qcow2:   ($qcow2_name | str substring 0..32 | fill -w 32)║"
     print $"║  size:    ($size_str | fill -w 32)║"
     print $"║  sha256:  ($sha_str | fill -w 32)║"

@@ -132,8 +132,21 @@ key file, or with an unknown profile name.
 ```sh
 sudo nu bin/build-smolfire-vm.nu --profile prod --authorized-keys ~/.ssh/id_ed25519.pub
 # direct make: add  SMOLFIRE_PROFILE=prod SMOLFIRE_AUTHORIZED_KEYS=/abs/path/keys.pub
-# to the cloudware-release invocation (absolute path; make exports it to the conf)
+# to the cloudware-release invocation (absolute path). Whether make hands
+# command-line variables to the conf hook is only proven by the first CI prod
+# build; the script also exports them in the environment.
 ```
+
+**Fail-closed does not depend on the hook's return code.** The conf hook writes
+`/etc/smolfire-profile` (`dev`/`prod`) only after every profile step succeeded,
+and prepends the prod sshd directives (sshd is first-value-wins). The script
+(a) deletes every stale `*.qcow2` in the objdir before stage 4, so a failed
+build can never deliver an older image, and (b) after the build mounts the
+produced image read-only and runs `check_prod_rootfs` (marker == `prod`,
+effective sshd values, root hash locked, `authorized_keys` present); any
+failure aborts the build. A direct `make SMOLFIRE_PROFILE=prod ...` bypasses
+(a)/(b), so check such an image with
+`sudo nu bin/build-smolfire-vm.nu verify-image <image.qcow2>`.
 
 The profile is baked into the image: there is no run-time switch. Images built
 without the flag are `dev`, so the CI gates that log in with the password keep

@@ -215,19 +215,30 @@ Safety (all in `bin/reassemble-plan.nu`, tested by
 `tests/reassemble-plan-test.nu`):
 
 - the workflow validates the source run is completed, `success`, of this
-  workflow, still has an unexpired artifact for the same arch+kernconf, and is
-  not the current run;
-- `unpack` refuses (=> run a full build) if the manifest's arch/kernconf differ,
-  if `/etc/src.conf` (world knobs) or the kernconf (+ same-dir `include`s)
-  hash differently, if the tar is truncated/corrupt, or `/usr/obj` is not fresh;
+  workflow, not the current run, and selects the artifact by exact id: the
+  name must match exactly one live (unexpired) artifact of that run (several
+  => refused as ambiguous); the validated id is what gets downloaded;
+- the manifest pins arch, kernconf, the kernconf (+ same-dir `include`s) hash,
+  `/etc/src.conf`, the `/usr/src` commit (the workflow pins it and a failed pin
+  is fatal; `unpack` re-checks `git rev-parse HEAD`), a hash of the smolfire
+  overlay (`sys/*/conf/SMOLFIRE*` and `release/tools/**` EXCLUDING
+  `smolfire-*.conf`, the image-only confs this mode exists for) and the
+  package-affecting make variables (everything except `SMOLFIRECONF`,
+  `VMSIZE`, `SWAPSIZE`). `unpack` / `check-make-vars` refuse on any mismatch
+  or missing pin (=> run a full build). An overlay change needs a full build;
+  a truncated/corrupt tar or a non-fresh `/usr/obj` is refused too;
+- the tar sha256 is self-attesting (same artifact): it detects truncation and
+  corruption in transfer, not a tampered artifact;
 - before the real run, `build-smolfire-vm.nu --reassemble-from` does
-  `make -n cloudware-release` and aborts if the dry run contains a
-  `packages`/`buildworld`/`installworld` step, so a make up-to-date surprise
-  fails in seconds instead of silently rebuilding.
+  `make -n cloudware-release` and the guard FAILS CLOSED: a nonzero `make -n`
+  exit, empty/too-short output, make error text, a `packages`/`buildworld`/
+  `installworld` step, or the absence of the image-assembly step all abort;
+- the local mtime test only proves ordering on Linux; BSD make's up-to-date
+  semantics are proven by CI run 2 (the dry-run guard).
 
 Not for: kernel/src.conf/world changes, or a new releng/15.0 tip you want in the
-image (the run pins `/usr/src` to the source commit when the server allows a
-shallow fetch of that sha, else warns and uses the branch tip).
+image (the run must pin `/usr/src` to the source commit; if the server refuses the
+shallow fetch of that sha the run fails and a full build is required).
 
 Manual equivalent inside a VM that already holds `manifest.json` and
 `reassemble-products.tar` in `DIR`:

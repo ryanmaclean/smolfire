@@ -165,7 +165,7 @@ export def main [
     # STAGE 4: make cloudware-release
     # =========================================================================
     if not $skip_release {
-        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target $reassemble
+        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target $reassemble_from
     } else {
         print "[skip] cloudware-release (--skip-release)"
     }
@@ -512,9 +512,10 @@ def build_vm_image [
     release_conf: string
     arch_freebsd: string
     arch_target: string
-    reassemble: bool = false
+    reassemble_from: string = ""
 ] {
     print "==> Stage 4: make cloudware-release"
+    let reassemble = ($reassemble_from != "")
 
     # FIX-2: verify still root
     let euid = (^id -u | str trim | into int)
@@ -561,15 +562,24 @@ def build_vm_image [
     print $"  Command: ($cmd_args | str join ' ')"
     print $"  Release conf: ($release_conf)"
 
-    # REASSEMBLE guard: a dry run must show pure image assembly. If make would
-    # re-run `make packages` (pkgbase-repo not seen as up to date), abort now
-    # instead of silently rebuilding world inside a "5 minute" job.
+    # Record the make variables of this build (the emit side of reassemble mode
+    # reads them in `reassemble-plan.nu pack`; harmless otherwise).
+    let vars_file = "/var/tmp/smolfire-pkg-make-vars.json"
+    $make_args | to json | save -f $vars_file
+
+    # REASSEMBLE guards (all fail closed).
     if $reassemble {
+        let rp = ($env.FILE_PWD | path join "reassemble-plan.nu")
+        # 1. package-affecting make variables must equal the source run's.
+        ^nu $rp check-make-vars --from-dir $reassemble_from --vars-file $vars_file
+        # 2. a dry run must show pure image assembly. If make would re-run
+        # `make packages` (pkgbase-repo not seen as up to date), or the dry run
+        # failed / printed nothing, abort now instead of silently rebuilding
+        # world inside a "5 minute" job. stderr is kept in the file too.
         let dry_out = $"($log).dryrun"
         let dry = (do { ^make "-n" ...($cmd_args | skip 1) } | complete)
-        $dry.stdout | save -f $dry_out
-        let rp = ($env.FILE_PWD | path join "reassemble-plan.nu")
-        ^nu $rp check-dryrun $dry_out
+        $"($dry.stdout)\n($dry.stderr)\n" | save -f $dry_out
+        ^nu $rp check-dryrun $dry_out --exit-code $dry.exit_code
     }
 
     run_logged $cmd_args $log "cloudware-release"

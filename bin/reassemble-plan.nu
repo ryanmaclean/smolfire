@@ -120,6 +120,7 @@ export def validate-source [
     --arch: string
     --kernconf: string
     --this-run: string = ""
+    --artifact-id: string = ""
     --max-bytes: int = 2147483648
 ]: nothing -> record {
     let a = (arch-info $arch)
@@ -138,20 +139,36 @@ export def validate-source [
         error make {msg: $"reassemble: source run ($rid) belongs to workflow '($run.workflowName? | default '?')', expected '($SOURCE_WORKFLOW)'"}
     }
     let want = (artifact-name $a.arch $kernconf)
-    let hits = ($artifacts.artifacts? | default [] | where name == $want)
+    let all = ($artifacts.artifacts? | default [])
+    # Exact selection: name AND (when the API reports it) the source run id.
+    let hits = ($all | where name == $want | where {|x|
+        let wr = ($x.workflow_run?.id? | default null)
+        $wr == null or ($wr | into string) == $rid
+    })
     if ($hits | is-empty) {
-        let have = ($artifacts.artifacts? | default [] | get name | str join ", ")
+        let have = ($all | get name | str join ", ")
         error make {msg: $"reassemble: source run ($rid) has no artifact '($want)' [have: ($have)]. It was built for another arch/kernconf, or without emit_reassemble."}
     }
-    let art = ($hits | first)
-    if ($art.expired? | default false) {
+    let live = ($hits | where {|x| not ($x.expired? | default false) })
+    if ($live | is-empty) {
         error make {msg: $"reassemble: artifact '($want)' of run ($rid) has expired — run a full build with emit_reassemble"}
+    }
+    if ($live | length) > 1 {
+        let ids = ($live | each {|x| $x.id? | default "?" | into string } | str join ", ")
+        error make {msg: $"reassemble: ambiguous — run ($rid) holds ($live | length) live artifacts named '($want)' [ids: ($ids)]; refusing to guess. Pass --artifact-id."}
+    }
+    let art = ($live | first)
+    if $artifact_id != "" and (($art.id? | default "" | into string) != $artifact_id) {
+        error make {msg: $"reassemble: artifact id ($art.id? | default '?') of '($want)' does not match the pinned --artifact-id ($artifact_id)"}
+    }
+    if ($art.id? | default null) == null {
+        error make {msg: $"reassemble: artifact '($want)' has no id in the API response — cannot download it by exact id"}
     }
     let sz = ($art.size_in_bytes? | default 0)
     if $sz > $max_bytes {
         error make {msg: $"reassemble: artifact '($want)' is ($sz) bytes, over the ($max_bytes) cap"}
     }
-    { run_id: $rid, artifact: $want, artifact_id: ($art.id? | default null), size_in_bytes: $sz }
+    { run_id: $rid, artifact: $want, artifact_id: ($art.id | into string), size_in_bytes: $sz }
 }
 
 # ------------------------------------------------------------- input hashing
@@ -187,6 +204,33 @@ export def kernconf-closure-hash [conf_dir: string, kernconf: string]: nothing -
     $parts | str join "\n" | hash sha256
 }
 
+# Hash of the smolfire overlay that is copied into /usr/src and feeds the
+# packages: every sys/*/conf/SMOLFIRE* plus release/tools/**, EXCLUDING the
+# smolfire-*.conf release confs (those only drive image assembly - the whole
+# point of reassemble mode is that they may change). Paths are hashed
+# relative to the repo root so the value is checkout-location independent.
+export def overlay-hash [repo: string]: nothing -> string {
+    let kc = (glob $"($repo)/sys/*/conf/SMOLFIRE*" | where {|f| ($f | path type) == "file" })
+    let rt = (glob $"($repo)/release/tools/**/*" | where {|f|
+        let n = ($f | path basename)
+        (($f | path type) == "file") and not (($n | str starts-with "smolfire-") and ($n | str ends-with ".conf"))
+    })
+    let parts = ($kc ++ $rt | each {|f|
+        let rel = ($f | path relative-to $repo)
+        $"($rel)=(sha256-file $f)"
+    } | sort)
+    $parts | str join "\n" | hash sha256
+}
+
+# The make variables that can change the *packages*. SMOLFIRECONF, VMSIZE and
+# SWAPSIZE only steer image assembly and are deliberately NOT pinned (they are
+# what a reassemble run is allowed to change). Sorted for a stable comparison.
+export def pkg-make-vars [make_args: list<string>]: nothing -> list<string> {
+    $make_args
+    | where {|a| not (($a | str starts-with "SMOLFIRECONF=") or ($a | str starts-with "VMSIZE=") or ($a | str starts-with "SWAPSIZE=")) }
+    | sort
+}
+
 def release-objtop [obj: string, arch: string]: nothing -> record {
     let a = (arch-info $arch)
     let rel = $"usr/src/($a.freebsd).($a.march)"
@@ -205,10 +249,24 @@ export def pack-products [
     --src-conf: string = "/etc/src.conf"
     --src-commit: string = ""
     --smolfire-sha: string = ""
+    --repo: string = ""
+    --make-vars-file: string = "/var/tmp/smolfire-pkg-make-vars.json"
     --max-bytes: int = 2147483648
 ]: nothing -> record {
     check-kernconf-name $kernconf
     let a = (arch-info $arch)
+    # Fail closed: every pin must be real, or unpack could never verify it.
+    if ($src_commit | parse --regex '^[0-9a-f]{7,40}$' | is-empty) {
+        error make {msg: $"reassemble pack: src commit '($src_commit)' is not a hex sha - cannot pin the source"}
+    }
+    if not ($make_vars_file | path exists) {
+        error make {msg: $"reassemble pack: ($make_vars_file) missing - the build did not record its make variables"}
+    }
+    let make_vars = (pkg-make-vars (open --raw $make_vars_file | from json))
+    if ($make_vars | is-empty) {
+        error make {msg: $"reassemble pack: ($make_vars_file) holds no make variables"}
+    }
+    let repo_root = if $repo == "" { $env.FILE_PWD | path dirname } else { $repo }
     let o = (release-objtop $obj $arch)
     let repo = ($o.top | path join "release" "pkgbase-repo")
     let repodir = ($o.top | path join "release" "pkgbase-repo-dir")
@@ -263,6 +321,8 @@ export def pack-products [
         src_conf_sha256: (sha256-file $src_conf)
         kernconf_sha256: (kernconf-closure-hash ($src | path join "sys" $a.freebsd "conf") $kernconf)
         src_commit: $src_commit
+        overlay_sha256: (overlay-hash $repo_root)
+        make_vars: $make_vars
         smolfire_sha: $smolfire_sha
         created: (date now | format date "%Y-%m-%dT%H:%M:%SZ")
     }
@@ -280,6 +340,8 @@ export def check-inputs [
     --kernconf: string
     --src-conf-sha256: string
     --kernconf-sha256: string
+    --src-commit: string = ""
+    --overlay-sha256: string = ""
 ]: nothing -> list<string> {
     mut p = []
     if ($manifest.schema? | default 0) != $SCHEMA {
@@ -296,6 +358,13 @@ export def check-inputs [
     }
     if ($manifest.kernconf_sha256? | default "") != $kernconf_sha256 {
         $p = ($p | append "kernconf (or an included conf) differs from the source run — a full build is required")
+    }
+    let mc = ($manifest.src_commit? | default "")
+    if $mc == "" or $src_commit == "" or $mc != $src_commit {
+        $p = ($p | append $"/usr/src is at '($src_commit)' but the packages were built from '($mc)' - a full build is required")
+    }
+    if ($manifest.overlay_sha256? | default "") != $overlay_sha256 or $overlay_sha256 == "" {
+        $p = ($p | append "smolfire overlay (sys/*/conf/SMOLFIRE*, release/tools minus smolfire-*.conf) differs from the source run - a full build is required")
     }
     let rel = ($manifest.objtop_rel? | default "")
     if ($rel | parse --regex '^usr/src/[A-Za-z0-9_]+\.[A-Za-z0-9_]+$' | is-empty) {
@@ -316,6 +385,8 @@ export def unpack-products [
     --kernconf: string
     --from-dir: string
     --src-conf: string = "/etc/src.conf"
+    --src-commit: string = ""
+    --repo: string = ""
 ]: nothing -> record {
     check-kernconf-name $kernconf
     let a = (arch-info $arch)
@@ -329,7 +400,9 @@ export def unpack-products [
     }
     let problems = (check-inputs $m --arch $a.arch --kernconf $kernconf
         --src-conf-sha256 (sha256-file $src_conf)
-        --kernconf-sha256 (kernconf-closure-hash ($src | path join "sys" $a.freebsd "conf") $kernconf))
+        --kernconf-sha256 (kernconf-closure-hash ($src | path join "sys" $a.freebsd "conf") $kernconf)
+        --src-commit $src_commit
+        --overlay-sha256 (overlay-hash (if $repo == "" { $env.FILE_PWD | path dirname } else { $repo })))
     if ($problems | is-not-empty) {
         error make {msg: $"reassemble unpack refused:\n  - ($problems | str join "\n  - ")"}
     }
@@ -357,6 +430,24 @@ export def unpack-products [
     { objtop: $top, pkg_count: $m.pkg_count, tar_bytes: $bytes, src_commit: ($m.src_commit? | default "") }
 }
 
+# ---------------------------------------------------------------- make vars
+
+# Compare the make variables of the current build against the manifest's.
+# Returns the problems (empty = ok). Fail closed on a missing manifest field.
+export def check-make-vars [manifest: record, current: list<string>]: nothing -> list<string> {
+    let want = ($manifest.make_vars? | default null)
+    if $want == null or ($want | is-empty) {
+        return ["manifest has no make_vars - a full build is required"]
+    }
+    let cur = (pkg-make-vars $current)
+    if ($want | sort) != $cur {
+        let gone = ($want | where {|x| $x not-in $cur })
+        let new = ($cur | where {|x| $x not-in $want })
+        return [$"package-affecting make variables differ from the source run [was: ($gone | str join ' ') | now: ($new | str join ' ')] - a full build is required"]
+    }
+    []
+}
+
 # ------------------------------------------------------------------- dry-run
 
 # `make -n cloudware-release ...` output must not contain any step that would
@@ -366,10 +457,37 @@ export def dryrun-guard [text: string]: nothing -> list<string> {
     $text | lines | where {|l| $l =~ $pat }
 }
 
+# FAIL CLOSED verdict for a dry run: returns the list of problems (empty = the
+# dry run positively looks like pure image assembly). A nonzero make exit,
+# empty / too-short output, make's own error text, or the absence of the image
+# assembly step all count as problems - never a vacuous pass.
+export def dryrun-verdict [text: string, exit_code: int]: nothing -> list<string> {
+    mut p = []
+    if $exit_code != 0 {
+        $p = ($p | append $"make -n exited ($exit_code)")
+    }
+    let body = ($text | str trim)
+    if ($body | is-empty) {
+        $p = ($p | append "dry run produced no output")
+        return $p
+    }
+    if ($body | lines | length) < 2 {
+        $p = ($p | append "dry run output too short to be a cloudware-release plan")
+    }
+    let errs = ($body | lines | where {|l| $l =~ '(\*\*\* |^make[^:]*: (don.t know how|stopped|.*[Ee]rror|cannot|no rule)|Fatal|not found)' })
+    for l in $errs { $p = ($p | append $"make error text: ($l)") }
+    for l in (dryrun-guard $body) { $p = ($p | append $"would rebuild: ($l)") }
+    # positive marker: the image assembly step must be present
+    if not ($body =~ 'mk-vmimage|cw-[A-Za-z0-9_]+-(ufs|zfs)-') {
+        $p = ($p | append "dry run lacks the image assembly step (mk-vmimage / cw-<type>-<fs>-<fmt> target) - unparseable")
+    }
+    $p
+}
+
 # ------------------------------------------------------------------------- CLI
 
 def main [] {
-    print "usage: reassemble-plan.nu plan|validate-source|pack|unpack|check-dryrun (see header)"
+    print "usage: reassemble-plan.nu plan|validate-source|pack|unpack|check-make-vars|check-dryrun (see header)"
 }
 
 # Emits key=value lines suitable for >> $GITHUB_OUTPUT
@@ -390,10 +508,11 @@ def "main validate-source" [
     --arch: string = "amd64"
     --kernconf: string = "SMOLFIRE-VM"
     --this-run: string = ""
+    --artifact-id: string = ""
     --max-bytes: int = 2147483648
 ] {
     let r = (validate-source (open --raw $run | from json) (open --raw $artifacts | from json)
-        --arch $arch --kernconf $kernconf --this-run $this_run --max-bytes $max_bytes)
+        --arch $arch --kernconf $kernconf --this-run $this_run --artifact-id $artifact_id --max-bytes $max_bytes)
     for kv in ($r | transpose k v) { print $"($kv.k)=($kv.v)" }
 }
 
@@ -406,10 +525,13 @@ def "main pack" [
     --src-conf: string = "/etc/src.conf"
     --src-commit: string = ""
     --smolfire-sha: string = ""
+    --repo: string = ""
+    --make-vars-file: string = "/var/tmp/smolfire-pkg-make-vars.json"
     --max-bytes: int = 2147483648
 ] {
     let m = (pack-products --obj $obj --src $src --arch $arch --kernconf $kernconf --out-dir $out_dir
-        --src-conf $src_conf --src-commit $src_commit --smolfire-sha $smolfire_sha --max-bytes $max_bytes)
+        --src-conf $src_conf --src-commit $src_commit --smolfire-sha $smolfire_sha
+        --repo $repo --make-vars-file $make_vars_file --max-bytes $max_bytes)
     print $"reassemble pack: ($m.pkg_count) packages, ($m.tar_bytes) bytes, sha256 ($m.tar_sha256)"
 }
 
@@ -420,17 +542,46 @@ def "main unpack" [
     --kernconf: string = "SMOLFIRE-VM"
     --from-dir: string = "/var/tmp/reassemble"
     --src-conf: string = "/etc/src.conf"
+    --src-commit: string = ""
+    --repo: string = ""
 ] {
-    let r = (unpack-products --obj $obj --src $src --arch $arch --kernconf $kernconf --from-dir $from_dir --src-conf $src_conf)
+    # current /usr/src commit: asked from git unless given; unresolvable => empty => refused
+    let cur = if $src_commit != "" { $src_commit } else {
+        let g = (do { ^git -C $src rev-parse HEAD } | complete)
+        if $g.exit_code == 0 { $g.stdout | str trim } else { "" }
+    }
+    let r = (unpack-products --obj $obj --src $src --arch $arch --kernconf $kernconf --from-dir $from_dir
+        --src-conf $src_conf --src-commit $cur --repo $repo)
     print $"reassemble unpack: restored ($r.pkg_count) packages into ($r.objtop) [source src commit: ($r.src_commit)]"
 }
 
-def "main check-dryrun" [file: string] {
-    let bad = (dryrun-guard (open --raw $file))
-    if ($bad | is-not-empty) {
-        print "reassemble: dry run would rebuild packages/world — refusing:"
-        for l in $bad { print $"  ($l)" }
-        error make {msg: "reassemble: make -n cloudware-release is not a pure image assembly (pkgbase-repo not seen as up to date)"}
+def "main check-make-vars" [
+    --from-dir: string       # dir holding manifest.json
+    --vars-file: string      # JSON list of the current build's make args
+] {
+    let m = (open --raw ($from_dir | path join "manifest.json") | from json)
+    let problems = (check-make-vars $m (open --raw $vars_file | from json))
+    if ($problems | is-not-empty) {
+        error make {msg: $"reassemble make-vars refused:\n  - ($problems | str join "\n  - ")"}
+    }
+    print "reassemble: package-affecting make variables match the source run"
+}
+
+# FAIL CLOSED: --exit-code (make -n's exit status) is mandatory.
+def "main check-dryrun" [
+    file: string
+    --exit-code: int = -1
+] {
+    let text = (try { open --raw $file } catch { "" })
+    let problems = if $exit_code == -1 {
+        ["make -n exit code not supplied (--exit-code)"] ++ (dryrun-verdict $text 0)
+    } else {
+        dryrun-verdict $text $exit_code
+    }
+    if ($problems | is-not-empty) {
+        print "reassemble: dry run is not a verified pure image assembly - refusing:"
+        for l in $problems { print $"  ($l)" }
+        error make {msg: "reassemble: make -n cloudware-release is not a verified pure image assembly (fail closed)"}
     }
     print "reassemble: dry run clean (no packages/world/kernel rebuild)"
 }

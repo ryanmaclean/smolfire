@@ -134,6 +134,8 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_INPUT/artifacts?per_page=100" > source-artifacts.json
             nu bin/reassemble-plan.nu validate-source --run source-run.json --artifacts source-artifacts.json \
               --arch "$ARCH_INPUT" --kernconf "$KERNCONF_INPUT" --this-run "$GITHUB_RUN_ID" | tee validate.out
+            # artifact_id (exact id of the artifact that was validated) feeds the download step
+            cat validate.out >> "$GITHUB_OUTPUT"
             {
               echo "### reassemble from run $RUN_INPUT"
               sed 's/^/    /' validate.out
@@ -165,7 +167,9 @@ jobs:
         if: ${{ inputs.reassemble_from_run != '' }}
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps.rplan.outputs.artifact_name }}
+          # exact id of the artifact validate-source checked (size/expiry), not "by name"
+          artifact-ids: ${{ steps.rplan.outputs.artifact_id }}
+          merge-multiple: true
           run-id: ${{ inputs.reassemble_from_run }}
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
@@ -268,16 +272,16 @@ jobs:
           scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -P "$SSH_PORT" reassemble/manifest.json reassemble/reassemble-products.tar \
               root@127.0.0.1:/var/tmp/reassemble/
-          # Best effort: use the same src commit the packages were built from so
-          # release/ scripts match; a shallow fetch of an arbitrary sha may be
-          # refused by the server, in which case the branch tip is kept (the
-          # pkgbase repo is self-contained; only image-assembly scripts drift).
+          # FATAL: /usr/src must be exactly the commit the packages were built
+          # from (unpack re-checks it against the manifest and refuses on any
+          # mismatch). A failed pin means a full build is required.
           SRC_COMMIT=$(grep -o '"src_commit": *"[0-9a-f]*"' reassemble/manifest.json | grep -o '[0-9a-f]\{7,40\}' || true)
-          if [ -n "$SRC_COMMIT" ]; then
-            $SSH "cd /usr/src && git fetch --depth 1 origin $SRC_COMMIT && git checkout -q FETCH_HEAD" \
-              && echo "src pinned to $SRC_COMMIT" \
-              || echo "::warning::could not pin /usr/src to $SRC_COMMIT; using $SRC_BRANCH tip"
+          if [ -z "$SRC_COMMIT" ]; then
+            echo "::error::manifest carries no src_commit; a full build is required"; exit 1
           fi
+          $SSH "cd /usr/src && git fetch --depth 1 origin $SRC_COMMIT && git checkout -q FETCH_HEAD" \
+            && echo "src pinned to $SRC_COMMIT" \
+            || { echo "::error::could not pin /usr/src to $SRC_COMMIT; a full build is required"; exit 1; }
           # The checkout above must not clobber the smolfire kernconfs (untracked, kept).
 
       - name: Build kernel only (kernel-toolchain + buildkernel) inside VM

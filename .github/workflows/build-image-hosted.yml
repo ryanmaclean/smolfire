@@ -64,6 +64,14 @@ on:
         description: "Kernel only: kernel-toolchain + buildkernel + installkernel, upload boot/kernel tarball; no world, no image, no gates (~1.5 h vs ~3.5 h)"
         type: boolean
         default: false
+      softgate_mode:
+        description: "aarch64 TCG boot gate: soft (inconclusive = warning, default) or hard (inconclusive after retry = RED). See RECALIBRATION in the aarch64-boot-softgate job."
+        type: choice
+        options: [soft, hard]
+        default: soft
+      softgate_budget:
+        description: "aarch64 TCG boot gate login budget, seconds (default 900; recalibration target ~2x p95 TIME_TO_LOGIN)"
+        default: "900"
   # (Rename phase-3b temporary push trigger retired after run #9 went green:
   #  smolfire.ufs.qcow2 built via CLOUDWARE=smolfire + KERNCONF=SMOLFIRE-VM,
   #  size gate and KVM boot gate passed with the new root password.)
@@ -408,12 +416,24 @@ jobs:
   # budget while progressing (markers advance), record TCG-unviable in
   # the ledger — the hard aarch64 boot gate then formally stays on the
   # self-hosted-ARM/owner-hardware path. Cite measuring run IDs here.
+  # Measured so far (same-ISA, ubuntu-24.04-arm): runs 35947103487 = 31s,
+  # 35965919427 = 30s (2 of the 3 required points). Promotion is wired but
+  # OFF: dispatch with softgate_mode=hard softgate_budget=<~2x p95, i.e.
+  # ~90> (or set repo vars SOFTGATE_MODE/SOFTGATE_BUDGET) once the third
+  # run is in; revert by unsetting. timeout-minutes (45) assumes budget
+  # <= ~1200s.
   aarch64-boot-softgate:
     name: aarch64 boot soft-gate (same-ISA TCG)
     needs: build
     if: ${{ !inputs.kernel_only && (inputs.arch || 'amd64') == 'aarch64' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45   # worst case 2x900s boots + setup ~= 35 min
+    env:
+      # Reversible promotion switch (RECALIBRATION above). Defaults keep the
+      # documented soft behaviour; flip per-dispatch via inputs, or
+      # repo-wide via Actions variables SOFTGATE_MODE / SOFTGATE_BUDGET.
+      SOFTGATE_MODE: ${{ inputs.softgate_mode || vars.SOFTGATE_MODE || 'soft' }}
+      SOFTGATE_BUDGET: ${{ inputs.softgate_budget || vars.SOFTGATE_BUDGET || '900' }}
     defaults:
       run:
         shell: bash
@@ -432,12 +452,15 @@ jobs:
         with:
           name: smolfire-aarch64   # same-run artifact: retention-proof
 
-      - name: Boot gate (TCG, budget 900s, retry-once on inconclusive)
+      - name: Boot gate (TCG, SOFTGATE_BUDGET s, SOFTGATE_MODE soft|hard, retry-once on inconclusive)
         run: |
           set -e
+          case "$SOFTGATE_MODE" in soft|hard) ;; *) echo "::error::SOFTGATE_MODE must be soft|hard, got '$SOFTGATE_MODE'"; exit 64 ;; esac
+          case "$SOFTGATE_BUDGET" in ''|*[!0-9]*) echo "::error::SOFTGATE_BUDGET must be integer seconds, got '$SOFTGATE_BUDGET'"; exit 64 ;; esac
+          echo "gate config: mode=$SOFTGATE_MODE budget=${SOFTGATE_BUDGET}s"
           run_gate() {
             SERIAL_LOG="$PWD/gate-serial-$1.log" \
-              sh bin/ci/aarch64-boot-probe.sh smolfire-aarch64.qcow2 900 "max,pauth-impdef=on" \
+              sh bin/ci/aarch64-boot-probe.sh smolfire-aarch64.qcow2 "$SOFTGATE_BUDGET" "max,pauth-impdef=on" \
               | tee "gate-$1.out"
             return "${PIPESTATUS[0]}"
           }
@@ -453,6 +476,8 @@ jobs:
             echo "verdict=${VERDICT#VERDICT=}"
             echo "attempts=$attempts"
             echo "exit_code=$rc"
+            echo "mode=$SOFTGATE_MODE"
+            echo "budget=$SOFTGATE_BUDGET"
             grep -h -E 'TIME_TO_LOGIN=|LAST_MARKER=|QEMU_EXIT' "gate-attempt${attempts}.out" || true
           } > gate-verdict.txt
           cat gate-verdict.txt
@@ -463,7 +488,10 @@ jobs:
           case "$rc" in
             0) exit 0 ;;
             2) echo "::error::aarch64 image failed definitively (guest terminal string) — triage serial per UR-BSD-VERIFY rollback criteria"; exit 2 ;;
-            *) echo "::warning::aarch64 TCG boot inconclusive after $attempts attempt(s): $VERDICT — TCG slowness indistinguishable from hang; image NOT verified broken, NOT verified booting"; exit 0 ;;
+            *) if [ "$SOFTGATE_MODE" = hard ]; then
+                 echo "::error::aarch64 TCG boot inconclusive after $attempts attempt(s): $VERDICT — hard mode: not verified booting"; exit 1
+               fi
+               echo "::warning::aarch64 TCG boot inconclusive after $attempts attempt(s): $VERDICT — TCG slowness indistinguishable from hang; image NOT verified broken, NOT verified booting"; exit 0 ;;
           esac
 
       - name: Upload gate evidence

@@ -28,6 +28,8 @@
 #   sudo nu bin/build-smolfire-vm.nu --skip-buildworld  # release only (obj already built)
 #   sudo nu bin/build-smolfire-vm.nu --arch aarch64     # explicit arch
 #   sudo nu bin/build-smolfire-vm.nu --check            # preflight checks only
+#   sudo nu bin/build-smolfire-vm.nu --profile prod --authorized-keys ~/.ssh/id_ed25519.pub
+#                                                       # key-only root SSH (docs/BUILDING.md)
 
 export def main [
     --arch: string = ""              # aarch64 | amd64 | riscv64-experimental (auto-detect if empty)
@@ -39,9 +41,14 @@ export def main [
     --skip-buildworld                # skip to release (obj already populated)
     --skip-release                   # buildworld+kernel only, no release image
     --check                          # preflight only, no build
+    --profile: string = "dev"        # dev (password root login, CI default) | prod (key-only, needs --authorized-keys)
+    --authorized-keys: string = ""   # public-key file installed as /root/.ssh/authorized_keys (prod)
     --log: string = "/var/tmp/smolfire-build.log"
 ] {
     let t_start = (date now)
+
+    # Validate the image profile up front — before hours of buildworld.
+    let profile_args = (profile_make_args $profile $authorized_keys)
 
     # --- Resolve arch ---
     let resolved_arch = if $arch == "" {
@@ -141,7 +148,7 @@ export def main [
     # STAGE 4: make cloudware-release
     # =========================================================================
     if not $skip_release {
-        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target
+        build_vm_image $src $obj $nj $log $kernconf $vmsize $release_conf $arch_freebsd $arch_target $profile_args
     } else {
         print "[skip] cloudware-release (--skip-release)"
     }
@@ -478,6 +485,34 @@ def cleanup_kernel_obj [
 # =========================================================================
 # STAGE 4: make cloudware-release
 # =========================================================================
+# Image profile -> make variables read by release/tools/smolfire-qemu*.conf.
+# dev (default): password root login, what every CI gate logs into.
+# prod: key-only sshd + locked root password; requires a public-key file.
+export def profile_make_args [profile: string, authorized_keys: string] {
+    match $profile {
+        "dev" => {
+            if $authorized_keys != "" {
+                error make {msg: "--authorized-keys is only meaningful with --profile prod"}
+            }
+            ["SMOLFIRE_PROFILE=dev"]
+        }
+        "prod" => {
+            if $authorized_keys == "" {
+                error make {msg: "--profile prod requires --authorized-keys <public key file>"}
+            }
+            let abs = ($authorized_keys | path expand)
+            if not ($abs | path exists) {
+                error make {msg: $"authorized keys file not found: ($abs)"}
+            }
+            if (open --raw $abs | lines | where {|l| $l =~ '^(ssh-|ecdsa-|sk-)' } | is-empty) {
+                error make {msg: $"no public key line in ($abs)"}
+            }
+            ["SMOLFIRE_PROFILE=prod" $"SMOLFIRE_AUTHORIZED_KEYS=($abs)"]
+        }
+        _ => { error make {msg: $"unknown --profile ($profile) — expected dev or prod"} }
+    }
+}
+
 def build_vm_image [
     src: string
     obj: string
@@ -488,6 +523,7 @@ def build_vm_image [
     release_conf: string
     arch_freebsd: string
     arch_target: string
+    profile_args: list<string>
 ] {
     print "==> Stage 4: make cloudware-release"
 
@@ -527,6 +563,7 @@ def build_vm_image [
         $"SMOLFIRECONF=($release_conf)"
         "SMOLFIRE_FORMAT=qcow2"
         "SMOLFIRE_FSLIST=ufs"
+        ...$profile_args
         $"VMSIZE=($vmsize)"          # FIX-3: 2g not 4g (conf respects caller)
         "SWAPSIZE=128m"              # Makefile.vm defaults to 1g and always sets
                                      # the env, so the conf's fallback never fires

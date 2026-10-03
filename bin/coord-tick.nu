@@ -87,7 +87,18 @@ def empty-slot [] {
 # (attempts already made, 1-based, clamped). Scheduled, never slept: the
 # retry stamp persists not_before in the crash-atomic slot and the
 # dispatching path honours it on a later tick.
-# Kill-switch: SMOLFIRE_RETRY_BACKOFF=0 restores immediate retry dispatch.
+# Kill-switch: SMOLFIRE_RETRY_BACKOFF=0 restores immediate retry dispatch
+# (only the exact string "0" disables; unset/"1"/anything else is ON).
+#
+# Interactions (tests/coord-backoff-interaction-test.nu):
+#   - ALL executors (vm/jail/fleet) and every retry source back off alike,
+#     including the dead-worker reap (sweep-dead-workers appends a synthetic
+#     fail reply; harvest treats it as any failed attempt, so the re-send
+#     waits the schedule too - the worker was silent already, 60 s more is
+#     the point, and one rule keeps the kill switch meaningful for reaps).
+#   - A held retry keeps its inflight entry: capacity is RESERVED for it so
+#     newcomers cannot starve it during the window, but it never counts
+#     against itself (inflight-excluding) and never blocks a different task.
 const RETRY_BACKOFF_SECS = [60, 60, 120]
 
 def retry-backoff-enabled [] {
@@ -764,6 +775,20 @@ def inflight-counts [inflight: any] {
     {global: ($execs | length), per_executor: $per}
 }
 
+# The slot table minus one task's own entry. A RETRY replaces its previous
+# attempt: its inflight entry persists across the retry (held-slot
+# reservation, see state-dispatching), so the retry's own admission gate must
+# not count it against itself. Without this a task whose executor cap is
+# already full of just itself (e.g. SMOLFIRE_MAX_INFLIGHT_VM=1) could never
+# retry: harvest deferred it as backpressure every tick, forever.
+def inflight-excluding [inflight: any, task_id: string] {
+    if ($inflight | describe | str starts-with "record") and ($task_id in ($inflight | columns)) {
+        $inflight | reject $task_id
+    } else {
+        $inflight
+    }
+}
+
 # Gate check for one executor. Returns {at_cap, global, global_cap,
 # for_executor, exec_cap} — the counts travel with the verdict so the
 # deferral event logs the exact reason (per-executor vs global).
@@ -1395,7 +1420,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         # seen_ids append — the reply is re-harvested next tick.
                         let retry_exec = $current_state.task_executors | get -o $task_id | get -o executor | default $DEFAULT_EXECUTOR
                         let retry_exec = if $retry_exec in $SLOT_ORDER { $retry_exec } else { $DEFAULT_EXECUTOR }
-                        let gate = inflight-status (get-inflight $current_state) $retry_exec
+                        let gate = inflight-status (inflight-excluding (get-inflight $current_state) $task_id) $retry_exec
                         if $gate.at_cap {
                             log-backpressure $task_id $retry_exec "retry" $id $gate
                             $deferred_count = $deferred_count + 1
@@ -1786,7 +1811,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
     mut cur = sync-legacy-mirror $state
 
     # Recovery: an occupied slot that claims "sent" but has no coordinator
-    # dispatch threaded to its request_id never actually sent (crash between
+    # dispatch (threaded to, or identified by, its request_id) never actually sent (crash between
     # stamp and append with a persisted dispatched_at). Requeue it for send;
     # a slot whose dispatch exists-but-is-answered is left alone — waiting
     # routes its reply to harvest.
@@ -1796,8 +1821,16 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
             let content = try { open --raw $spool } catch { "" }
             let messages = if $content == "" { [] } else { parse-mbox $content }
             let has_disp = ($messages | any {|m|
-                ($m.headers | get "In-Reply-To"? | default "") == ($sl | get request_id)
-                and ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
+                # One expression: a line-leading `and` is parsed as a command
+                # and aborts the whole tick ("Command `and` not found").
+                let from_coord = ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
+                # An unsent/crash-stamped slot carries the TRIGGER id, so its
+                # dispatch is the coordinator message threaded to it. A SENT
+                # slot carries the dispatch's own Message-ID, so that message
+                # IS the dispatch. Matching only the first form made every
+                # genuinely sent slot look unsent whenever state-dispatching
+                # ran for another slot, re-dispatching a running task.
+                $from_coord and ((($m.headers | get "In-Reply-To"? | default "") == ($sl | get request_id)) or ((msg-id $m) == ($sl | get request_id)))
             })
             if not $has_disp {
                 $cur = set-pending-slots $cur (update-slot-field (get-pending-slots $cur) $entry.executor $entry.index "dispatched_at" "")
@@ -1864,7 +1897,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
         # re-enter here with the caps since filled. Refuse rather than
         # over-dispatch; the trigger was already marked seen at harvest, so
         # un-mark it — the next tick rediscovers the work instead of dropping it.
-        let gate = inflight-status (get-inflight $cur) $exec_info.executor
+        let gate = inflight-status (inflight-excluding (get-inflight $cur) $task_id) $exec_info.executor
         if $gate.at_cap {
             log-backpressure $task_id $exec_info.executor "dispatch-backstop" $slot_request $gate
             let unseed = $cur.seen_ids | where {|s| $s != $slot_request }

@@ -60,6 +60,23 @@ jobs:
       - name: coord no-double-dispatch guard tests
         run: nu tests/coord-double-dispatch-test.nu
 
+      # coord-retry-backoff-test.nu: §12 Fibonacci retry backoff + retry payload.
+      - name: coord retry-backoff tests
+        run: nu tests/coord-retry-backoff-test.nu
+
+      # coord-backoff-interaction-test.nu: backoff x max-inflight caps, other
+      # tasks' dispatch, heartbeat dead-worker reap, the no-double-dispatch
+      # guard on attempt >= 2, and the SMOLFIRE_RETRY_BACKOFF default/kill switch.
+      - name: coord backoff interaction tests
+        run: nu tests/coord-backoff-interaction-test.nu
+
+      # coord-concurrent-pendings-test.nu: per-executor pending slots
+      # (docs/CONCURRENT-PENDINGS-DESIGN.md §6). Previously wired into no CI
+      # step and silently red; the fleet stub ssh now holds its reply until
+      # released, so the test no longer races the detached fleet child.
+      - name: coord concurrent-pendings tests
+        run: nu tests/coord-concurrent-pendings-test.nu
+
       # coord-state-atomic-test.nu: crash-safe state persistence invariant
       # (§12 companion — atomic save-state via temp+rename, fail-closed
       # load-state with quarantine on corrupt files).

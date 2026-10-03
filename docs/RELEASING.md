@@ -40,7 +40,7 @@ or a `head_sha` that is not an ancestor of (or equal to) `main`. It then:
 downloads the artifacts, runs `qemu-img check` on each qcow2 (and an ELF magic
 check on the kernel), writes `SHA256SUMS` plus per-file `.sha256`, creates the
 release with `--target <main commit>`. All staged files (`assets/*`) are
-attested **before** the release is created or modified, so an attestation
+attested **before** the release is created, so an attestation
 failure leaves nothing public and the job can simply be re-run.
 
 The workflow must be dispatched from `main` (it refuses any other ref and

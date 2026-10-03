@@ -221,6 +221,11 @@ jobs:
       - name: dispatch-request validator tests
         run: nu tests/dispatch-request-test.nu
 
+      # dd-notebooks-test.nu: read-only Datadog notebook inspector
+      # (bin/dd-notebooks.nu) — offline, stub `pup`, no credentials or network.
+      - name: dd-notebooks tests (offline, stub pup)
+        run: nu tests/dd-notebooks-test.nu
+
       # #89: bounded model check, caller-supplied sequence vs hardware TID
       # allocator. The table goes to the log so the state counts cited in
       # docs/DURABLE-TID-SEQ-VS-ALLOC.md can be re-read from any run.

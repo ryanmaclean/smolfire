@@ -4,13 +4,9 @@
 # Closes the newcomer gap called out in README Quickstart: workflow artifacts
 # expire and need a GitHub login; Releases are permanent, anonymous downloads.
 #
-# Two modes (input `mode`):
-#   release        create release <tag> from the artifacts of already-green
-#                  build runs (amd64_run, aarch64_run, optional kernel_run).
-#   replace-asset  re-upload ONE asset class (whichever *_run you supply) into
-#                  an existing release with --clobber, regenerate SHA256SUMS,
-#                  and ASSERT the asset's digest on GitHub changed and equals
-#                  the sha256 of the validated local file.
+# Mode `release` creates a new release from already-green build runs.
+# Existing public releases are immutable here: asset replacement is disabled
+# because a failed multi-asset upload can remove published files.
 #
 # Refusal rules (pure logic + tests: bin/release-plan.nu,
 # tests/release-plan-test.nu): every supplied run must have status=completed,
@@ -32,9 +28,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "release = create a new release; replace-asset = swap one asset class in an existing release"
+        description: "Create a new release from validated build runs"
         type: choice
-        options: [release, replace-asset]
+        options: [release]
         default: release
       tag:
         description: "Release tag (e.g. v0.6.0)"
@@ -109,6 +105,10 @@ jobs:
           if [ "$GITHUB_REF" != refs/heads/main ]; then
             echo "ERROR: dispatch this workflow from main (got $GITHUB_REF)."; exit 1
           fi
+          if [ "$MODE" != release ]; then
+            echo "ERROR: existing release asset replacement is disabled; use a new versioned tag."
+            exit 1
+          fi
 
       - uses: actions/checkout@v4.2.2
         with:
@@ -149,7 +149,7 @@ jobs:
           EXISTS=0
           gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && EXISTS=1
           if [ "$MODE" = release ] && [ "$EXISTS" = 1 ]; then
-            echo "ERROR: release $TAG already exists. Use mode=replace-asset to swap an asset."; exit 1
+            echo "ERROR: release $TAG already exists; use a new versioned tag."; exit 1
           fi
           if [ "$MODE" = replace-asset ] && [ "$EXISTS" = 0 ]; then
             echo "ERROR: release $TAG does not exist; use mode=release."; exit 1
@@ -275,25 +275,6 @@ jobs:
             --title "smolfire $TAG" --notes-file notes.md $FLAGS \
             assets/*
           echo "Release $TAG published."
-
-      - name: Replace assets and assert digests changed
-        if: ${{ inputs.mode == 'replace-asset' }}
-        run: |
-          set -euo pipefail
-          gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, digest}]' > plan/before.json
-          gh release upload "$TAG" --repo "$REPO" --clobber assets/*
-          gh api "repos/$REPO/releases/tags/$TAG" --jq '[.assets[] | {name, digest}]' > plan/after.json
-          fail=0
-          for f in assets/*; do
-            n=$(basename "$f")
-            [ "$n" = SHA256SUMS ] && continue
-            nu bin/release-plan.nu digest-changed --before plan/before.json --after plan/after.json --name "$n" || fail=1
-            want="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
-            got=$(jq -r --arg n "$n" '.[] | select(.name==$n) | .digest' plan/after.json)
-            [ "$want" = "$got" ] || { echo "ERROR: $n digest on GitHub ($got) != local ($want)"; fail=1; }
-          done
-          [ "$fail" = 0 ] || exit 1
-          echo "Replaced assets verified: digests changed and match validated local files."
 
       - name: Summary
         run: |

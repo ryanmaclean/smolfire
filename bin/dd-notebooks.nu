@@ -66,6 +66,11 @@ def redact [s: string]: nothing -> string {
     $out = ($out | str replace --all --regex '\b[0-9a-fA-F]{32}\b' "[REDACTED]")
     $out = ($out | str replace --all --regex '\b[0-9a-fA-F]{40}\b' "[REDACTED]")
     $out = ($out | str replace --all --regex r#'(?i)((?:dd[-_ ]?)?(?:api|app|application|access)[-_ ]?(?:key|token)[\x22\x27]?\s*[:=]\s*[\x22\x27]?)[^\s\x22\x27,}]+'# "${1}[REDACTED]")
+    # 3. generic catch-alls (a token pup prints that is not in a DD_* variable, e.g. a
+    #    stored OAuth token): prefixed Datadog token shapes, and any key/token/secret/
+    #    password assignment, whatever the key is called.
+    $out = ($out | str replace --all --regex '\bdd[a-z]{1,2}_[A-Za-z0-9_-]{8,}' "[REDACTED]")
+    $out = ($out | str replace --all --regex r#'(?i)((?:key|token|secret|passw(?:or)?d)[\x22\x27]?\s*[:=]\s*[\x22\x27]?)[^\s\x22\x27,}]+'# "${1}[REDACTED]")
     $out
 }
 
@@ -108,6 +113,9 @@ def validate-argv [args: list<string>]: nothing -> record {
             mut val = ""
             if ($parts | length) == 2 {
                 $val = ($parts | get 1)
+                if ($val | str starts-with "--") {
+                    return {ok: false, reason: $"refused: value for '($name)' looks like a flag"}
+                }
             } else {
                 $i = $i + 1
                 if $i >= ($rest | length) { return {ok: false, reason: $"refused: flag '($name)' needs a value"} }

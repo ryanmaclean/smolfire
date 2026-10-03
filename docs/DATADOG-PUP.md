@@ -149,3 +149,13 @@ nu tests/dd-notebooks-test.nu </dev/null
 ```
 
 Runs offline in CI (stub `pup` on `PUP_BIN`; no network, no Datadog).
+
+## What the tool redacts (and what it does not)
+
+Error output (pup's stderr and every failure message) passes through a redactor:
+the literal value of every `DD_*` environment variable, bearer tokens, JWTs,
+32/40-hex strings, Datadog-prefixed token shapes (`ddo_...`) and any
+`key|token|secret|password = value` assignment. **pup's normal stdout (`get`,
+the `pup` passthrough) is printed as received**: it is notebook content, which is
+user data and can itself contain sensitive text. Do not pipe it into places you
+would not put the notebook itself.

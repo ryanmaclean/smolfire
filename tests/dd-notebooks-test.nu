@@ -140,6 +140,7 @@ do {
         ["notebooks" "search" "--limit" "0"]
         ["notebooks" "search" "--limit" "5000"]
         ["notebooks" "search" "--query" "--yes"]
+        ["notebooks" "search" "--query=--yes"]
         ["notebooks"]
         ["notebooks" "search" "stray-positional"]
     ]
@@ -238,6 +239,18 @@ do {
     }
     assert ($r.stderr | str contains "[REDACTED]") "expected redaction marker"
     assert ($r.stderr | str contains "credentials unusable") "auth hint for 403"
+}
+
+print "test: opaque tokens pup prints on stderr (not in any DD_* var) are redacted too"
+do {
+    let d = (mk-sandbox)
+    let err = "auth failed key=ZXlKopaqueOpaqueValue99 stored ddo_AbCdEf0123456789xyz secret: hunter2hunter2 password=letmein12345"
+    let r = (run-dd $d ["list"] ($creds | insert STUB_ERR $err))
+    assert equal $r.exit_code 3
+    for leak in ["ZXlKopaqueOpaqueValue99" "ddo_AbCdEf0123456789xyz" "hunter2hunter2" "letmein12345"] {
+        assert (not ($r.stderr | str contains $leak)) $"leaked ($leak): ($r.stderr)"
+    }
+    assert ($r.stderr | str contains "[REDACTED]") "expected redaction marker"
 }
 
 # ── 6. list ─────────────────────────────────────────────────────────────────

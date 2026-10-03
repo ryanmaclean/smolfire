@@ -1,0 +1,12 @@
+{
+  "workflow": "build-image-hosted.yml",
+  "ref": "claude/ur-bsd-26-qnmjho",
+  "inputs": {
+    "arch": "amd64",
+    "kernel_only": "true",
+    "kernconf": "SMOLFIRE-VM-TSLOG"
+  },
+  "watch": true,
+  "timeout_minutes": 90,
+  "requested_at": "2026-10-03T17:30:04Z"
+}

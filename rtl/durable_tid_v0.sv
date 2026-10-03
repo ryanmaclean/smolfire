@@ -46,6 +46,7 @@
 // 4 KB base-offset map (concrete offsets; replaces MISTER-DUT-PLAN TBDs).
 // All offsets are byte offsets from OUR peripheral base. Unlisted words:
 // reads return 0, writes are ignored.
+// Writes to read-only words are also ignored; neither sets MALFORMED.
 //   +0x000 EPOCH        (rw)  current epoch, HPS-set on recovery; sticky
 //                             across soft reset; part of CRC descriptor.
 //   +0x004 REQ_LO       (rw)  requested sequence, low  32 bits.
@@ -63,8 +64,7 @@
 //                             [1] DUP_SEQ          req below durable count
 //                             [2] GAP_SEQ          req ahead of durable count
 //                             [3] MALFORMED        submit-while-busy/pending,
-//                                                  reserved CTRL bits, or
-//                                                  invalid write
+//                                                  or reserved CTRL bits
 //                             [4] RESET_MIDCOMMIT  soft reset hit SUBMIT/COMMIT
 //                             [5] OVERFLOW         durable count cannot advance
 //                             [31:6] reserved (read 0).

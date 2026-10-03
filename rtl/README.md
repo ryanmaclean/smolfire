@@ -297,7 +297,7 @@ The TB drives the 50 MHz board clock (= fabric clock, direct) and runs at the HA
 the suite exercises the exact hardware timing, including the RX 16x-tick
 truncation (434/16 → 27). It replays the original suite's functional
 cases over serial (8 good submits, duplicate, bad-CRC / reserved-CTRL /
-REQ_HI malformed vectors, idle reset + post-reset submit) plus
+REQ_HI gap (`GAP_SEQ`) vectors, idle reset + post-reset submit) plus
 UART-specific coverage (PING/MAGIC+VERSION, WRITE echo, no-response
 rejection of bad-checksum / bad-magic / unknown-CMD frames, link-alive
 after rejection, repeated-submit).

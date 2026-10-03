@@ -47,16 +47,13 @@ The workflow must be dispatched from `main` (it refuses any other ref and
 checks out `main`), so the validator that gates the release is main's copy.
 `notes_file` must be a repo-relative path (no `..`, not absolute, no leading `-`).
 
-## Replace one asset
+## Correcting a published release
 
-`mode = replace-asset` with the existing `tag` and **exactly one** of
-`amd64_run` / `aarch64_run` / `kernel_run`. The same run validation applies.
-The workflow re-uploads that asset with `--clobber`, regenerates `SHA256SUMS`
-over the whole release, and asserts that the asset's GitHub digest (a) changed
-and (b) equals the sha256 of the validated local file. An unchanged digest
-fails the job. The untouched assets are downloaded by exact name and the job
-fails if any release asset is missing from the regenerated `SHA256SUMS` set
-(no partial checksums). Replaced assets are attested before upload.
+The workflow refuses `replace-asset` and any attempt to reuse an existing tag.
+Its prior `--clobber` path could remove public assets before a multi-file upload
+completed. Build and validate corrected artifacts, then publish them under a new
+versioned tag. Keep the prior release available so consumers can identify and
+verify the exact assets they downloaded.
 
 ## Verify a release (consumers)
 

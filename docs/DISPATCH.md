@@ -54,11 +54,11 @@ Notes:
   `.github/dispatch/*.json`. Deleting a request does not trigger anything.
 * Re-running the job re-dispatches. Change the file (new `requested_at`) to
   request again.
-* The dispatch API returns no run id; the job snapshots the newest run id of
-  the target workflow, dispatches, then polls (2 min) for a newer
-  `workflow_dispatch` run on that ref. Two simultaneous dispatches of the same
-  workflow on the same ref from elsewhere can in principle be confused; the
-  per-branch `concurrency` group serializes requests from this workflow.
+* The dispatch API is called with `return_run_details=true` and returns the
+  run ID in that request's response. The job reports and watches only that ID;
+  a missing/invalid receipt fails closed. Source-branch concurrency does not
+  serialize different branches targeting the same workflow/ref, and no
+  target-level serialization is needed for run attribution.
 * Inputs are validated against the target's YAML **at the requested ref**, so
   an input added on a branch is dispatchable from that branch.
 
@@ -78,7 +78,7 @@ Notes:
   No shell ever sees them.
 * Allowlisted workflows only, inputs checked against the parsed target YAML,
   restrictive value charset, ref must resolve to an existing branch
-  (`git/ref/heads/<ref>`), per-branch concurrency.
+  (`git/ref/heads/<ref>`), source-branch concurrency only.
 
 ## Threat model: what a malicious pushed request file can and cannot do
 
@@ -115,4 +115,5 @@ exfiltrate. The target workflows' own security (e.g. `tpm-hosted.yml` validates
 ## Retiring this
 
 Delete `dispatch.yml`, `bin/dispatch-request.nu`, `tests/dispatch-request-test.nu`
-and `.github/dispatch/`. Nothing else depends on them.
+and `.github/dispatch/`. Also remove the `dispatch-request validator tests`
+step from `.github/workflows/ci.yml`; it invokes the deleted test file.

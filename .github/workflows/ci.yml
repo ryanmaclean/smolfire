@@ -199,6 +199,11 @@ jobs:
       - name: aarch64-boot-probe classifier tests
         run: nu tests/aarch64-boot-probe-test.nu
 
+      # dispatch-request-test.nu: the permanent dispatcher's validator
+      # (allowlist, input typing, injection rejections) — offline, stubbed gh.
+      - name: dispatch-request validator tests
+        run: nu tests/dispatch-request-test.nu
+
       # #89: bounded model check, caller-supplied sequence vs hardware TID
       # allocator. The table goes to the log so the state counts cited in
       # docs/DURABLE-TID-SEQ-VS-ALLOC.md can be re-read from any run.

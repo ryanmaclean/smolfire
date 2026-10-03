@@ -63,12 +63,31 @@ def strip-agent-bins [path: list<string>] {
     $path | where {|dir| $agent_bins | all {|bin| not ($dir | path join $bin | path exists) } }
 }
 
+# The stub blocks (bounded, 60 s) while <dir>/hold exists (created here), so the
+# detached fleet child cannot reply until the test releases it. Without the
+# gate the child (a separate nu process racing the still-running tick) can
+# answer before state-waiting runs in the SAME tick invocation, and the tick
+# then legitimately harvests it through to idle: the test saw `idle` where it
+# asserted `waiting` (root cause of the old 'parallel dispatch ends in
+# waiting' failure; the coordinator was behaving correctly).
 def write-ssh-stub [dir: string] {
     let log = [$dir, "ssh.log"] | path join
     let ssh_stub = [$dir, "ssh"] | path join
-    $"#!/bin/sh\nlog=\"($log)\"\necho \"$@\" >> \"$log\"\necho \"stub-stdout for: $@\"\nexit 0\n" | save --force $ssh_stub
+    let hold_file = [$dir, "hold"] | path join
+    "" | save --force $hold_file
+    let body = 'n=0
+while [ -e "$HOLD" ] && [ "$n" -lt 600 ]; do sleep 0.1; n=$((n+1)); done
+echo "$@" >> "$LOG"
+echo "stub-stdout for: $@"
+exit 0
+'
+    $"#!/bin/sh\nLOG=\"($log)\"\nHOLD=\"($hold_file)\"\n" + $body | save --force $ssh_stub
     ^chmod +x $ssh_stub
     $log
+}
+
+def release-ssh-stub [dir: string] {
+    ^rm -f ([$dir, "hold"] | path join)
 }
 
 # Run one tick with explicit env toggles. Returns the completed process
@@ -169,6 +188,7 @@ do {
     assert ((slot-of $st1 "fleet" | get request_id | str starts-with "<coord.") ) "fleet slot carries the dispatch id"
     assert equal (count-coord-dispatches $spool_abs) 2 "exactly two dispatch messages appended in one tick"
 
+    release-ssh-stub $stub_dir
     # Fleet child replies asynchronously via stub ssh; the vm reply is
     # crafted (vm spawn is hermetic-skipped, so no vm child ever answers).
     assert (wait-for-fleet-replies $spool_abs 1) "detached fleet child answered"
@@ -483,7 +503,7 @@ do {
     let spool_abs = [$tmp, "var", "mail", "spool"] | path join
     let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
 
-    write-spool $spool_abs ((make-msg "user@smolfire.local" "builder@smolfire.local" "<req.cp10.vm@host>" 'task_id = "t-s1"') + (make-msg "user@smolfire.local" "builder@smolfire.local" "<req.cp10.fleet@host>" "task_id = \"t-s2\"\nexecutor = \"fleet\""))
+    write-spool $spool_abs ((make-msg "user@smolfire.local" "builder@smolfire.local" "<req.cp10.vm@host>" 'task_id = "t-s1"') + (make-msg "user@smolfire.local" "builder@smolfire.local" "<req.cp10.fleet@host>" (fleet-body "t-s2")))
     write-state $state_abs (base-state)
 
     let r1 = run-tick $tmp $stub_dir --fleet --sequential
@@ -561,6 +581,7 @@ do {
     assert equal (count-coord-dispatches $spool_abs) 2 "both dispatched in one tick before either harvests"
     assert (not ($r1.stdout | str contains "dispatch_deferred_slot_occupied")) "no slot refusal on the second fill"
 
+    release-ssh-stub $stub_dir
     # Both detached fleet children answer asynchronously.
     assert (wait-for-fleet-replies $spool_abs 2) "both fleet children answered"
     let r2 = run-tick $tmp $stub_dir --fleet

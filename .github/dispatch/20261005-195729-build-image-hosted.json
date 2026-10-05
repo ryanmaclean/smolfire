@@ -1,0 +1,10 @@
+{
+  "workflow": "build-image-hosted.yml",
+  "ref": "claude/ur-bsd-26-qnmjho",
+  "inputs": {
+    "arch": "amd64"
+  },
+  "watch": true,
+  "timeout_minutes": 150,
+  "requested_at": "2026-10-05T19:57:28Z"
+}

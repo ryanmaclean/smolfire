@@ -132,10 +132,24 @@ let wd = (mktemp -d)
 "hello" | save ($wd | path join "smolfire-kernel-v0.6.0")
 let ck = (do { ^nu $rp checksums --dir $wd } | complete)
 assert equal $ck.exit_code 0 "checksums CLI"
-let sc = (do { cd $wd; ^sha256sum -c SHA256SUMS } | complete)
-assert equal $sc.exit_code 0 $"sha256sum -c: ($sc.stdout) ($sc.stderr)"
-let sc2 = (do { cd $wd; ^sha256sum -c smolfire-amd64-v0.6.0.qcow2.sha256 } | complete)
-assert equal $sc2.exit_code 0 "per-file .sha256 verifies"
+# Built-in check (no external program): every "<hex>  <name>" line must match the
+# file content hash computed by nu itself.
+for l in (open --raw ($wd | path join "SHA256SUMS") | lines | where {|l| $l != "" }) {
+    let p = ($l | parse --regex '^(?<h>[0-9a-f]{64})  (?<n>.+)$')
+    assert equal ($p | length) 1 $"SHA256SUMS line format: ($l)"
+    assert equal (open --raw ($wd | path join ($p | first | get n)) | hash sha256) ($p | first | get h) $"nu-computed digest for ($l)"
+}
+# External cross-check with whichever stock verifier exists: sha256sum (Linux)
+# or shasum (macOS). Neither present => SKIP just this cross-check.
+let verifier = if (which sha256sum | is-not-empty) { ["sha256sum" "-c"] } else if (which shasum | is-not-empty) { ["shasum" "-a" "256" "-c"] } else { [] }
+if ($verifier | is-empty) {
+    print "  (skipped: no sha256sum/shasum on PATH, external checksum cross-check)"
+} else {
+    let sc = (do { cd $wd; ^$verifier.0 ...($verifier | skip 1) SHA256SUMS } | complete)
+    assert equal $sc.exit_code 0 $"($verifier.0) -c: ($sc.stdout) ($sc.stderr)"
+    let sc2 = (do { cd $wd; ^$verifier.0 ...($verifier | skip 1) smolfire-amd64-v0.6.0.qcow2.sha256 } | complete)
+    assert equal $sc2.exit_code 0 "per-file .sha256 verifies"
+}
 let emptyd = (mktemp -d)
 let ce = (do { ^nu $rp checksums --dir $emptyd } | complete)
 assert equal $ce.exit_code 1 "checksums on empty dir refuses"
@@ -167,8 +181,11 @@ assert (($steps | get 0.run) | str contains "refs/heads/main") "first step guard
 assert (($steps | get 1.with.ref) == "main") "checkout pins main"
 let i_att = (do $idx "Attest")
 let i_create = (do $idx "Create release")
+# Replace mode was removed (3895745: existing-tag asset replacement is refused
+# before any mutation), so no step may mutate an existing release any more.
 let i_repl = (do $idx "Replace assets")
-assert ($i_att < $i_create and $i_att < $i_repl) "attest runs before release is created/modified"
+assert ($i_att != null and $i_create != null and $i_att < $i_create) "attest runs before release is created"
+assert ($i_repl == null) "no replace-assets step: existing releases are never mutated"
 let raw = (open --raw $wf_path)
 assert (not ($raw | str contains "|| true")) "no || true swallowing in release workflow"
 assert ($raw | str contains 'cp -- "$NOTES_FILE"') "cp uses -- for notes file"

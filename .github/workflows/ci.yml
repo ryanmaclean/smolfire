@@ -226,6 +226,49 @@ jobs:
       - name: dd-notebooks tests (offline, stub pup)
         run: nu tests/dd-notebooks-test.nu
 
+      # Offline suites added by the 0.6.0 integration PR (#123). External
+      # programs each one executes, the CI OS it runs on, and which are
+      # optional (suite prints SKIP) vs required: docs/CI-TEST-TOOLS.md.
+      # No step below installs anything: a missing optional tool is a SKIP,
+      # never a red run. Which tools a runner image happens to carry is
+      # recorded as fact in that doc; whether any of them is acceptable is
+      # the repo owner's open policy question, not decided here.
+
+      # release-plan-test.nu: release-image.yml planning/validation logic.
+      # Needs only nu; cross-checks SHA256SUMS with sha256sum or shasum when
+      # one exists (SKIPs only that cross-check otherwise).
+      - name: release-plan tests (offline)
+        run: nu tests/release-plan-test.nu
+
+      # reassemble-plan-test.nu: reassemble_from_run planning. Needs nu, tar
+      # and touch only (POSIX; present on both runner OSes).
+      - name: reassemble-plan tests (offline)
+        run: nu tests/reassemble-plan-test.nu
+
+      # smolfire-a64-test.nu: validated locally on Linux only, where its
+      # binutils sections (as/ld/objcopy/nm/size) and fake-qemu sections run
+      # or SKIP individually. Not run on macOS: its ELF/binutils and GNU-vs-BSD
+      # userland behaviour there is unverified.
+      - name: smolfire aarch64 build-script tests
+        if: runner.os == 'Linux'
+        run: nu tests/smolfire-a64-test.nu
+
+      # boot-time-cuts-test.nu: kernconf/rc.conf cut guards + executes the
+      # release conf hooks under bash with stubs. Linux only, like the
+      # conf-hook-test job, which also sources those confs on Linux only.
+      - name: boot-time cuts guard tests
+        if: runner.os == 'Linux'
+        run: nu tests/boot-time-cuts-test.nu
+
+      # boot-gates-test.nu: SOFTGATE precedence + gate step under a stub probe
+      # (bash), riscv64 probe classifier (expect; SKIP without it) and a real
+      # qemu-system-riscv64 firmware-chain case that SKIPs unless qemu and
+      # u-boot are already present. Linux only: the gate step it executes runs
+      # on ubuntu-24.04-arm in the real workflow.
+      - name: boot gates tests (softgate precedence + riscv64 probe)
+        if: runner.os == 'Linux'
+        run: nu tests/boot-gates-test.nu
+
       # #89: bounded model check, caller-supplied sequence vs hardware TID
       # allocator. The table goes to the log so the state counts cited in
       # docs/DURABLE-TID-SEQ-VS-ALLOC.md can be re-read from any run.

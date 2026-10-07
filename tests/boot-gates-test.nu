@@ -20,15 +20,67 @@ let tmp = (^mktemp -d | str trim)
 # ---------- (a) workflow soft/hard switch ----------
 let wf = (open $"($root)/.github/workflows/build-image-hosted.yml")
 let inputs = $wf.on.workflow_dispatch.inputs
-print "test a1: dispatch inputs default to current soft behaviour"
-assert equal $inputs.softgate_mode.default "soft" "mode default"
-assert equal $inputs.softgate_mode.options ["soft" "hard"] "mode options"
-assert equal $inputs.softgate_budget.default "900" "budget default"
+# GitHub Actions expression semantics for `A || B || 'lit'`: operands are
+# `inputs.X`, `vars.X` or a quoted literal; null, "", 0 and false are falsy;
+# `||` yields the first truthy operand, else the LAST operand.
+def gh-truthy [v: any] { not (($v == null) or ($v == "") or ($v == 0) or ($v == false)) }
+def gh-eval-or [expr: string, ctx: record] {
+    let body = ($expr | str trim | str replace --regex '^\$\{\{\s*' "" | str replace --regex '\s*\}\}$' "")
+    let ops = ($body | split row "||" | each {|o| $o | str trim })
+    let vals = ($ops | each {|o|
+        if ($o | str starts-with "'") { $o | str trim --char "'" } else {
+            let p = ($o | split row ".")
+            let scope = ($ctx | get -o ($p | first))
+            if $scope == null { null } else { $scope | get -o ($p | get 1) }
+        }
+    })
+    let hit = ($vals | where {|v| gh-truthy $v })
+    if ($hit | is-empty) { $vals | last } else { $hit | first }
+}
+# Returns a list of precedence failures for a parsed workflow record.
+def check-precedence [wf: record] {
+    let dflt = {|n| $wf.on.workflow_dispatch.inputs | get $n | get -o default }
+    let jenv = ($wf.jobs."aarch64-boot-softgate".env)
+    mut bad = []
+    for spec in [{k: "SOFTGATE_MODE", i: "softgate_mode", set: "hard", var: "hard", lit: "soft"},
+                 {k: "SOFTGATE_BUDGET", i: "softgate_budget", set: "90", var: "120", lit: "900"}] {
+        let e = ($jenv | get $spec.k)
+        # operator leaves the input untouched => its declared default arrives
+        let untouched = (do $dflt $spec.i)
+        let cases = [
+            {n: "input-set", ctx: {inputs: {($spec.i): "42x"}, vars: {($spec.k): $spec.var}}, want: "42x"},
+            {n: "input-empty+var-set", ctx: {inputs: {($spec.i): ""}, vars: {($spec.k): $spec.var}}, want: $spec.var},
+            {n: "input-untouched(default)+var-set", ctx: {inputs: {($spec.i): $untouched}, vars: {($spec.k): $spec.var}}, want: $spec.var},
+            {n: "both-empty", ctx: {inputs: {($spec.i): ""}, vars: {($spec.k): ""}}, want: $spec.lit},
+            {n: "untouched+var-unset", ctx: {inputs: {($spec.i): $untouched}, vars: {}}, want: $spec.lit},
+            {n: "non-dispatch(no inputs)+var-set", ctx: {vars: {($spec.k): $spec.var}}, want: $spec.var},
+            {n: "non-dispatch(no inputs)+no-var", ctx: {vars: {}}, want: $spec.lit},
+        ]
+        for c in $cases {
+            let got = (gh-eval-or $e $c.ctx)
+            if $got != $c.want { $bad = ($bad | append $"($spec.k) ($c.n): got ($got | to nuon) want ($c.want | to nuon)") }
+        }
+    }
+    $bad
+}
+
+print "test a1: dispatch inputs have EMPTY defaults (sentinel) and keep their validation surface"
+assert equal $inputs.softgate_mode.default "" "mode default is empty sentinel"
+assert equal $inputs.softgate_budget.default "" "budget default is empty sentinel"
 
 let job = $wf.jobs."aarch64-boot-softgate"
-print "test a2: job env falls back to soft/900"
+print "test a2: job env falls back to soft/900 after input then repo var"
 assert-contains $job.env.SOFTGATE_MODE "|| 'soft'" "mode fallback"
 assert-contains $job.env.SOFTGATE_BUDGET "|| '900'" "budget fallback"
+print "test a2b: precedence input > repo var > built-in default (real expression semantics)"
+assert equal (check-precedence $wf) [] "precedence failures"
+print "test a2c: MUTATION - restoring the old non-empty defaults must make a2b fail"
+let mut_wf = ($wf
+    | update on.workflow_dispatch.inputs.softgate_mode.default "soft"
+    | update on.workflow_dispatch.inputs.softgate_budget.default "900")
+let mut_bad = (check-precedence $mut_wf)
+if ($mut_bad | is-empty) { error make {msg: "mutation not detected: old non-empty defaults pass the precedence check"} }
+print $"  mutation detected \(($mut_bad | length) failures\)"
 
 let step = ($job.steps | where {|s| ($s.name? | default "") | str starts-with "Boot gate" } | first)
 let script = $"($tmp)/gate-step.sh"

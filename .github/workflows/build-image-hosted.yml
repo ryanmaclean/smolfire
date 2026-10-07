@@ -66,13 +66,13 @@ on:
         type: boolean
         default: false
       softgate_mode:
-        description: "aarch64 TCG boot gate: soft (inconclusive = warning, default) or hard (inconclusive after retry = RED). See RECALIBRATION in the aarch64-boot-softgate job."
-        type: choice
-        options: [soft, hard]
-        default: soft
+        description: "aarch64 TCG boot gate mode: soft (inconclusive = warning) or hard (inconclusive after retry = RED). Leave EMPTY (default) to use repo variable SOFTGATE_MODE, else soft. Any other value fails the gate config with exit 64. See RECALIBRATION in the aarch64-boot-softgate job."
+        type: string
+        default: ""
       softgate_budget:
-        description: "aarch64 TCG boot gate login budget, seconds (default 900; recalibration target ~2x p95 TIME_TO_LOGIN)"
-        default: "900"
+        description: "aarch64 TCG boot gate login budget, integer seconds. Leave EMPTY (default) to use repo variable SOFTGATE_BUDGET, else 900 (recalibration target ~2x p95 TIME_TO_LOGIN)"
+        type: string
+        default: ""
       emit_reassemble:
         description: "Also upload the reusable pkgbase products (artifact smolfire-reassemble-<arch>-<kernconf>, 7-day retention) so a later config-only change can use reassemble_from_run. Opt-in: costs artifact storage"
         type: boolean
@@ -539,8 +539,13 @@ jobs:
   # Measured so far (same-ISA, ubuntu-24.04-arm): runs 35947103487 = 31s,
   # 35965919427 = 30s (2 of the 3 required points). Promotion is wired but
   # OFF: dispatch with softgate_mode=hard softgate_budget=<~2x p95, i.e.
-  # ~90> (or set repo vars SOFTGATE_MODE/SOFTGATE_BUDGET) once the third
-  # run is in; revert by unsetting. timeout-minutes (45) assumes budget
+  # ~90> (or set repo vars SOFTGATE_MODE/SOFTGATE_BUDGET, which apply to
+  # every dispatch that leaves the inputs empty) once the third run is
+  # in; revert by unsetting. Precedence: non-empty dispatch input, else
+  # non-empty repo variable, else soft/900. The inputs deliberately have
+  # EMPTY defaults: a non-empty default is always truthy in `||`, which
+  # would make the repo variables unreachable (tests/boot-gates-test.nu
+  # a2b guards this). timeout-minutes (45) assumes budget
   # <= ~1200s.
   aarch64-boot-softgate:
     name: aarch64 boot soft-gate (same-ISA TCG)
@@ -550,8 +555,11 @@ jobs:
     timeout-minutes: 45   # worst case 2x900s boots + setup ~= 35 min
     env:
       # Reversible promotion switch (RECALIBRATION above). Defaults keep the
-      # documented soft behaviour; flip per-dispatch via inputs, or
-      # repo-wide via Actions variables SOFTGATE_MODE / SOFTGATE_BUDGET.
+      # documented soft/900 behaviour; precedence is non-empty dispatch input,
+      # else Actions variable SOFTGATE_MODE / SOFTGATE_BUDGET, else the
+      # built-in default. Empty strings are falsy in `||`; when no inputs
+      # context exists (non-dispatch event) inputs.* is null, also falsy.
+      # Invalid values still fail closed (exit 64) in the gate step.
       SOFTGATE_MODE: ${{ inputs.softgate_mode || vars.SOFTGATE_MODE || 'soft' }}
       SOFTGATE_BUDGET: ${{ inputs.softgate_budget || vars.SOFTGATE_BUDGET || '900' }}
     defaults:

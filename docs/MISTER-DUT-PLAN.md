@@ -76,6 +76,10 @@ HPS view (offsets relative to OUR peripheral base — concrete since 2026-09-25)
 
 All addresses concrete in `rtl/README.md` (23-register live map incl. MAGIC/VERSION/CRC_CALC/TID, verified against silicon). `0xFF200000` (bridge control) is NEVER mapped, NEVER written.
 
+## 4b. Durability v1: the FPGA orders, the host persists
+
+Durability is host-anchored: the fabric only ORDERS acceptance — the `DURABLE_SEQ` register (and the burst-RSP watermark) report the ordered count, i.e. ordered-until-host-persisted, not crash-safe on its own — while the host harness appends one COMMIT line per commit receipt to its log (default `./durable.log`, `-l` overridable) and fsyncs once per frame (group commit), tracking dual watermarks `fpga_ordered` (fabric claim) vs `host_persisted` (post-fsync) and exposing only `host_persisted` as durable; the host crash window is ≤1 frame of acknowledged-but-unpersisted receipts, recovered by re-driving un-acked frames from the log (overlap returns side-effect-free DUP rejects, no double-apply). No RTL changed for this: the `DURABLE` register name still reads "durable" but means "ordered" until the host persists, and the `DURABLE→ORDERED` rename is explicitly DEFERRED to the next RTL rev — reason: a rename changes no wire/bit/semantic and must not spend a bitstream respin alone; see `rtl/README.md` ("Durability v1" section) for the canonical statement.
+
 ## 5. Fault-injection hook point (#88)
 
 SS1-C style injection is HPS-driven through the same register file, OUR

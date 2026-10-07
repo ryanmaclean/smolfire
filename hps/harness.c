@@ -36,6 +36,13 @@
  *
  * Single-submit frames stay byte-identical (0x05 is the next free CMD;
  * RSP keeps the CMD|0x80 convention).
+ *
+ * Durability v1 (FPGA orders, host persists): [-l logpath] (default
+ * ./durable.log) appends one COMMIT line per commit receipt and fsyncs
+ * once per frame (group commit -- never per op inside a burst). Only the
+ * post-fsync host_persisted watermark is durable; the fabric DURABLE
+ * count is the ordered claim. Crash window: <=1 frame of
+ * acked-but-unpersisted receipts on host crash (see block below).
  */
 
 #include <errno.h>
@@ -47,6 +54,7 @@
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 
 /* ---- transport ---- */
@@ -109,6 +117,193 @@
 #define SILENCE_MS 400u
 
 static int g_fd = -1;
+
+/* ---- host-anchored durability v1 (FPGA orders, host persists) ----
+ *
+ * Architecture: the fabric only ORDERS acceptance (DURABLE_LO/HI registers
+ * report the ordered count -- ordered-until-host-persisted, NOT crash-safe
+ * on its own). Crash safety is anchored on the HOST: after each frame that
+ * carries commit receipts, the harness appends one COMMIT line per
+ * committed receipt to the host log and fsyncs ONCE per frame (group
+ * commit -- never per op inside a burst). Only the post-fsync watermark
+ * `host_persisted` is exposed as durable in outputs; the fabric claim is
+ * reported separately as `fpga_ordered` and must never be read as durable.
+ *
+ * CRASH WINDOW: a host crash between the fabric ACK and the frame fsync
+ * loses at most ONE frame of acknowledged-but-unpersisted receipts.
+ * Recovery re-drives from host_persisted; reqs the fabric already ordered
+ * come back as DUP rejects (window check precedes CRC, no side effect), so
+ * re-drive cannot double-apply -- but the host must still compare any
+ * re-driven payload against the log before re-acknowledging it to the
+ * application (this DUT cannot compare retry payloads itself).
+ *
+ * Single-submit ops are one-entry frames, so they fsync per submit; burst
+ * frames fsync once for all N entries.
+ */
+static const char *g_logpath = "./durable.log";
+static int g_logfd = -1;
+static uint64_t g_fpga_ordered = 0; /* fabric claim: NEVER durable */
+static uint64_t g_host_persisted = 0; /* post-fsync: the only durable value */
+static unsigned long g_log_receipts = 0; /* COMMIT lines recovered at open */
+
+/* Open (or create) the host durability log and recover host_persisted as
+ * the max persisted watermark found. Prints the recovery line so a
+ * restart-and-resume is auditable. Returns 0 on success, -1 on failure. */
+static int durable_log_open(void)
+{
+    int rfd;
+    struct stat st;
+    if (g_logfd >= 0)
+        return 0;
+    g_logfd = open(g_logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (g_logfd < 0) {
+        fprintf(stderr, "harness: open durable log %s: %s\n", g_logpath,
+                strerror(errno));
+        return -1;
+    }
+    rfd = open(g_logpath, O_RDONLY);
+    if (rfd < 0) {
+        fprintf(stderr, "harness: reopen durable log %s: %s\n", g_logpath,
+                strerror(errno));
+        return -1;
+    }
+    if (fstat(rfd, &st) != 0) {
+        fprintf(stderr, "harness: fstat durable log %s: %s\n", g_logpath,
+                strerror(errno));
+        close(rfd);
+        return -1;
+    }
+    if (st.st_size > 0) {
+        char *buf;
+        size_t got = 0;
+        buf = (char *)malloc((size_t)st.st_size + 1u);
+        if (buf == NULL) {
+            fprintf(stderr, "harness: durable log recovery: no memory\n");
+            close(rfd);
+            return -1;
+        }
+        while (got < (size_t)st.st_size) {
+            ssize_t n = read(rfd, buf + got,
+                             (size_t)st.st_size - got);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                fprintf(stderr, "harness: durable log read %s: %s\n",
+                        g_logpath, strerror(errno));
+                free(buf);
+                close(rfd);
+                return -1;
+            }
+            if (n == 0)
+                break;
+            got += (size_t)n;
+        }
+        buf[got] = '\0';
+        {
+            char *save = NULL, *ln;
+            for (ln = strtok_r(buf, "\n", &save); ln != NULL;
+                 ln = strtok_r(NULL, "\n", &save)) {
+                unsigned int t_req = 0, t_d0 = 0, t_d1 = 0, t_epoch = 0;
+                unsigned long long t_ord = 0, t_per = 0;
+                /* Scope the match to our own COMMIT lines; ignore
+                 * anything else so a foreign line can never move the
+                 * watermark. Payload hex must round-trip exactly. */
+                if (sscanf(ln,
+                           "COMMIT req=%u d0=0x%x d1=0x%x epoch=%u"
+                           " ordered=%llu persisted=%llu",
+                           &t_req, &t_d0, &t_d1, &t_epoch, &t_ord,
+                           &t_per) == 6) {
+                    (void)t_req;
+                    (void)t_d0;
+                    (void)t_d1;
+                    (void)t_epoch;
+                    (void)t_ord;
+                    g_log_receipts++;
+                    if (t_per > g_host_persisted)
+                        g_host_persisted = t_per;
+                }
+            }
+        }
+        free(buf);
+    }
+    close(rfd);
+    printf("harness: durable log %s: recovered host_persisted=%llu"
+           " receipts=%lu\n",
+           g_logpath, (unsigned long long)g_host_persisted,
+           g_log_receipts);
+    return 0;
+}
+
+static int durable_log_write(const char *line)
+{
+    size_t len = strlen(line), off = 0;
+    while (off < len) {
+        ssize_t n = write(g_logfd, line + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            fprintf(stderr, "harness: durable log write %s: %s\n",
+                    g_logpath, strerror(errno));
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+/* Persist one single-submit commit receipt: append + fsync (the submit is
+ * its own frame). Updates both watermarks; durable == host_persisted. */
+static int durable_persist_one(uint32_t req, uint32_t d0, uint32_t d1,
+                               uint32_t epoch, uint64_t fpga_ordered)
+{
+    char line[160];
+    int n = snprintf(line, sizeof line,
+                     "COMMIT req=%u d0=0x%08x d1=0x%08x epoch=%u"
+                     " ordered=%llu persisted=%llu\n",
+                     req, d0, d1, epoch,
+                     (unsigned long long)fpga_ordered,
+                     (unsigned long long)fpga_ordered);
+    if (n < 0 || (size_t)n >= sizeof line)
+        return -1;
+    if (g_logfd < 0)
+        return -1;
+    g_fpga_ordered = fpga_ordered;
+    if (durable_log_write(line) != 0)
+        return -1;
+    if (fsync(g_logfd) != 0) {
+        fprintf(stderr, "harness: durable log fsync %s: %s\n", g_logpath,
+                strerror(errno));
+        return -1;
+    }
+    g_host_persisted = fpga_ordered;
+    return 0;
+}
+
+/* Report the run-start watermarks; warn only when a NON-EMPTY log
+ * disagrees with the fabric (the crash-window gap: ordered past what the
+ * host persisted -- safe to re-drive, fabric DUP-rejects the overlap). */
+static void durable_run_start(uint64_t fpga_base)
+{
+    g_fpga_ordered = fpga_base;
+    printf("harness: watermarks fpga_ordered=%llu host_persisted=%llu"
+           " (durable=host_persisted)\n",
+           (unsigned long long)g_fpga_ordered,
+           (unsigned long long)g_host_persisted);
+    if (g_log_receipts > 0 && fpga_base != g_host_persisted)
+        printf("harness: durability gap: fabric ordered past host-persisted"
+               " (base=%llu persisted=%llu); re-drive overlaps are DUP"
+               " rejects, no double-apply\n",
+               (unsigned long long)fpga_base,
+               (unsigned long long)g_host_persisted);
+}
+
+static void durable_run_done(const char *what)
+{
+    printf("harness: durability %s fpga_ordered=%llu host_persisted=%llu"
+           " durable=host_persisted log=%s\n",
+           what, (unsigned long long)g_fpga_ordered,
+           (unsigned long long)g_host_persisted, g_logpath);
+}
 
 /* ---- CRC-32/IEEE (independent software implementation: the oracle
  * cross-checks DUT CRC behavior against THIS, not against RTL) ---- */
@@ -274,7 +469,7 @@ static int u_ping(uint32_t *ver)
         return -1;
     if (rsp_frame(RSP_PING, ver, RSP_TIMEOUT_MS) != 0)
         return -1;
-    return (*ver == 0) ? 0 : -1;
+    return (*ver == PROTOCOL_VERSION) ? 0 : -1;
 }
 
 static int u_reset(uint32_t *rcnt)
@@ -494,6 +689,10 @@ static int vec_good(uint64_t *next, unsigned opno)
     if (oracle_compare(*next, d, *next, v) != 0) {
         tr_log("op %u GOOD req=%u: oracle vs d=%llu v=%llu", opno, req,
                (unsigned long long)d, (unsigned long long)v);
+        return -1;
+    }
+    if (durable_persist_one(req, d0, d1, g_epoch, d) != 0) {
+        tr_log("op %u GOOD req=%u: durable log persist failed", opno, req);
         return -1;
     }
     tr_log("op %u GOOD req=%u d=%llu", opno, req,
@@ -825,6 +1024,42 @@ static const char *bkind_name(int k)
     }
 }
 
+/* Persist one burst frame's commit receipts: append one line per COMMITTED
+ * entry, then a SINGLE fsync for the whole frame (group commit, NOT per
+ * op). res[i]==0x01 marks committed entries. */
+static int durable_persist_frame(const struct b_entry *ents,
+                                 const uint8_t *res, uint8_t n,
+                                 uint32_t epoch, uint64_t fpga_ordered)
+{
+    uint8_t i;
+    if (g_logfd < 0)
+        return -1;
+    g_fpga_ordered = fpga_ordered;
+    for (i = 0; i < n; i++) {
+        char line[160];
+        int m;
+        if (res[i] != 0x01u)
+            continue;
+        m = snprintf(line, sizeof line,
+                     "COMMIT req=%u d0=0x%08x d1=0x%08x epoch=%u"
+                     " ordered=%llu persisted=%llu\n",
+                     ents[i].req, ents[i].d0, ents[i].d1, epoch,
+                     (unsigned long long)fpga_ordered,
+                     (unsigned long long)fpga_ordered);
+        if (m < 0 || (size_t)m >= sizeof line)
+            return -1;
+        if (durable_log_write(line) != 0)
+            return -1;
+    }
+    if (fsync(g_logfd) != 0) {
+        fprintf(stderr, "harness: durable log fsync %s: %s\n", g_logpath,
+                strerror(errno));
+        return -1;
+    }
+    g_host_persisted = fpga_ordered;
+    return 0;
+}
+
 /* ---- burst differential: N total submits in randomized 1..64 frames ---- */
 static int run_burst_diff(unsigned long total, uint32_t seed)
 {
@@ -843,6 +1078,9 @@ static int run_burst_diff(unsigned long total, uint32_t seed)
         fprintf(stderr, "harness: burst diff setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    durable_run_start(base);
     sw_next = base;
     printf("harness: burst diff base d=%llu v=%llu epoch=%u seed=%u\n",
            (unsigned long long)base, (unsigned long long)v, epoch,
@@ -979,6 +1217,12 @@ static int run_burst_diff(unsigned long total, uint32_t seed)
             tr_dump();
             return 1;
         }
+        if (durable_persist_frame(ents, res, n, epoch, oline) != 0) {
+            fprintf(stderr, "harness: burst %lu: durable log persist"
+                    " failed\n",
+                    nb);
+            return 1;
+        }
         sw_next = oline;
         {
             unsigned long prev = done;
@@ -1001,6 +1245,7 @@ static int run_burst_diff(unsigned long total, uint32_t seed)
            done, nb, seed, c_commit, c_code[1], c_code[2], c_code[3],
            (unsigned long long)d, (unsigned long long)v,
            (1000.0 * (double)done) / (double)(t1 - t0 + 1));
+    durable_run_done("burst-diff");
     return (oracle_compare(sw_next, d, sw_next, v) == 0) ? 0 : 1;
 }
 
@@ -1019,6 +1264,9 @@ static int run_burst_max(void)
         fprintf(stderr, "harness: burstmax setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    durable_run_start(base);
     for (i = 0; i < BURST_MAX_N; i++) {
         uint32_t req = (uint32_t)(base + i);
         ents[i].req = req;
@@ -1060,9 +1308,15 @@ static int run_burst_max(void)
                 (unsigned long long)(base + BURST_MAX_N));
         return 1;
     }
+    if (durable_persist_frame(ents, res, BURST_MAX_N, epoch,
+                              base + BURST_MAX_N) != 0) {
+        fprintf(stderr, "harness: burstmax: durable log persist failed\n");
+        return 1;
+    }
     printf("harness: burstmax OK n=64 base=%llu d=%llu v=%llu\n",
            (unsigned long long)base, (unsigned long long)d,
            (unsigned long long)v);
+    durable_run_done("burstmax");
     return 0;
 }
 
@@ -1127,6 +1381,9 @@ static int run_smoke(unsigned long n)
         fprintf(stderr, "harness: smoke setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    durable_run_start(next);
     printf("harness: smoke base durable=%llu\n",
            (unsigned long long)next);
     t0 = now_ms();
@@ -1144,8 +1401,10 @@ static int run_smoke(unsigned long n)
     if (read_durable(&d) != 0 || read_visible(&v) != 0)
         return 1;
     printf("harness: smoke OK n=%lu durable=%llu visible=%llu %.1f ops/s\n",
-           n, (unsigned long long)d, (unsigned long long)v,
+           n, (unsigned long long)g_host_persisted,
+           (unsigned long long)v,
            (1000.0 * (double)n) / (double)(t1 - t0 + 1));
+    durable_run_done("smoke");
     return (oracle_compare(next, d, next, v) == 0) ? 0 : 1;
 }
 
@@ -1163,6 +1422,9 @@ static int run_diff(unsigned long n, uint32_t seed)
         fprintf(stderr, "harness: diff setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    durable_run_start(base);
     next = base;
     /* RESET sanity inside the run: idle reset preserves history. */
     if (u_read(R_RSTCNT, &rc0) != 0 || u_reset(&rc1) != 0 ||
@@ -1229,16 +1491,18 @@ static int run_diff(unsigned long n, uint32_t seed)
     printf("harness: diff OK n=%lu seed=%u good=%lu dup=%lu gap=%lu"
            " malf=%lu read=%lu d=%llu v=%llu %.1f ops/s\n",
            n, seed, c_good, c_dup, c_gap, c_malf, c_read,
-           (unsigned long long)d, (unsigned long long)v,
+           (unsigned long long)g_host_persisted,
+           (unsigned long long)v,
            (1000.0 * (double)n) / (double)(t1 - t0 + 1));
+    durable_run_done("diff");
     return (oracle_compare(next, d, next, v) == 0) ? 0 : 1;
 }
 
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [-t tty] <ping|magic|read|write|reset|smoke|diff|"
-            "burst|burstmax|burstdrop>"
+            "usage: %s [-t tty] [-l log] <ping|magic|read|write|reset|smoke|"
+            "diff|burst|burstmax|burstdrop>"
             " [args...]\n"
             "  ping                  PING round trip (PONG + VERSION 1)\n"
             "  magic                 read MAGIC + VERSION\n"
@@ -1254,7 +1518,10 @@ static void usage(const char *argv0)
             "  burstmax              one COUNT=64 all-good max frame\n"
             "  burstdrop             one bad-checksum burst: silent drop,\n"
             "                        watermark held, link alive\n"
-            "  default tty: " UART_PATH " @115200-8-N-1\n",
+            "  default tty: " UART_PATH " @115200-8-N-1\n"
+            "  default log: ./durable.log (commit receipts, fsync per frame;\n"
+            "                        durable=host_persisted, fabric count is\n"
+            "                        ordered-only)\n",
             argv0);
 }
 
@@ -1264,9 +1531,16 @@ int main(int argc, char **argv)
     const char *cmd;
     int ai = 1;
     uint32_t val = 0;
-    if (argc >= 4 && strcmp(argv[1], "-t") == 0) {
-        tty = argv[2];
-        ai = 3;
+    while (ai + 1 < argc) {
+        if (strcmp(argv[ai], "-t") == 0) {
+            tty = argv[ai + 1];
+            ai += 2;
+        } else if (strcmp(argv[ai], "-l") == 0) {
+            g_logpath = argv[ai + 1];
+            ai += 2;
+        } else {
+            break;
+        }
     }
     if (ai >= argc) {
         usage(argv[0]);

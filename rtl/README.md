@@ -269,6 +269,10 @@ commit, watermark +64); B6 malformed (`COUNT=0`, bad CHK → silent drop,
 resync-flush, link alive); B7 error-clear / IDLE / visible==durable.
 Same always-on monitors (trusted ⇒ persistent, watermarks monotonic).
 
+### Durability v1: the FPGA orders, the host persists
+
+Durability is host-anchored: the fabric only ORDERS acceptance — `DURABLE_LO/HI` and the burst-RSP watermark report the ordered count, i.e. ordered-until-host-persisted, not crash-safe on its own — while the host harness (`hps/harness.c -l`, default `./durable.log`) appends one COMMIT line per commit receipt and fsyncs once per frame (group commit, never per op inside a burst), tracking dual watermarks `fpga_ordered` (fabric claim) vs `host_persisted` (post-fsync) and exposing only `host_persisted` as durable; the host crash window is ≤1 frame of acknowledged-but-unpersisted receipts, recovered by re-driving from the log (overlap comes back as side-effect-free DUP rejects). No RTL changed for this: the `DURABLE_*` register names still say "durable" but mean "ordered" until the host persists, and the honest `ORDERED` rename is explicitly DEFERRED to the next RTL rev — reason recorded here: a rename alone does not change any wire, bit, or semantic, so it must not spend a bitstream respin / re-fit on its own; host code plus this paragraph carry the honest semantics until that rev lands.
+
 ### CST story (build host only — no remote files touched)
 
 `dut.cst` on the Gowin build host must gain exactly these lines

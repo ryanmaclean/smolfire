@@ -428,13 +428,22 @@ is `optional isa`, cannot be dropped without ISA), `devd_enable="NO"` (section 1
 `hw.bus.devctl_nomatch` effect on KVM unknown.
 
 **Validation order (CI/KVM only):** (1) kernel-only: build `SMOLFIRE-VM-TSLOG`
-(`kernconf=SMOLFIRE-VM-TSLOG` on `build-image-hosted.yml`; arm64 twin exists,
-amd64 `SMOLFIRE-VM-TSLOG` does not yet) and run `bin/tslog-phases.nu`; expect
+(`kernconf=SMOLFIRE-VM-TSLOG kernel_only=true` on `build-image-hosted.yml`; both
+`sys/amd64/conf/SMOLFIRE-VM-TSLOG` and its arm64 twin exist in the tree and the
+amd64 one has already built in CI, see the evidence below) and run
+`bin/tslog-phases.nu`; expect
 `device_attach atkbdc0/atkbd0/psm0` records gone and a smaller `sysinit_devices`
 phase. (2) full image: normal `build-image-hosted.yml` amd64 run, boot gate must
 stay `VERDICT=pass`; compare serial-stamped login time against the 8-9 s KVM
 baseline (the gate's 1 s resolution is too coarse for a ~0.3 s delta: stamp
 lines, n>=5).
+
+**CI evidence already on record for this validation order (facts only):**
+- Step (1) build: the kernel-only dispatch run 37140760240 built
+  `SMOLFIRE-VM-TSLOG` successfully (buildkernel 6m38s). The kernconf is already in the tree, so nothing needs
+  to be created before dispatching it again.
+- Step (2) full image: the full amd64 run 37366841257 passed the gates (KVM boot
+  gate 7 s; size gate 65,536,000 B raw / 26,148,864 B compressed).
 
 ## 3. Measurement plan — TSLOG on the hosted runner
 

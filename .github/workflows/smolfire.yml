@@ -35,6 +35,7 @@ on:
       - 'sys/amd64/conf/SMOLFIRE*'
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
+      - 'tests/firecracker-boot-mute-*.nu'
   push:
     paths:
       - '.github/workflows/smolfire.yml'
@@ -46,10 +47,15 @@ on:
       - 'sys/amd64/conf/SMOLFIRE*'
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
+      - 'tests/firecracker-boot-mute-*.nu'
   workflow_dispatch:
     inputs:
       tslog:
         description: "Also build SMOLFIRE-TSLOG and capture 3 TSLOG boots + 3 release wall-clock boots (docs/BOOT-TIME-ROADMAP.md §3)"
+        type: boolean
+        default: false
+      boot_mute_control:
+        description: "Branch-only Firecracker same-ELF boot_mute A/B diagnostic (strict <=100ms release goal)"
         type: boolean
         default: false
 
@@ -373,8 +379,8 @@ jobs:
           echo "qemu_expect_rc=$RC"
           exit $RC
 
-      - name: Install Nushell for branch-only CPUID control
-        if: ${{ !cancelled() && inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-') }}
+      - name: Install Nushell for branch-only diagnostics
+        if: ${{ !cancelled() && ((inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-')) || (github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-'))) }}
         run: |
           set -eu
           NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
@@ -473,6 +479,19 @@ jobs:
           wc -c tslog-run*.log
           [ "$FAILS" -eq 0 ] || { echo "$FAILS boot(s) failed"; exit 1; }
 
+      - name: Firecracker boot_mute same-ELF A/B (diagnostic only)
+        id: firecracker_boot_mute_control
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') }}
+        run: |
+          set -eu
+          command -v nu
+          nu tests/firecracker-boot-mute-pairs.nu --execute --work "$WORK" --audit tests/firecracker-boot-mute-audit.nu
+          test -s "$WORK/firecracker-boot-mute/report.json"
+          test -s "$WORK/firecracker-boot-mute/audit.json"
+          nu tests/firecracker-boot-mute-audit.nu "$WORK/firecracker-boot-mute/report.json" \
+            > "$WORK/firecracker-boot-mute/workflow-audit.json"
+          nu -c 'let a = (open ($env.WORK | path join "firecracker-boot-mute" "workflow-audit.json")); if not $a.mechanism_pairs_complete or not $a.panic_visibility or $a.firecracker_release_goal != "PENDING_TEARDOWN" { exit 1 }'
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -494,6 +513,7 @@ jobs:
             /mnt/smolfire-ci/smolfire-build-vm.log
             /mnt/smolfire-ci/serial.log
             /mnt/smolfire-ci/cpuid-control/**
+            /mnt/smolfire-ci/firecracker-boot-mute/**
 
       - name: Record microVM gate results
         if: ${{ always() }}
@@ -508,6 +528,9 @@ jobs:
             if [ "${{ inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-') && 'true' || 'false' }}" = true ]; then
               echo 'cpuid_control=${{ steps.cpuid_control.outcome }}'
             fi
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
+              echo 'firecracker_boot_mute_control=${{ steps.firecracker_boot_mute_control.outcome }}'
+            fi
           } > "$WORK/gate-results.env"
           while IFS='=' read -r gate outcome; do
             echo "$gate=$outcome"
@@ -516,9 +539,23 @@ jobs:
           echo "gate_fail=$FAIL" >> "$WORK/gate-results.env"
 
       - name: Teardown VM
+        id: teardown_vm
         if: always()
         run: |
           CPUID_CLEANUP_FAIL=0
+          FC_AB_CLEANUP_FAIL=0
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
+            mkdir -p "$WORK/firecracker-boot-mute"
+            if command -v nu >/dev/null 2>&1; then
+              nu tests/firecracker-boot-mute-pairs.nu --cleanup-only --work "$WORK" \
+                > "$WORK/firecracker-boot-mute/workflow-cleanup.json" \
+                2> "$WORK/firecracker-boot-mute/workflow-cleanup.stderr" || FC_AB_CLEANUP_FAIL=1
+            else
+              printf '%s\n' '{"tag":"","pid":"","forced":false,"state":"hold-nu-missing"}' > "$WORK/firecracker-boot-mute/workflow-cleanup.json"
+              printf '%s\n' 'Nushell installer failed before diagnostic ownership could be verified' > "$WORK/firecracker-boot-mute/workflow-cleanup.stderr"
+              FC_AB_CLEANUP_FAIL=1
+            fi
+          fi
           if [ -e "$WORK/cpuid-control/current-qemu.pid" ]; then
             nu tests/cpuid-pair.nu --cleanup-only --work "$WORK" \
               > "$WORK/cpuid-control/workflow-cleanup.json" \
@@ -528,12 +565,18 @@ jobs:
             printf '%s\n' '{"pid":"","forced":false,"state":"no-pidfile"}' > "$WORK/cpuid-control/workflow-cleanup.json"
             : > "$WORK/cpuid-control/workflow-cleanup.stderr"
           fi
-          [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
+          # The A/B path uses exact argv + PID generation reconciliation in
+          # its Nu cleanup. Never follow the earlier gate's unqualified PID
+          # file after that path has started; its PID may have been recycled.
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
+            [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
+          fi
           [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
           [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
           [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
           sudo ip link del tap0 2>/dev/null || true
           test "$CPUID_CLEANUP_FAIL" = 0
+          test "$FC_AB_CLEANUP_FAIL" = 0
 
       - name: Upload diagnostic teardown receipt
         if: ${{ always() && inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-') }}
@@ -545,8 +588,42 @@ jobs:
             /mnt/smolfire-ci/cpuid-control/workflow-cleanup.json
             /mnt/smolfire-ci/cpuid-control/workflow-cleanup.stderr
 
+      - name: Upload Firecracker A/B teardown receipt
+        id: firecracker_boot_mute_teardown_upload
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-firecracker-ab-teardown
+          if-no-files-found: error
+          path: |
+            /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.json
+            /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.stderr
+
+      - name: Finalize Firecracker A/B after teardown
+        id: firecracker_boot_mute_final
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && steps.teardown_vm.outcome == 'success' && steps.firecracker_boot_mute_teardown_upload.outcome == 'success' }}
+        run: |
+          set -eu
+          command -v nu
+          nu tests/firecracker-boot-mute-finalize.nu --work "$WORK" --audit tests/firecracker-boot-mute-audit.nu
+          test -s "$WORK/firecracker-boot-mute/final-verdict.json"
+
+      - name: Upload Firecracker A/B final verdict
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-firecracker-ab-final
+          if-no-files-found: warn
+          path: /mnt/smolfire-ci/firecracker-boot-mute/final-verdict.json
+
       - name: Enforce microVM gates
         if: ${{ always() }}
         run: |
           . "$WORK/gate-results.env"
           test "$gate_fail" = 0
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
+            test '${{ steps.teardown_vm.outcome }}' = success
+            test '${{ steps.firecracker_boot_mute_teardown_upload.outcome }}' = success
+            test '${{ steps.firecracker_boot_mute_final.outcome }}' = success
+            test -s "$WORK/firecracker-boot-mute/final-verdict.json"
+          fi

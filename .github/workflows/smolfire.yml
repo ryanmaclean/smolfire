@@ -36,6 +36,7 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/firecracker-boot-mute-*.nu'
+      - 'tests/firecracker-ordinary-cleanup*.nu'
       - 'tests/firecracker-owner-scan.nu'
   push:
     paths:
@@ -49,6 +50,7 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/firecracker-boot-mute-*.nu'
+      - 'tests/firecracker-ordinary-cleanup*.nu'
       - 'tests/firecracker-owner-scan.nu'
   workflow_dispatch:
     inputs:
@@ -209,7 +211,27 @@ jobs:
             exit 1
           fi
 
+      - name: Install Nushell for hosted gates
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          ARCH="$(uname -m)"
+          test "$NU_VERSION" = 0.115.1
+          test "$ARCH" = x86_64
+          TRIPLE="${ARCH}-unknown-linux-musl"
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          NU_SHA256=8a9722177ddd421eba927b4baae4ae341a4d1c3434504be7b1b17d998bafdd87
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            -o "$RUNNER_TEMP/$ARCHIVE"
+          printf '%s  %s\n' "$NU_SHA256" "$RUNNER_TEMP/$ARCHIVE" | sha256sum --check --status
+          tar -xz -C "$HOME/.local/bin" --strip-components=1 \
+            -f "$RUNNER_TEMP/$ARCHIVE" "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Firecracker boot trace
+        id: firecracker_trace
         continue-on-error: true
         run: |
           set +e
@@ -254,20 +276,23 @@ jobs:
           # so terminal echo can never match FIRE_42 — only real sh output can.
           # Gate order: rc emits the net marker BEFORE SMOLFIRE_READY; the
           # token is per-run random, so a pass cannot be faked by echo.
-          cleanup_fc() {
-            if [ -f "$WORK/firecracker.pid" ]; then
-              kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
-              rm -f "$WORK/firecracker.pid"
-            fi
-            return 0
-          }
-          trap cleanup_fc EXIT
-          timeout 60 expect -c '
+          expect -c '
             set timeout 30
             set t0 [clock milliseconds]
             spawn '"$WORK"'/firecracker --no-api --config-file '"$WORK"'/fc.json
             set fc_pid [exp_pid]
-            exec sh -c "echo $fc_pid > '"$WORK"'/firecracker.pid"
+            set f [open "/proc/$fc_pid/stat" r]
+            set stat [read $f]
+            close $f
+            regexp {^.*\) (.*)$} $stat whole tail
+            set generation [lindex [split $tail " "] 19]
+            if {$generation eq ""} { error "no ordinary Firecracker generation" }
+            set owner [open "'"$WORK"'/firecracker-owner.json" w]
+            puts $owner "{\"pid\":\"$fc_pid\",\"generation\":\"$generation\",\"config\":\"'"$WORK"'/fc.json\",\"exe\":\"'"$WORK"'/firecracker\",\"argv\":\[\"'"$WORK"'/firecracker\",\"--no-api\",\"--config-file\",\"'"$WORK"'/fc.json\"\]}"
+            close $owner
+            set pidfile [open "'"$WORK"'/firecracker.pid" w]
+            puts $pidfile $fc_pid
+            close $pidfile
             expect {
               "SMOLFIRE_NET_OK '"$TOK"'" { puts "\nNET_GATE=pass (guest-initiated TCP, token verified)" }
               "SMOLFIRE_NET_FAIL"        { puts "\nNET_GATE=fail (fetch failed in guest)"; exit 3 }
@@ -302,6 +327,11 @@ jobs:
           RC=${PIPESTATUS[0]}
           echo "$RC" > firecracker-gate.rc
           echo "firecracker_expect_rc=$RC"
+          nu "$GITHUB_WORKSPACE/tests/firecracker-ordinary-cleanup.nu" --work "$WORK" \
+            > "$WORK/firecracker-ordinary-cleanup.stdout" \
+            2> "$WORK/firecracker-ordinary-cleanup.stderr"
+          CLEANUP_RC=$?
+          echo "firecracker_cleanup_rc=$CLEANUP_RC"
           {
             echo "### SMOLFIRE microVM size report"
             echo '```'
@@ -309,7 +339,7 @@ jobs:
               "$WORK/smolfire-build-vm.log" "$WORK/firecracker-gate.log" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
+          test "$CLEANUP_RC" -eq 0
 
       - name: Firecracker network gate
         id: firecracker_network
@@ -388,25 +418,6 @@ jobs:
           RC=${PIPESTATUS[0]}
           echo "qemu_expect_rc=$RC"
           exit $RC
-
-      - name: Install Nushell for branch-only diagnostics
-        if: ${{ !cancelled() && ((inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-')) || (github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-'))) }}
-        run: |
-          set -eu
-          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
-          ARCH="$(uname -m)"
-          test "$NU_VERSION" = 0.115.1
-          test "$ARCH" = x86_64
-          TRIPLE="${ARCH}-unknown-linux-musl"
-          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
-          NU_SHA256=8a9722177ddd421eba927b4baae4ae341a4d1c3434504be7b1b17d998bafdd87
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
-            -o "$RUNNER_TEMP/$ARCHIVE"
-          printf '%s  %s\n' "$NU_SHA256" "$RUNNER_TEMP/$ARCHIVE" | sha256sum --check --status
-          tar -xz -C "$HOME/.local/bin" --strip-components=1 \
-            -f "$RUNNER_TEMP/$ARCHIVE" "nu-${NU_VERSION}-${TRIPLE}/nu"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: QEMU CPUID frequency paired control (diagnostic only)
         id: cpuid_control
@@ -515,6 +526,11 @@ jobs:
             /mnt/smolfire-ci/firecracker-gate.log
             /mnt/smolfire-ci/firecracker-gate.rc
             /mnt/smolfire-ci/firecracker.pid
+            /mnt/smolfire-ci/firecracker-owner.json
+            /mnt/smolfire-ci/firecracker-ordinary-observation.json
+            /mnt/smolfire-ci/firecracker-ordinary-cleanup.json
+            /mnt/smolfire-ci/firecracker-ordinary-cleanup.stdout
+            /mnt/smolfire-ci/firecracker-ordinary-cleanup.stderr
             /mnt/smolfire-ci/qemu-microvm.log
             /mnt/smolfire-ci/qemu-microvm.pid
             /mnt/smolfire-ci/release-run*.log
@@ -532,6 +548,7 @@ jobs:
           {
             echo 'microvm_size=${{ steps.microvm_size.outcome }}'
             if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
+              echo 'firecracker_trace=${{ steps.firecracker_trace.outcome }}'
               echo 'firecracker_network=${{ steps.firecracker_network.outcome }}'
               echo 'firecracker_boot_time=${{ steps.firecracker_boot_time.outcome }}'
               echo 'firecracker_shell=${{ steps.firecracker_shell.outcome }}'
@@ -556,6 +573,18 @@ jobs:
         run: |
           CPUID_CLEANUP_FAIL=0
           FC_AB_CLEANUP_FAIL=0
+          ORDINARY_CLEANUP_FAIL=0
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ] && [ -e "$WORK/fc.json" ]; then
+            if command -v nu >/dev/null 2>&1; then
+              nu tests/firecracker-ordinary-cleanup.nu --work "$WORK" \
+                --receipt "$WORK/firecracker-ordinary-workflow-cleanup.json" \
+                > "$WORK/firecracker-ordinary-workflow-cleanup.stdout" \
+                2> "$WORK/firecracker-ordinary-workflow-cleanup.stderr" || ORDINARY_CLEANUP_FAIL=1
+            else
+              printf '%s\n' '{"state":"hold-nu-missing","forced":false}' > "$WORK/firecracker-ordinary-workflow-cleanup.json"
+              ORDINARY_CLEANUP_FAIL=1
+            fi
+          fi
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
             mkdir -p "$WORK/firecracker-boot-mute"
             if command -v nu >/dev/null 2>&1; then
@@ -577,12 +606,8 @@ jobs:
             printf '%s\n' '{"pid":"","forced":false,"state":"no-pidfile"}' > "$WORK/cpuid-control/workflow-cleanup.json"
             : > "$WORK/cpuid-control/workflow-cleanup.stderr"
           fi
-          # The A/B path uses exact argv + PID generation reconciliation in
-          # its Nu cleanup. Never follow the earlier gate's unqualified PID
-          # file after that path has started; its PID may have been recycled.
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
-            [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
-          fi
+          # Neither ordinary nor A/B Firecracker cleanup follows a numeric
+          # PID file with kill. An ambiguous owner is a failed hosted gate.
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
             [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
           fi
@@ -591,6 +616,7 @@ jobs:
           sudo ip link del tap0 2>/dev/null || true
           test "$CPUID_CLEANUP_FAIL" = 0
           test "$FC_AB_CLEANUP_FAIL" = 0
+          test "$ORDINARY_CLEANUP_FAIL" = 0
 
       - name: Upload diagnostic teardown receipt
         if: ${{ always() && inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-') }}
@@ -612,6 +638,18 @@ jobs:
           path: |
             /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.json
             /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.stderr
+
+      - name: Upload ordinary Firecracker teardown receipt
+        id: ordinary_firecracker_teardown_upload
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-ordinary-firecracker-teardown
+          if-no-files-found: warn
+          path: |
+            /mnt/smolfire-ci/firecracker-ordinary-workflow-cleanup.json
+            /mnt/smolfire-ci/firecracker-ordinary-workflow-cleanup.stdout
+            /mnt/smolfire-ci/firecracker-ordinary-workflow-cleanup.stderr
 
       - name: Finalize Firecracker A/B after teardown
         id: firecracker_boot_mute_final
@@ -640,4 +678,7 @@ jobs:
             test '${{ steps.firecracker_boot_mute_teardown_upload.outcome }}' = success
             test '${{ steps.firecracker_boot_mute_final.outcome }}' = success
             test -s "$WORK/firecracker-boot-mute/final-verdict.json"
+          else
+            test '${{ steps.teardown_vm.outcome }}' = success
+            test '${{ steps.ordinary_firecracker_teardown_upload.outcome }}' = success
           fi

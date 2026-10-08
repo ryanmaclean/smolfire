@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Hosted, branch-only Firecracker boot_mute mechanism experiment.
 use cpuid-panic-evidence.nu panic_kernel_seen
+use firecracker-owner-scan.nu matching_config_pids
 
 def require [ok: bool, why: string] { if not $ok { error make {msg: $why} } }
 def digest [path: string] { open --raw $path | hash sha256 }
@@ -43,15 +44,6 @@ def prior_firecracker_decision [pgrep_exit_code: int] {
     # identical argv is not enough to authorize a signal from this harness.
     if $pgrep_exit_code == 1 { 'CLEAR' } else { 'HOLD' }
 }
-def matching_config_pids [config: string] {
-    let ps = (^pgrep -x firecracker | complete)
-    if $ps.exit_code == 1 { return [] }
-    require ($ps.exit_code == 0) 'cannot enumerate Firecracker PIDs'
-    $ps.stdout | lines | where $it =~ '^[0-9]+$' | where {|pid|
-        let cmd = (try { proc_argv $pid } catch { [] })
-        ($cmd | any {|a| $a == $config})
-    }
-}
 def stop_current [work: string] {
     let dir = (result_dir $work)
     let current = ($dir | path join 'current-tag')
@@ -61,7 +53,7 @@ def stop_current [work: string] {
         for intent_path in (glob ($dir | path join '*-intent.json')) {
             let intent = (open $intent_path)
             $configs = ($configs | append $intent.config)
-            $matching = ($matching | append (matching_config_pids $intent.config))
+            $matching = ($matching | append (matching_config_pids [$intent.config]))
         }
         let configs = ($configs | sort)
         let matches = ($matching | flatten | uniq | sort)
@@ -79,7 +71,7 @@ def stop_current [work: string] {
     let intent = (open $intent_path)
     let owner_path = ($dir | path join $"($tag)-owner.json")
     if not ($owner_path | path exists) {
-        let matches = (matching_config_pids $intent.config)
+        let matches = (matching_config_pids [$intent.config])
         let receipt = {tag: $tag, pid: '', forced: false, state: 'hold-no-owner', matching_config_pids: $matches}
         $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
         error make {msg: $"attempted spawn has no owner record; matching config PIDs: ($matches); refuse unverified kill"}

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Pure ownership decision fixture: no process is started or signaled.
 source firecracker-boot-mute-pairs.nu
+use firecracker-owner-scan.nu read_decision
 
 let work = '/mnt/smolfire-ci'
 let cfg = '/mnt/smolfire-ci/firecracker-boot-mute/release-1-off-config.json'
@@ -18,6 +19,13 @@ for exit_code in [0 2] {
 for bad in [[false true true] [true false true] [false false true]] {
     if (cleanup_decision ($bad | get 0) ($bad | get 1) ($bad | get 2)) != 'REFUSE' {
         error make {msg: 'changed PID generation or argv was eligible for signal'}
+    }
+}
+if (read_decision false false false) != 'GONE' { error make {msg: 'vanished PID should be ignored'} }
+if (read_decision true true true) != 'INSPECT' { error make {msg: 'readable present PID should be inspected'} }
+for bad in [[true false false] [true true false] [true false true]] {
+    if (read_decision ($bad | get 0) ($bad | get 1) ($bad | get 2)) != 'HOLD' {
+        error make {msg: 'unreadable but present Firecracker PID was omitted from cleanup scan'}
     }
 }
 print 'synthetic source-only Firecracker owner policy PASS'

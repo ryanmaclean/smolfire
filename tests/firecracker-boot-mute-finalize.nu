@@ -1,19 +1,9 @@
 #!/usr/bin/env nu
 # SPDX-License-Identifier: Apache-2.0
 # The only stage allowed to assert the hard Firecracker release goal.
+use firecracker-owner-scan.nu matching_config_pids
 def require [ok: bool, why: string] { if not $ok { error make {msg: $why} } }
 def sha [path: string] { require ($path | path exists) $"missing ($path)"; open --raw $path | hash sha256 }
-def matching_config_pids [configs: list<string>] {
-    let ps = (^pgrep -x firecracker | complete)
-    if $ps.exit_code == 1 { return [] }
-    require ($ps.exit_code == 0) 'cannot enumerate Firecracker processes at finalization'
-    let pids = ($ps.stdout | lines | where $it =~ '^[0-9]+$')
-    $pids | where {|pid|
-        let path = $"/proc/($pid)/cmdline"
-        let args = (try { open --raw $path | decode utf-8 | split row (char nul) | where $it != '' } catch { [] })
-        $configs | any {|config| $config in $args}
-    }
-}
 def live_generation [pid: string] {
     let stat = $"/proc/($pid)/stat"
     if not ($stat | path exists) { return '' }

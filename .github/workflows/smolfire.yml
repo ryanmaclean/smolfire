@@ -36,6 +36,7 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/firecracker-boot-mute-*.nu'
+      - 'tests/firecracker-owner-scan.nu'
   push:
     paths:
       - '.github/workflows/smolfire.yml'
@@ -48,6 +49,7 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/firecracker-boot-mute-*.nu'
+      - 'tests/firecracker-owner-scan.nu'
   workflow_dispatch:
     inputs:
       tslog:

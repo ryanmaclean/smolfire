@@ -28,8 +28,8 @@ def main [--work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecrac
     require ($fresh.mechanism_pairs_complete and $fresh.panic_visibility and $fresh.firecracker_release_goal == 'PENDING_TEARDOWN') 'pre-teardown evidence incomplete'
     let late = (open $cleanup_path)
     let configs = ($report.samples | get config_path | append $report.panic_control.config_path | sort)
-    require (($late | columns | sort) == ['forced' 'matching_config_pids' 'pid' 'scanned_configs' 'state' 'tag']) 'late cleanup schema malformed or forged'
-    require ($late.tag == '' and $late.pid == '' and not $late.forced and $late.state == 'no-owner' and $late.scanned_configs == $configs and $late.matching_config_pids == []) 'late teardown did not reconcile exact seven configs to no-owner'
+    require (($late | columns | sort) == ['forced' 'global_firecracker_pids' 'matching_config_pids' 'pid' 'scanned_configs' 'state' 'tag']) 'late cleanup schema malformed or forged'
+    require ($late.tag == '' and $late.pid == '' and not $late.forced and $late.state == 'no-owner' and $late.scanned_configs == $configs and $late.matching_config_pids == [] and $late.global_firecracker_pids == []) 'late teardown did not reconcile exact seven configs/global VMMs to no-owner'
     require (not ($dir | path join 'current-tag' | path exists)) 'current owner remains after teardown'
     if (($env.GITHUB_ACTIONS? | default '') == 'true') {
         require ((matching_config_pids $configs | length) == 0) 'an unreported Firecracker still uses a tagged config after teardown'
@@ -39,7 +39,7 @@ def main [--work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecrac
     for s in $all {
         require ((sha $s.cleanup_path) == $s.cleanup_sha256) 'per-boot cleanup changed after audit'
         let receipt = (open $s.cleanup_path)
-        require (not $receipt.forced and ($receipt.state in ['already-exited' 'naturally-exited'])) 'forced, signalled or unresolved per-boot owner'
+        require (not $receipt.forced and ($receipt.state in ['already-exited' 'naturally-exited']) and $receipt.global_firecracker_pids == []) 'forced, signalled or unresolved per-boot owner/global scan'
         if (($env.GITHUB_ACTIONS? | default '') == 'true') {
             require ((live_generation ($receipt.pid | into string)) != ($receipt.generation | into string)) 'an exact owned VM remains live after teardown'
         }

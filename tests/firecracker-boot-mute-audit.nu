@@ -40,22 +40,22 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
     let expected_argv = [$r.firecracker_path '--no-api' '--config-file' $s.config_path]
     require ($s.argv == $expected_argv) 'VMM argv changed'
     let intent = (open $s.intent_path)
-    require ($intent.tag == $s.tag and $intent.variant == $s.variant and $intent.nonce == $s.nonce and $intent.config == $s.config_path and $intent.config_sha256 == $s.config_sha256 and $intent.argv == $expected_argv) 'intent differs from report'
+    require ($intent.tag == $s.tag and $intent.variant == $s.variant and $intent.nonce == $s.nonce and $intent.config == $s.config_path and $intent.config_sha256 == $s.config_sha256 and $intent.argv == $expected_argv and $intent.release_elf_sha256 == $r.release_elf_sha256 and $intent.firecracker_sha256 == $r.firecracker_sha256) 'intent differs from pinned report'
     let owner = (open $s.owner_path)
     require (($owner.pid | into string) =~ '^[0-9]+$' and ($owner.generation | into string) =~ '^[0-9]+$' and $owner.config == $s.config_path and $owner.exe == $r.firecracker_path and $owner.argv == $expected_argv) 'spawn-time owner PID/generation/config/executable/argv invalid'
     let cleanup = (open $s.cleanup_path)
     require ($cleanup.tag == $s.tag and ($cleanup.pid | into string) == ($owner.pid | into string) and ($cleanup.generation | into string) == ($owner.generation | into string)) 'cleanup owner generation mismatch'
     require (not $cleanup.forced and ($cleanup.state in ['already-exited' 'naturally-exited'])) 'cleanup was forced, signalled or unresolved'
-    require ($cleanup.scanned_config == $s.config_path and $cleanup.matching_config_pids == []) 'cleanup lacks empty exact-config scan'
+    require ($cleanup.scanned_config == $s.config_path and $cleanup.matching_config_pids == [] and $cleanup.global_firecracker_pids == []) 'cleanup lacks empty exact-config/global scan'
     if $cleanup.state == 'naturally-exited' {
-        require (($cleanup | columns | sort) == ['forced' 'generation' 'matching_config_pids' 'observation_path' 'observation_sha256' 'pid' 'scanned_config' 'state' 'tag']) 'natural exit cleanup schema malformed'
+        require (($cleanup | columns | sort) == ['forced' 'generation' 'global_firecracker_pids' 'matching_config_pids' 'observation_path' 'observation_sha256' 'pid' 'scanned_config' 'state' 'tag']) 'natural exit cleanup schema malformed'
         require ($cleanup.observation_path == ($dir | path join $"($s.tag)-owner-observation.json")) 'owner observation path differs from tag'
         assert_sha $cleanup.observation_path $cleanup.observation_sha256
         let observation = (open $cleanup.observation_path)
         require (($observation | columns | sort) == ['argv' 'exe' 'generation' 'pid' 'state']) 'owner observation schema malformed'
         require (($observation.pid | into string) == ($owner.pid | into string) and ($observation.generation | into string) == ($owner.generation | into string) and $observation.state =~ '^[A-Za-z]$') 'owner observation generation or state invalid'
     } else {
-        require (($cleanup | columns | sort) == ['forced' 'generation' 'matching_config_pids' 'pid' 'scanned_config' 'state' 'tag']) 'already exited cleanup schema malformed'
+        require (($cleanup | columns | sort) == ['forced' 'generation' 'global_firecracker_pids' 'matching_config_pids' 'pid' 'scanned_config' 'state' 'tag']) 'already exited cleanup schema malformed'
     }
     let raw = (open --raw $s.raw_path)
     require ($s.nonce =~ '^fc-ab-[0-9a-f-]+$') 'nonce format invalid'
@@ -72,6 +72,13 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
         require (not ($raw | str contains 'panic:')) 'timed boot contains kernel panic'
         require ((actual_line $raw 'FIRE_42') and ($raw | str contains 'SHELL_GATE=pass') and ($raw | str contains 'HOST_PING=pass')) 'shell or host ping not proven'
         require (ordered $raw 'SMOLFIRE_READY' 'FIRE_42') 'shell output preceded READY'
+        require ($s.pre_reboot_owner_path == ($dir | path join $"($s.tag)-pre-reboot-owner.json")) 'pre-reboot owner path differs from tag'
+        assert_sha $s.pre_reboot_owner_path $s.pre_reboot_owner_sha256
+        let pre = (open $s.pre_reboot_owner_path)
+        require (($pre | columns | sort) == ['argv' 'exe' 'generation' 'pid' 'state']) 'pre-reboot owner schema malformed'
+        require (($pre.pid | into string) == ($owner.pid | into string) and ($pre.generation | into string) == ($owner.generation | into string) and $pre.exe == $owner.exe and $pre.argv == $owner.argv and not ($pre.state in ['Z' 'X' 'x'])) 'pre-reboot owner was not exact/live'
+        require (($raw | str contains 'OWNER_VERIFY=pass') and ($raw | str contains 'GUEST_REBOOT_SENT=1') and ($raw | str contains 'CONSOLE_EOF=after_reboot') and (actual_line $raw '# reboot')) 'attached-console reboot/EOF evidence absent'
+        require ((ordered $raw 'HOST_PING=pass' 'OWNER_VERIFY=pass') and (ordered $raw 'OWNER_VERIFY=pass' 'GUEST_REBOOT_SENT=1') and (ordered $raw 'GUEST_REBOOT_SENT=1' '# reboot') and (ordered $raw '# reboot' 'CONSOLE_EOF=after_reboot')) 'reboot or EOF occurred before functional/owner gate'
         let rows = ($raw | parse -r 'TIME_TO_READY=(?<ms>[0-9]+)ms')
         require (($rows | length) == 1) 'READY time missing or ambiguous'
         let ms = ($rows.0.ms | into int)

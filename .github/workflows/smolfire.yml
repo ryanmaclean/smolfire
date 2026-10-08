@@ -132,9 +132,16 @@ jobs:
           set -e
           cd "$WORK"
           ssh-keygen -t ed25519 -N '' -f ci_key -q
-          printf 'instance-id: smolfire-ci\nlocal-hostname: smolfire-build\n' > meta-data
+          ssh-keygen -t ed25519 -N '' -f ci_host_key -q
+          printf '[127.0.0.1]:%s %s\n' "$SSH_PORT" "$(cut -d ' ' -f 1,2 ci_host_key.pub)" > known_hosts
+          printf 'instance-id: smolfire-ci-%s-%s\nlocal-hostname: smolfire-build\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > meta-data
           {
             echo '#cloud-config'
+            echo 'ssh_deletekeys: true'
+            echo 'ssh_keys:'
+            echo '  ed25519_private: |'
+            sed 's/^/    /' ci_host_key
+            echo "  ed25519_public: $(cat ci_host_key.pub)"
             echo 'users:'
             echo '  - name: root'
             echo '    ssh_authorized_keys:'
@@ -180,7 +187,7 @@ jobs:
           nu "$GITHUB_WORKSPACE/tests/hosted-qemu-owner.nu" --mode build --capture --work "$WORK"
           echo "Waiting for SSH ..."
           for i in $(seq 1 120); do
-            if ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            if ssh -i ci_key -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORK/known_hosts" -o HostKeyAlgorithms=ssh-ed25519 \
                    -o ConnectTimeout=3 -o BatchMode=yes -p "$SSH_PORT" \
                    root@127.0.0.1 'echo VM_UP && uname -rm'; then
               exit 0
@@ -193,7 +200,7 @@ jobs:
         run: |
           set -e
           cd "$WORK"
-          SSH="ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          SSH="ssh -i ci_key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$WORK/known_hosts -o HostKeyAlgorithms=ssh-ed25519 \
                -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@127.0.0.1"
           $SSH 'env ASSUME_ALWAYS_YES=yes pkg update -q && env ASSUME_ALWAYS_YES=yes pkg install -y git'
           $SSH "git clone --depth 1 -b $SRC_BRANCH https://git.freebsd.org/src.git /usr/src"
@@ -209,19 +216,19 @@ jobs:
           fi
           BUILD_RC=0
           $SSH "env SMOLFIRE_TSLOG=$TSLOG_ENV SMOLFIRE_CPUID_DIAG=$CPUID_ENV sh /root/smolfire/bin/build-smolfire.sh" 2>&1 | tee build.log || BUILD_RC=$?
-          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          scp -i ci_key -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORK/known_hosts" -o HostKeyAlgorithms=ssh-ed25519 \
               -P "$SSH_PORT" root@127.0.0.1:/var/tmp/smolfire-build.log \
               "$WORK/smolfire-build-vm.log" || true
           if [ "$BUILD_RC" -ne 0 ]; then
             echo "ERROR: build rc=$BUILD_RC"; tail -100 "$WORK/smolfire-build-vm.log" || true; exit 1
           fi
-          scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          scp -i ci_key -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORK/known_hosts" -o HostKeyAlgorithms=ssh-ed25519 \
               -P "$SSH_PORT" root@127.0.0.1:/root/smolfire-kernel "$WORK/smolfire-kernel"
           ls -lh "$WORK/smolfire-kernel"
           BYTES=$(wc -c < "$WORK/smolfire-kernel")
           echo "kernel_bytes=$BYTES ($((BYTES / 1048576)) MiB — this file is the whole OS)"
           if [ "$TSLOG_ENV" = 1 ]; then
-            scp -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            scp -i ci_key -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORK/known_hosts" -o HostKeyAlgorithms=ssh-ed25519 \
                 -P "$SSH_PORT" root@127.0.0.1:/root/smolfire-kernel-tslog "$WORK/smolfire-kernel-tslog"
             ls -lh "$WORK/smolfire-kernel-tslog"
           fi
@@ -254,7 +261,8 @@ jobs:
           sudo ip link set tap0 up
           TOK="net-${RANDOM}${RANDOM}"
           mkdir -p "$WORK/www"; printf '%s' "$TOK" > "$WORK/www/token.txt"
-          curl -fsS "http://172.16.0.1:8080/token.txt" >/dev/null || { echo "ERROR: token server not answering"; exit 1; }
+          HTTP_TOKEN=$(curl -fsS "http://172.16.0.1:8080/token.txt") || { echo "ERROR: token service not answering on TAP"; exit 1; }
+          [ "$HTTP_TOKEN" = "$TOK" ] || { echo "ERROR: token service mounted wrong content"; exit 1; }
           # boot_args re-enables ACPI: the FIRECRACKER conf bakes
           # hint.acpi.0.disabled=1 (static env), but the PVH cmdline env is
           # consulted FIRST (kern_environment: md_envp before kern_envp), so

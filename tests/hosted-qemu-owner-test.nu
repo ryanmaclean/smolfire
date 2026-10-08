@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # SPDX-License-Identifier: Apache-2.0
 # Synthetic filesystem and policy fixtures only; no VM or process operation.
-use hosted-qemu-owner.nu [wait_decision matching_marker_pids owner_identity_decision]
+use hosted-qemu-owner.nu [wait_decision matching_marker_pids owner_identity_decision ssh_target_decision]
 
 def require [ok: bool, reason: string] { if not $ok { error make {msg: $reason} } }
 
@@ -16,6 +16,13 @@ require ((owner_identity_decision $observed $owner) == 'MATCH') 'exact QEMU owne
 require ((owner_identity_decision ($observed | upsert generation '222') $owner) == 'HOLD') 'reused PID was accepted'
 require ((owner_identity_decision ($observed | upsert argv (['qemu-system-x86_64' '-pidfile' '/mnt/smolfire-ci/vm.pid' '-drive' 'file=/other.qcow2'])) $owner) == 'HOLD') 'extra argv was accepted'
 require ((owner_identity_decision ($observed | upsert exe '/bin/other') $owner) == 'HOLD') 'changed executable was accepted'
+let route_owner = ($owner | upsert argv (['qemu-system-x86_64' '-pidfile' '/mnt/smolfire-ci/vm.pid' '-nic' 'user,model=virtio-net-pci,hostfwd=tcp::2253-:22']))
+let guest_host_pub = 'ssh-ed25519 AAAAfixturekey ephemeral'
+let guest_known = '[127.0.0.1]:2253 ssh-ed25519 AAAAfixturekey'
+require ((ssh_target_decision $route_owner '2253' $guest_known $guest_host_pub) == 'MATCH') 'pinned guest route rejected'
+require ((ssh_target_decision $route_owner '2254' $guest_known $guest_host_pub) == 'HOLD') 'changed port accepted'
+require ((ssh_target_decision $route_owner '2253' '[127.0.0.1]:2253 ssh-ed25519 OTHER' $guest_host_pub) == 'HOLD') 'wrong host key accepted'
+require ((ssh_target_decision ($route_owner | upsert argv ['qemu-system-x86_64' '-nic' 'user']) '2253' $guest_known $guest_host_pub) == 'HOLD') 'missing QEMU hostfwd accepted'
 
 let fixture = (($env.TMPDIR? | default '/tmp') | path join $"smolfire-qemu-owner-fixture-(random uuid)")
 mkdir ($fixture | path join '123')
@@ -30,6 +37,11 @@ require $unreadable 'unreadable process metadata was accepted'
 rm -r $fixture
 
 let source = (open --raw ($env.CURRENT_FILE | path dirname | path join 'hosted-qemu-owner.nu'))
+let first_owner_check = ($source | str index-of "require ((owner_identity_decision $first $owner) == 'MATCH')")
+let pinned_route_check = ($source | str index-of 'ssh_target_decision $owner $port $known $public')
+let guest_command = ($source | str index-of "let command = (^ssh")
+let shutdown_required = ($source | str index-of 'require ($shutdown_rc == 0)')
+require ($first_owner_check >= 0 and $pinned_route_check > $first_owner_check and $guest_command > $pinned_route_check and $shutdown_required > $guest_command) 'guest shutdown moved before exact owner/route/key check or its result became optional'
 for forbidden in ['^kill ' 'exec kill ' 'pkill ' 'kill -TERM' 'kill -KILL' 'timeout 60 expect'] {
     require (not ($source | str contains $forbidden)) $"QEMU owner helper regained unsafe signal path: ($forbidden)"
 }

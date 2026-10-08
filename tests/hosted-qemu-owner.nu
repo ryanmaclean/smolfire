@@ -42,6 +42,15 @@ export def owner_identity_decision [observed: record, owner: record] {
     if $observed.exe != $owner.exe or $observed.argv != $owner.argv { return 'HOLD' }
     'MATCH'
 }
+export def ssh_target_decision [owner: record, port: string, known: string, public: string] {
+    if not ($port =~ '^[0-9]+$') { return 'HOLD' }
+    let parts = ($public | str trim | split row ' ' | where $it != '')
+    if ($parts | length) < 2 or $parts.0 != 'ssh-ed25519' { return 'HOLD' }
+    let expected = $"[127.0.0.1]:($port) ($parts.0) ($parts.1)"
+    let nic = $"user,model=virtio-net-pci,hostfwd=tcp::($port)-:22"
+    if ($known | str trim) != $expected or not ($nic in $owner.argv) { return 'HOLD' }
+    'MATCH'
+}
 def exact_live_snapshot [observed: record, owner: record] {
     require ((owner_identity_decision $observed $owner) in ['MATCH' 'EXITED']) 'QEMU PID generation, executable, or exact argv changed during wait'
 }
@@ -94,17 +103,31 @@ def cleanup [work: string, mode: string] {
     require ((open --raw $n.pidfile | str trim) == $pid) 'QEMU pidfile differs from spawn-time owner'
     let proc = $"/proc/($pid)"
     mut shutdown_rc = -1
-    if $mode == 'build' and ($proc | path exists) {
-        let command = (^ssh -i ($work | path join 'ci_key') -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -o BatchMode=yes -p ($env.SSH_PORT? | default '2253') root@127.0.0.1 'shutdown -p now' | complete)
-        $shutdown_rc = $command.exit_code
-    }
     mut observation = {path: '', sha256: ''}
     if ($proc | path exists) {
         let first = (snapshot $pid)
-        exact_live_snapshot $first $owner
+        require ((owner_identity_decision $first $owner) == 'MATCH') 'build VM changed identity or exited before command'
         let observed_path = ($work | path join $"(if $mode == 'build' { 'vm' } else { 'qemu-microvm' })-observation.json")
         $first | to json --raw | save --raw --force $observed_path
         $observation = {path: $observed_path, sha256: (digest $observed_path)}
+        if $mode == 'build' {
+            let only_owner = (matching_marker_pids $n.marker)
+            require ($only_owner == [$pid]) 'build VM marker is ambiguous before guest command'
+            let port = ($env.SSH_PORT? | default '2253')
+            let known_path = ($work | path join 'known_hosts')
+            let pub_path = ($work | path join 'ci_host_key.pub')
+            require (($known_path | path exists) and ($pub_path | path exists)) 'pinned build VM SSH host identity missing'
+            let known = (open --raw $known_path)
+            let public = (open --raw $pub_path)
+            require ((ssh_target_decision $owner $port $known $public) == 'MATCH') 'build VM SSH route or pinned host key mismatched'
+            let key_check = (^ssh-keygen -y -f ($work | path join 'ci_host_key') | complete)
+            require ($key_check.exit_code == 0 and ((($key_check.stdout | str trim | split row ' ' | first 2) | str join ' ') == (($public | str trim | split row ' ' | first 2) | str join ' '))) 'pinned SSH public key does not match job private key'
+            # A second exact observation narrows the interval before dialing.
+            require ((owner_identity_decision (snapshot $pid) $owner) == 'MATCH') 'build VM changed identity before SSH shutdown'
+            let command = (^ssh -i ($work | path join 'ci_key') -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_path -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 -o BatchMode=yes -p $port root@127.0.0.1 'shutdown -p now' | complete)
+            $shutdown_rc = $command.exit_code
+            require ($shutdown_rc == 0) 'pinned build VM shutdown command failed'
+        }
         for tick in 1..50 {
             if not ($proc | path exists) { break }
             let current = (snapshot $pid)

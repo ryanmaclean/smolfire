@@ -1,8 +1,9 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# durable_tid_v0 — register-only durable completion gate (issue #87)
+# durable_tid_v0 — register-only ordering experiment (issue #87)
 
-v0 FPGA experiment: caller-supplied 0-based TID + commit FSM enforcing
-`TRUSTED_COMPLETE(N) => PERSISTENT(N)`. No BRAM queue, DMA engine, SHA,
+v0 FPGA experiment: caller-supplied 0-based TID + commit FSM ordering
+acceptance; it does not prove `TRUSTED_COMPLETE(N) => PERSISTENT(N)`.
+No BRAM queue, DMA engine, SHA,
 RISC-V softcore, NVMe stack, filesystem, networking, or generic ring —
 per #87 exclusions. Integrity is CRC-32 (IEEE 802.3).
 
@@ -10,10 +11,11 @@ per #87 exclusions. Integrity is CRC-32 (IEEE 802.3).
 > caller-supplied 0-based TID, while PENDING/DURABLE/VISIBLE remain *counts*;
 > the next valid request equals the durable count. A duplicate below the
 > durable count is rejected without a side effect. This register-only DUT
-> cannot compare a retry payload with persisted media, so the host must do
-> that before re-acknowledging an identical operation. This revision has not
-> passed an approved simulator, fitter, or same-board FPGA run. Historical
-> PASS counts later in this file belong to earlier source, not these bytes.
+> cannot compare a retry payload with persisted media. A future host would
+> need that comparison before re-acknowledging an identical operation. This
+> revision has off-board simulation of its register probe but no fitter or
+> same-board FPGA run. Historical PASS counts below may describe earlier
+> source; see the PR evidence for exact-source test results.
 
 ## Files
 
@@ -267,11 +269,11 @@ cascade); B3 mid-burst CRC-bad (`C/CRC/C`, +2); B4 mid-burst GAP
 survives); B5 N=64 max-length frame (1029-byte CMD, 77-byte RSP, all 64
 commit, watermark +64); B6 malformed (`COUNT=0`, bad CHK → silent drop,
 resync-flush, link alive); B7 error-clear / IDLE / visible==durable.
-Same always-on monitors (trusted ⇒ persistent, watermarks monotonic).
+Same legacy ordering/monotonicity monitors; they do not prove persistence.
 
-### Durability v1: the FPGA orders, the host persists
+### Current admission status: ordering only
 
-Durability is host-anchored: the fabric only ORDERS acceptance — `DURABLE_LO/HI` and the burst-RSP watermark report the ordered count, i.e. ordered-until-host-persisted, not crash-safe on its own — while the host harness (`hps/harness.c -l`, default `./durable.log`) appends one COMMIT line per commit receipt and fsyncs once per frame (group commit, never per op inside a burst), tracking dual watermarks `fpga_ordered` (fabric claim) vs `host_persisted` (post-fsync) and exposing only `host_persisted` as durable; the host crash window is ≤1 frame of acknowledged-but-unpersisted receipts, recovered by re-driving from the log (overlap comes back as side-effect-free DUP rejects). No RTL changed for this: the `DURABLE_*` register names still say "durable" but mean "ordered" until the host persists, and the honest `ORDERED` rename is explicitly DEFERRED to the next RTL rev — reason recorded here: a rename alone does not change any wire, bit, or semantic, so it must not spend a bitstream respin / re-fit on its own; host code plus this paragraph carry the honest semantics until that rev lands.
+`DURABLE_LO/HI` and the burst-RSP watermark report a volatile FPGA ordering count, not crash-safe persistence. The experimental host log writes receipts and calls `fsync`, but a parseable pre-sync `COMMIT` does not prove that its frame reached stable media. The harness does not replay missing payloads or reconcile a reset count with a retained media identity. It currently refuses every durable submitting mode, even if future RTL reports all capability bits; raw diagnostic writes and resets are outside that refusal. Both RTL variants now expose read-only `ID_PROBE=SSP1` and `ID_CAPS=0` to identify this diagnostic ABI without claiming media capability. The `DURABLE_*` wire names remain for compatibility and mean “ordered” in this revision. No-double-apply, media recovery, and board acceptance remain unproved.
 
 ### CST story (build host only — no remote files touched)
 

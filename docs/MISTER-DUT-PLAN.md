@@ -74,11 +74,11 @@ HPS view (offsets relative to OUR peripheral base — concrete since 2026-09-25)
   +0x20  RESET_CNT        (ro)  HPS-driven reset counter
 ```
 
-All addresses concrete in `rtl/README.md` (23-register live map incl. MAGIC/VERSION/CRC_CALC/TID, verified against silicon). `0xFF200000` (bridge control) is NEVER mapped, NEVER written.
+The legacy addresses are concrete in `rtl/README.md` (23-register map incl. MAGIC/VERSION/CRC_CALC/TID); the new read-only `ID_PROBE`/`ID_CAPS` offsets have only off-board source/simulation evidence, not same-board readback. `0xFF200000` (bridge control) is NEVER mapped, NEVER written.
 
-## 4b. Durability v1: the FPGA orders, the host persists
+## 4b. Current admission status: FPGA order is not persistence
 
-Durability is host-anchored: the fabric only ORDERS acceptance — the `DURABLE_SEQ` register (and the burst-RSP watermark) report the ordered count, i.e. ordered-until-host-persisted, not crash-safe on its own — while the host harness appends one COMMIT line per commit receipt to its log (default `./durable.log`, `-l` overridable) and fsyncs once per frame (group commit), tracking dual watermarks `fpga_ordered` (fabric claim) vs `host_persisted` (post-fsync) and exposing only `host_persisted` as durable; the host crash window is ≤1 frame of acknowledged-but-unpersisted receipts, recovered by re-driving un-acked frames from the log (overlap returns side-effect-free DUP rejects, no double-apply). No RTL changed for this: the `DURABLE` register name still reads "durable" but means "ordered" until the host persists, and the `DURABLE→ORDERED` rename is explicitly DEFERRED to the next RTL rev — reason: a rename changes no wire/bit/semantic and must not spend a bitstream respin alone; see `rtl/README.md` ("Durability v1" section) for the canonical statement.
+The `DURABLE_SEQ` register and burst-RSP watermark report only a volatile FPGA ordering count. A reset can erase that count. The experimental host log appends receipts and calls `fsync`, but a parseable `COMMIT` record written before the sync is not proof of a completed persistence barrier. The harness has no request-bound media identity receipt, payload replay, or demonstrated no-double-apply recovery. Its five submitting modes now refuse durable admission, including when hypothetical capability bits are set; raw diagnostic register writes and resets are outside that admission claim. The RTL exposes `ID_PROBE=SSP1` and `ID_CAPS=0` as read-only diagnostics, not as media proof. The legacy `DURABLE` register name is retained for wire compatibility and should be read as “ordered,” not crash-safe. See `rtl/README.md` for the corresponding status.
 
 ## 5. Fault-injection hook point (#88)
 

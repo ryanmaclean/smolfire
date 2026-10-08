@@ -1,6 +1,7 @@
 #!/usr/bin/env nu
 # Non-release QEMU mechanism receipt checker. This never starts a VM.
 # It deliberately cannot return a Firecracker acceptance verdict.
+use cpuid-panic-evidence.nu panic_kernel_seen
 
 def require [ok: bool, why: string] {
     if not $ok { error make { msg: $why } }
@@ -75,7 +76,7 @@ def main [report: path] {
     require ($r.panic_control_elf_sha256 == $r.release_elf_sha256) 'panic control used a different ELF'
     require (($r.panic_control_argv | where {|a| $a == $r.release_elf_path} | length) == 1) 'panic control argv lacks the release ELF'
     let panic_raw = (open --raw $r.panic_control_serial_path)
-    require (($panic_raw | str contains 'panic:') and ($panic_raw | str contains $"SMOLFIRE_NET_OK ($r.panic_control_nonce)")) 'panic control did not show raw nonce and panic text'
+    require ((panic_kernel_seen $panic_raw) and ($panic_raw | str contains $"SMOLFIRE_NET_OK ($r.panic_control_nonce)")) 'panic control did not show kernel-origin panic line and raw nonce'
     require (($r.samples | length) >= 6) 'fewer than three A/B pairs'
     let ids = ($r.samples | get pair | uniq | sort)
     require (($ids | length) >= 3) 'fewer than three distinct pairs'

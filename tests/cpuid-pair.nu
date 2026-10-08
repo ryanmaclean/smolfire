@@ -1,5 +1,6 @@
 #!/usr/bin/env nu
 # SPDX-License-Identifier: Apache-2.0
+use cpuid-panic-evidence.nu panic_kernel_seen
 # Branch-only QEMU mechanism control. Copy to tests/cpuid-pair.nu only after peer review.
 # Default invocation is source-only; --execute is for an admitted GitHub KVM job.
 
@@ -200,7 +201,7 @@ if {$rc == 0 && $env(CPUID_MODE) == "probe"} {
 if {$rc == 0 && $env(CPUID_MODE) == "panic"} {
   send -- "sysctl debug.kdb.panic=1\r"
   expect {
-    -re {panic:} { puts "PANIC_CONTROL=pass" }
+    -re {(^|[\r\n]|debug[.]kdb[.]panic: *[0-9]*)panic: kdb_sysctl_panic([\r\n]|$)} { puts "PANIC_CONTROL=pass" }
     timeout { puts "PANIC_CONTROL=fail"; set rc 8 }
     eof { puts "PANIC_CONTROL=fail QEMU exit"; set rc 8 }
   }
@@ -243,6 +244,7 @@ def boot [work: string, kernel: string, variant: string, mode: string, tag: stri
     require ($run.stdout | str contains $"SMOLFIRE_NET_OK ($nonce)") $"($tag) raw network nonce missing"
     if $mode == 'panic' {
         require ($run.stdout | str contains 'PANIC_CONTROL=pass') $"($tag) raw panic control missing"
+        require (panic_kernel_seen $run.stdout) $"($tag) kernel-origin panic line missing"
     } else {
         require (($run.stdout | str contains 'SHELL_GATE=pass') and ($run.stdout | str contains 'HOST_PING=pass')) $"($tag) raw shell/ping markers missing"
     }
@@ -341,7 +343,7 @@ def main [--execute, --cleanup-only, --work: string = '/mnt/smolfire-ci', --audi
         }))
     }
     let panic = (boot $work $release 'off' 'panic' 'panic-control')
-    require ($panic.stdout | str contains 'PANIC_CONTROL=pass') 'same-ELF panic visibility control failed'
+    require (panic_kernel_seen $panic.stdout) 'same-ELF kernel panic visibility control failed'
     let cpu_rows = (open --raw /proc/cpuinfo | lines | where {|x| $x | str starts-with 'model name'})
     require (($cpu_rows | length) > 0) 'host CPU identity missing'
     let qemu_version = (^qemu-system-x86_64 --version | lines | first)
@@ -353,7 +355,7 @@ def main [--execute, --cleanup-only, --work: string = '/mnt/smolfire-ci', --audi
         tslog_elf_path: $tslog, tslog_elf_sha256: (digest $tslog),
         tslog_clockcalib_trace_path: ($paired | first | get cpuid_path),
         tslog_clockcalib_trace_sha256: ($paired | first | get cpuid_sha256),
-        panic_control_serial_path: $panic.log, panic_control_sha256: $panic.sha256, panic_control_seen: true,
+        panic_control_serial_path: $panic.log, panic_control_sha256: $panic.sha256, panic_control_seen: (panic_kernel_seen $panic.stdout),
         panic_control_elf_sha256: (digest $release), panic_control_argv: $panic.argv, panic_control_nonce: $panic.nonce,
         samples: $paired
     } | to json --indent 2 | save --raw $report

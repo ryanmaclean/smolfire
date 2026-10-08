@@ -16,7 +16,7 @@ def main [] {
     'synthetic clockcalib phase' | save --raw $trace
     'SMOLFIRE_NET_OK panic-nonce
 SMOLFIRE_READY
-panic: synthetic visible control' | save --raw $panic
+panic: kdb_sysctl_panic' | save --raw $panic
     mut samples = []
     for pair in 1..3 {
         let variants = (if $pair == 2 { ['on' 'off'] } else { ['off' 'on'] })
@@ -73,5 +73,15 @@ panic: synthetic visible control' | save --raw $panic
     (open $report | update samples.0.cpuid_probe_argv $wrong_argv | to json) | save --raw $wrong_cpu
     let cpu_rejected = (^nu $audit $wrong_cpu | complete)
     if $cpu_rejected.exit_code == 0 { error make {msg: 'wrong diagnostic CPU flag was accepted'} }
-    print 'synthetic validator PASS: valid 3-pair receipt accepted, nonce and diagnostic-CPU faults rejected, Firecracker goal unproven'
+    let echo_only = ($dir | path join 'echo-only.raw')
+    'SMOLFIRE_NET_OK panic-nonce
+SMOLFIRE_READY
+# sysctl debug.kdb.panic=1
+debug.kdb.panic:PANIC_CONTROL=pass
+VERDICT_RC=0' | save --raw $echo_only
+    let false_panic = ($dir | path join 'false-panic.json')
+    (open $report | update panic_control_serial_path $echo_only | update panic_control_sha256 (digest $echo_only) | to json) | save --raw $false_panic
+    let panic_rejected = (^nu $audit $false_panic | complete)
+    if $panic_rejected.exit_code == 0 { error make {msg: 'echo-only panic control was accepted'} }
+    print 'synthetic validator PASS: valid 3-pair receipt accepted; nonce, CPU flag and echoed panic faults rejected; Firecracker goal unproven'
 }

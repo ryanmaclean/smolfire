@@ -23,6 +23,12 @@ def allow-list []: nothing -> record {
         # Nushell-only policy and is explicitly grandfathered in rather than
         # ported, per the owner's own instruction.
         "bin/fix-freebsd-vm.py": "owner's own file (May 2026), grandfathered — not ported",
+        # Owner-granted Python exception (2026-10-07): DUT serial drivers.
+        # Nushell cannot do serial-port I/O; these are the live-proven /tmp
+        # throwaways (kv_demo.py, dispatch_journal.py) committed with only
+        # --port/--baud CLI flags added. See tools/README.md.
+        "tools/dut_kv.py": "DUT serial driver, owner exception 2026-10-07 — serial I/O Nushell cannot do",
+        "tools/dispatch_journal.py": "DUT serial driver, owner exception 2026-10-07 — serial I/O Nushell cannot do",
     }
 }
 

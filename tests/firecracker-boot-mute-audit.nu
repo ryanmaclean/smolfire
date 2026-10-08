@@ -27,6 +27,7 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
     require ($s.release_elf_sha256 == $r.release_elf_sha256 and $s.firecracker_sha256 == $r.firecracker_sha256) 'per-boot ELF or VMM hash differs from pinned bytes'
     require ($s.intent_path == ($dir | path join $"($s.tag)-intent.json")) 'intent path mismatch'
     require ($s.owner_path == ($dir | path join $"($s.tag)-owner.json")) 'owner path mismatch'
+    require ($s.pre_control_owner_path == ($dir | path join $"($s.tag)-(if $panic { 'pre-panic' } else { 'pre-reboot' })-owner.json")) 'pre-command owner path differs from tag/mode'
     require ($s.raw_path == ($dir | path join $"($s.tag).raw")) 'raw path mismatch'
     require ($s.cleanup_path == ($dir | path join $"($s.tag)-cleanup.json")) 'cleanup path mismatch'
     for entry in [[$s.config_path $s.config_sha256] [$s.intent_path $s.intent_sha256] [$s.owner_path $s.owner_sha256] [$s.raw_path $s.raw_sha256] [$s.cleanup_path $s.cleanup_sha256]] {
@@ -43,6 +44,10 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
     require ($intent.tag == $s.tag and $intent.variant == $s.variant and $intent.nonce == $s.nonce and $intent.config == $s.config_path and $intent.config_sha256 == $s.config_sha256 and $intent.argv == $expected_argv and $intent.release_elf_sha256 == $r.release_elf_sha256 and $intent.firecracker_sha256 == $r.firecracker_sha256) 'intent differs from pinned report'
     let owner = (open $s.owner_path)
     require (($owner.pid | into string) =~ '^[0-9]+$' and ($owner.generation | into string) =~ '^[0-9]+$' and $owner.config == $s.config_path and $owner.exe == $r.firecracker_path and $owner.argv == $expected_argv) 'spawn-time owner PID/generation/config/executable/argv invalid'
+    assert_sha $s.pre_control_owner_path $s.pre_control_owner_sha256
+    let pre = (open $s.pre_control_owner_path)
+    require (($pre | columns | sort) == ['argv' 'exe' 'generation' 'pid' 'state']) 'pre-command owner schema malformed'
+    require (($pre.pid | into string) == ($owner.pid | into string) and ($pre.generation | into string) == ($owner.generation | into string) and $pre.exe == $owner.exe and $pre.argv == $owner.argv and not ($pre.state in ['Z' 'X' 'x'])) 'pre-command owner was not exact/live'
     let cleanup = (open $s.cleanup_path)
     require ($cleanup.tag == $s.tag and ($cleanup.pid | into string) == ($owner.pid | into string) and ($cleanup.generation | into string) == ($owner.generation | into string)) 'cleanup owner generation mismatch'
     require (not $cleanup.forced and ($cleanup.state in ['already-exited' 'naturally-exited'])) 'cleanup was forced, signalled or unresolved'
@@ -68,15 +73,13 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
         require ($s.variant == 'on' and $s.tag == 'panic-control') 'panic control must use muted release ELF'
         require (($raw | str contains 'PANIC_CONTROL=pass') and (panic_kernel_seen $raw)) 'kernel-origin panic line absent'
         require (ordered $raw 'SMOLFIRE_READY' 'panic: kdb_sysctl_panic') 'panic occurred before READY'
+        require (($raw | str contains 'OWNER_PREP_VERIFY=pass') and ($raw | str contains 'PANIC_DEBUGGER_SET=pass') and ($raw | str contains 'PANIC_DEBUGGER_READBACK=0') and ($raw | str contains 'OWNER_VERIFY=pass') and ($raw | str contains 'PANIC_TRIGGER_SENT=1') and ($raw | str contains 'CONSOLE_EOF=after_panic')) 'panic control lacks verified debugger/owner/trigger/EOF proof'
+        require ((actual_line $raw '# sysctl debug.debugger_on_panic=0') and (actual_line $raw '# sysctl -n debug.debugger_on_panic') and (actual_line $raw '0') and (actual_line $raw '# sysctl debug.kdb.panic=1')) 'panic guest command/readback absent'
+        require ((ordered $raw 'SMOLFIRE_READY' 'OWNER_PREP_VERIFY=pass') and (ordered $raw 'OWNER_PREP_VERIFY=pass' '# sysctl debug.debugger_on_panic=0') and (ordered $raw '# sysctl debug.debugger_on_panic=0' 'PANIC_DEBUGGER_SET=pass') and (ordered $raw 'PANIC_DEBUGGER_SET=pass' '# sysctl -n debug.debugger_on_panic') and (ordered $raw '# sysctl -n debug.debugger_on_panic' 'PANIC_DEBUGGER_READBACK=0') and (ordered $raw 'PANIC_DEBUGGER_READBACK=0' 'OWNER_VERIFY=pass') and (ordered $raw 'OWNER_VERIFY=pass' 'PANIC_TRIGGER_SENT=1') and (ordered $raw 'PANIC_TRIGGER_SENT=1' '# sysctl debug.kdb.panic=1') and (ordered $raw '# sysctl debug.kdb.panic=1' 'panic: kdb_sysctl_panic') and (ordered $raw 'panic: kdb_sysctl_panic' 'PANIC_CONTROL=pass') and (ordered $raw 'PANIC_CONTROL=pass' 'CONSOLE_EOF=after_panic')) 'panic debugger, trigger, kernel line or natural EOF out of order'
     } else {
         require (not ($raw | str contains 'panic:')) 'timed boot contains kernel panic'
         require ((actual_line $raw 'FIRE_42') and ($raw | str contains 'SHELL_GATE=pass') and ($raw | str contains 'HOST_PING=pass')) 'shell or host ping not proven'
         require (ordered $raw 'SMOLFIRE_READY' 'FIRE_42') 'shell output preceded READY'
-        require ($s.pre_reboot_owner_path == ($dir | path join $"($s.tag)-pre-reboot-owner.json")) 'pre-reboot owner path differs from tag'
-        assert_sha $s.pre_reboot_owner_path $s.pre_reboot_owner_sha256
-        let pre = (open $s.pre_reboot_owner_path)
-        require (($pre | columns | sort) == ['argv' 'exe' 'generation' 'pid' 'state']) 'pre-reboot owner schema malformed'
-        require (($pre.pid | into string) == ($owner.pid | into string) and ($pre.generation | into string) == ($owner.generation | into string) and $pre.exe == $owner.exe and $pre.argv == $owner.argv and not ($pre.state in ['Z' 'X' 'x'])) 'pre-reboot owner was not exact/live'
         require (($raw | str contains 'OWNER_VERIFY=pass') and ($raw | str contains 'GUEST_REBOOT_SENT=1') and ($raw | str contains 'CONSOLE_EOF=after_reboot') and (actual_line $raw '# reboot')) 'attached-console reboot/EOF evidence absent'
         require ((ordered $raw 'HOST_PING=pass' 'OWNER_VERIFY=pass') and (ordered $raw 'OWNER_VERIFY=pass' 'GUEST_REBOOT_SENT=1') and (ordered $raw 'GUEST_REBOOT_SENT=1' '# reboot') and (ordered $raw '# reboot' 'CONSOLE_EOF=after_reboot')) 'reboot or EOF occurred before functional/owner gate'
         let rows = ($raw | parse -r 'TIME_TO_READY=(?<ms>[0-9]+)ms')

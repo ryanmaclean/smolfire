@@ -52,13 +52,14 @@ def main [] {
         $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=($ms)ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\nOWNER_VERIFY=pass\nGUEST_REBOOT_SENT=1\n# reboot\nCONSOLE_EOF=after_reboot\n" | save --raw $raw_path
         '' | save --raw $stderr_path
         {tag: $tag, pid: $pid, generation: $"10($i)", forced: false, state: 'already-exited', scanned_config: $cfg, matching_config_pids: [], global_firecracker_pids: []} | to json --raw | save --raw $cleanup_path
-        $samples = ($samples | append {tag: $tag, variant: $variant, nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), pre_reboot_owner_path: $pre_path, pre_reboot_owner_sha256: (sha $pre_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: $ms, pair: (((($i - 1) / 2) | math floor) + 1), order_index: $i})
+        $samples = ($samples | append {tag: $tag, variant: $variant, nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), pre_control_owner_path: $pre_path, pre_control_owner_sha256: (sha $pre_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: $ms, pair: (((($i - 1) / 2) | math floor) + 1), order_index: $i})
     }
     let tag = 'panic-control'
     let nonce = 'fc-ab-00000000-0000-0000-0000-000000000007'
     let cfg = ($dir | path join 'panic-control-config.json')
     let intent_path = ($dir | path join 'panic-control-intent.json')
     let owner_path = ($dir | path join 'panic-control-owner.json')
+    let pre_panic_path = ($dir | path join 'panic-control-pre-panic-owner.json')
     let raw_path = ($dir | path join 'panic-control.raw')
     let stderr_path = ($dir | path join 'panic-control.stderr')
     let cleanup_path = ($dir | path join 'panic-control-cleanup.json')
@@ -66,17 +67,19 @@ def main [] {
     let args = [$binary '--no-api' '--config-file' $cfg]
     {tag: $tag, variant: 'on', nonce: $nonce, config: $cfg, config_sha256: (sha $cfg), argv: $args, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary)} | to json --raw | save --raw $intent_path
     {pid: '907', generation: '107', config: $cfg, exe: $binary, argv: $args} | to json --raw | save --raw $owner_path
-    $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nsysctl debug.kdb.panic=1\ndebug.kdb.panic: 0panic: kdb_sysctl_panic\nPANIC_CONTROL=pass\n" | save --raw $raw_path
+    {pid: '907', generation: '107', state: 'S', exe: $binary, argv: $args} | to json --raw | save --raw $pre_panic_path
+    $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nOWNER_PREP_VERIFY=pass\n# sysctl debug.debugger_on_panic=0\ndebug.debugger_on_panic: 1 -> 0\nPANIC_DEBUGGER_SET=pass\n# sysctl -n debug.debugger_on_panic\n0\nPANIC_DEBUGGER_READBACK=0\nOWNER_VERIFY=pass\nPANIC_TRIGGER_SENT=1\n# sysctl debug.kdb.panic=1\ndebug.kdb.panic: 0panic: kdb_sysctl_panic\nPANIC_CONTROL=pass\nCONSOLE_EOF=after_panic\n" | save --raw $raw_path
     '' | save --raw $stderr_path
     {tag: $tag, pid: '907', generation: '107', forced: false, state: 'already-exited', scanned_config: $cfg, matching_config_pids: [], global_firecracker_pids: []} | to json --raw | save --raw $cleanup_path
-    let panic = {tag: $tag, variant: 'on', nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: null}
+    let panic = {tag: $tag, variant: 'on', nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), pre_control_owner_path: $pre_panic_path, pre_control_owner_sha256: (sha $pre_panic_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: null}
     let report = {kind: 'firecracker-boot-mute-pairs-v1', source_commit: ('a' | fill -c a -w 40), host_class: 'github-hosted-linux-kvm', host_cpu: 'synthetic CPU', firecracker_version: 'Firecracker v1.12.0', firecracker_path: $binary, firecracker_sha256: (sha $binary), release_elf_path: $release, release_elf_sha256: (sha $release), base_config_path: $base_path, base_config_sha256: (sha $base_path), samples: $samples, panic_control: $panic}
     let report_path = ($dir | path join 'report.json')
     $report | to json --indent 2 | save --raw $report_path
     let original_report = (open --raw $report_path)
     let original_panic_raw = (open --raw $raw_path)
     let original_first_raw = (open --raw $samples.0.raw_path)
-    let original_first_pre = (open --raw $samples.0.pre_reboot_owner_path)
+    let original_first_pre = (open --raw $samples.0.pre_control_owner_path)
+    let original_panic_pre = (open --raw $panic.pre_control_owner_path)
     let original_first_config = (open --raw $samples.0.config_path)
     let original_first_intent = (open --raw $samples.0.intent_path)
     let original_first_owner = (open --raw $samples.0.owner_path)
@@ -107,18 +110,43 @@ def main [] {
     $early_eof_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'console EOF before guest reboot'
     $original_first_raw | save --raw --force $samples.0.raw_path
-    let changed_pre = ((open $samples.0.pre_reboot_owner_path) | upsert generation '999')
-    $changed_pre | to json --raw | save --raw --force $samples.0.pre_reboot_owner_path
-    let changed_pre_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert pre_reboot_owner_sha256 (sha $samples.0.pre_reboot_owner_path))))
+    let changed_pre = ((open $samples.0.pre_control_owner_path) | upsert generation '999')
+    $changed_pre | to json --raw | save --raw --force $samples.0.pre_control_owner_path
+    let changed_pre_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert pre_control_owner_sha256 (sha $samples.0.pre_control_owner_path))))
     $changed_pre_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'pre-reboot owner generation changed with recomputed hash'
-    $original_first_pre | save --raw --force $samples.0.pre_reboot_owner_path
+    $original_first_pre | save --raw --force $samples.0.pre_control_owner_path
     let residual_global_cleanup = ((open $samples.0.cleanup_path) | upsert global_firecracker_pids ['999'])
     $residual_global_cleanup | to json --raw | save --raw --force $samples.0.cleanup_path
     let residual_global_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
     $residual_global_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'global Firecracker still present before TAP reuse'
     $original_first_cleanup | save --raw --force $samples.0.cleanup_path
+    $original_report | save --raw --force $report_path
+    for marker in ["OWNER_PREP_VERIFY=pass\n" "PANIC_DEBUGGER_SET=pass\n" "PANIC_DEBUGGER_READBACK=0\n" "OWNER_VERIFY=pass\n" "PANIC_TRIGGER_SENT=1\n" "# sysctl debug.kdb.panic=1\n" "PANIC_CONTROL=pass\n" "CONSOLE_EOF=after_panic\n"] {
+        let altered = ($original_panic_raw | str replace $marker '')
+        $altered | save --raw --force $raw_path
+        let altered_report = ($report | upsert panic_control ($panic | upsert raw_sha256 (sha $raw_path)))
+        $altered_report | to json --raw | save --raw --force $report_path
+        reject $audit $report_path $"missing panic-control marker ($marker)"
+    }
+    let debugger_still_on = ($original_panic_raw | str replace "# sysctl -n debug.debugger_on_panic\n0\n" "# sysctl -n debug.debugger_on_panic\n1\n")
+    $debugger_still_on | save --raw --force $raw_path
+    let debugger_on_report = ($report | upsert panic_control ($panic | upsert raw_sha256 (sha $raw_path)))
+    $debugger_on_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'panic debugger readback stayed enabled despite pass marker'
+    let early_panic_eof = ($original_panic_raw | str replace "PANIC_CONTROL=pass\nCONSOLE_EOF=after_panic\n" "CONSOLE_EOF=after_panic\nPANIC_CONTROL=pass\n")
+    $early_panic_eof | save --raw --force $raw_path
+    let early_panic_report = ($report | upsert panic_control ($panic | upsert raw_sha256 (sha $raw_path)))
+    $early_panic_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'panic-control EOF before kernel panic verdict'
+    $original_panic_raw | save --raw --force $raw_path
+    let forged_panic_owner = ((open $panic.pre_control_owner_path) | upsert argv ($args | append '--foreign'))
+    $forged_panic_owner | to json --raw | save --raw --force $panic.pre_control_owner_path
+    let forged_panic_report = ($report | upsert panic_control ($panic | upsert pre_control_owner_sha256 (sha $panic.pre_control_owner_path)))
+    $forged_panic_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'panic-control owner argv changed with recomputed hash'
+    $original_panic_pre | save --raw --force $panic.pre_control_owner_path
     $original_report | save --raw --force $report_path
     $good.stdout | save --raw ($dir | path join 'audit.json')
     $good.stdout | save --raw ($dir | path join 'workflow-audit.json')

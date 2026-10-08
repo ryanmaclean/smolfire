@@ -58,8 +58,8 @@ def validate_owner_record [owner: record, intent: record] {
     require ($owner.config == $intent.config) 'owner config differs from intent'
     require ($owner.exe == $intent.argv.0 and $owner.argv == $intent.argv) 'spawn-time owner executable/argv differs from intent'
 }
-def verify_current [work: string, tag: string] {
-    require ($tag =~ '^release-[1-6]-(off|on)$') 'reboot verification is only for normal timed boots'
+def verify_current [work: string, tag: string, mode: string] {
+    require ((($mode == 'release') and ($tag =~ '^release-[1-6]-(off|on)$')) or (($mode == 'panic') and ($tag == 'panic-control'))) 'owner verification mode/tag mismatch'
     let dir = (result_dir $work)
     require (($dir | path join 'current-tag' | path exists) and (open --raw ($dir | path join 'current-tag') | str trim) == $tag) 'current boot tag changed before guest reboot'
     let intent_path = ($dir | path join $"($tag)-intent.json")
@@ -67,16 +67,16 @@ def verify_current [work: string, tag: string] {
     require (($intent_path | path exists) and ($owner_path | path exists)) 'attempted boot intent or owner absent'
     let intent = (open $intent_path)
     let owner = (open $owner_path)
-    require ($intent.tag == $tag and $intent.config == ($dir | path join $"($tag)-config.json") and $intent.argv == (argv $work $intent.config)) 'reboot intent path or argv changed'
-    require ($intent.config_sha256 == (digest $intent.config)) 'reboot config changed after intent'
-    require ($intent.release_elf_sha256 == (digest ($work | path join 'smolfire-kernel')) and $intent.firecracker_sha256 == (digest ($work | path join 'firecracker'))) 'reboot release ELF or VMM changed'
+    require ($intent.tag == $tag and $intent.variant == (if $mode == 'panic' { 'on' } else { $tag | split row '-' | last }) and $intent.config == ($dir | path join $"($tag)-config.json") and $intent.argv == (argv $work $intent.config)) 'control intent variant/path/argv changed'
+    require ($intent.config_sha256 == (digest $intent.config)) 'control config changed after intent'
+    require ($intent.release_elf_sha256 == (digest ($work | path join 'smolfire-kernel')) and $intent.firecracker_sha256 == (digest ($work | path join 'firecracker'))) 'control release ELF or VMM changed'
     validate_owner_record $owner $intent
     let observed = (proc_snapshot $owner.pid)
-    require (not ($observed.state in ['Z' 'X' 'x']) and (owner_identity_decision $observed $owner) == 'WAIT_ABSENT') 'attached owner changed or exited before guest reboot'
+    require (not ($observed.state in ['Z' 'X' 'x']) and (owner_identity_decision $observed $owner) == 'WAIT_ABSENT') 'attached owner changed or exited before guest command'
     require ((matching_config_pids [$intent.config]) == [$owner.pid]) 'exact config scan does not identify only attached owner'
     let processes = (^pgrep -x firecracker | complete)
-    require ($processes.exit_code == 0 and (($processes.stdout | lines | where $it != '' | uniq | sort) == [$owner.pid])) 'foreign or unreadable Firecracker before guest reboot'
-    let pre = ($dir | path join $"($tag)-pre-reboot-owner.json")
+    require ($processes.exit_code == 0 and (($processes.stdout | lines | where $it != '' | uniq | sort) == [$owner.pid])) 'foreign or unreadable Firecracker before guest command'
+    let pre = ($dir | path join $"($tag)-(if $mode == 'panic' { 'pre-panic' } else { 'pre-reboot' })-owner.json")
     $observed | to json --raw | save --raw --force $pre
     {state: 'EXACT_ATTACHED_OWNER', tag: $tag, pid: $owner.pid, generation: $owner.generation, config: $intent.config, observation_sha256: (digest $pre)}
 }
@@ -99,6 +99,12 @@ def prior_firecracker_decision [pgrep_exit_code: int] {
     # No spawn-time generation exists for the ordinary gate's PID. This
     # diagnostic never signals any process, including its own Firecracker.
     if $pgrep_exit_code == 1 { 'CLEAR' } else { 'HOLD' }
+}
+def retention_decision [cleanup_ok: bool, sticky_hold: bool] {
+    if $cleanup_ok and not $sticky_hold { 'CLEAR' } else { 'HOLD' }
+}
+def late_receipt [value: record, sticky_path: string, prior_hold: bool] {
+    if $prior_hold { $value | upsert state 'hold-prior-per-boot' | insert prior_hold_path $sticky_path } else { $value }
 }
 def stop_current [work: string] {
     let dir = (result_dir $work)
@@ -223,8 +229,29 @@ if {$rc == 0 && $env(FC_AB_MODE) != "panic"} {
     } else { puts "HOST_PING=pass" }
   }
 }
-if {$rc == 0 && $env(FC_AB_MODE) != "panic"} {
-  if {[catch {exec nu $env(FC_AB_HELPER) --verify-current --work $env(FC_AB_WORK) --tag $env(FC_AB_TAG)} checked]} {
+if {$rc == 0 && $env(FC_AB_MODE) == "panic"} {
+  if {[catch {exec nu $env(FC_AB_HELPER) --verify-current --work $env(FC_AB_WORK) --tag $env(FC_AB_TAG) --mode panic} checked]} {
+    puts "OWNER_PREP_VERIFY=fail $checked"; set rc 9
+  } else { puts "OWNER_PREP_VERIFY=pass $checked" }
+  if {$rc == 0} {
+    send -- "sysctl debug.debugger_on_panic=0\r"
+    expect {
+      -re {debug[.]debugger_on_panic: [01] -> 0(\r*\n)} { puts "PANIC_DEBUGGER_SET=pass" }
+      timeout { puts "PANIC_DEBUGGER_SET=fail"; set rc 8 }
+      eof { puts "PANIC_DEBUGGER_SET=fail early exit"; set rc 8 }
+    }
+  }
+  if {$rc == 0} {
+    send -- "sysctl -n debug.debugger_on_panic\r"
+    expect {
+      -re {(^|[\r\n])0([\r\n]|$)} { puts "PANIC_DEBUGGER_READBACK=0" }
+      timeout { puts "PANIC_DEBUGGER_READBACK=fail"; set rc 8 }
+      eof { puts "PANIC_DEBUGGER_READBACK=fail early exit"; set rc 8 }
+    }
+  }
+}
+if {$rc == 0} {
+  if {[catch {exec nu $env(FC_AB_HELPER) --verify-current --work $env(FC_AB_WORK) --tag $env(FC_AB_TAG) --mode $env(FC_AB_MODE)} checked]} {
     puts "OWNER_VERIFY=fail $checked"; set rc 9
   } else { puts "OWNER_VERIFY=pass $checked" }
 }
@@ -240,10 +267,18 @@ if {$rc == 0 && $env(FC_AB_MODE) != "panic"} {
 }
 if {$rc == 0 && $env(FC_AB_MODE) == "panic"} {
   send -- "sysctl debug.kdb.panic=1\r"
+  puts "PANIC_TRIGGER_SENT=1"
   expect {
     -re {(^|[\r\n]|debug[.]kdb[.]panic: *[0-9]*)panic: kdb_sysctl_panic([\r\n]|$)} { puts "PANIC_CONTROL=pass" }
     timeout { puts "PANIC_CONTROL=fail"; set rc 8 }
     eof { puts "PANIC_CONTROL=fail early exit"; set rc 8 }
+  }
+  if {$rc == 0} {
+    set timeout 45
+    expect {
+      eof { puts "CONSOLE_EOF=after_panic" }
+      timeout { puts "CONSOLE_EOF=hold-panic-owner-live"; set rc 8 }
+    }
   }
 }
 puts "VERDICT_RC=$rc"
@@ -252,7 +287,7 @@ exit $rc
 }
 
 def one_boot [work: string, tag: string, variant: string, mode: string, release: string, release_sha: string, binary_sha: string] {
-    require ($mode == 'release') 'panic-control boot has no reviewed natural-exit lifecycle; refuse spawn'
+    require ((($mode == 'release') and ($tag =~ '^release-[1-6]-(off|on)$') and ($variant == ($tag | split row '-' | last))) or (($mode == 'panic') and ($tag == 'panic-control') and ($variant == 'on'))) 'boot mode/tag/variant mismatch'
     let dir = (result_dir $work)
     require ((digest $release) == $release_sha and (digest ($work | path join 'firecracker')) == $binary_sha) 'pinned ELF or VMM bytes changed before boot'
     let nonce = $"fc-ab-(random uuid)"
@@ -278,7 +313,10 @@ def one_boot [work: string, tag: string, variant: string, mode: string, release:
     })
     $run.stdout | save --raw $log
     $run.stderr | save --raw ($dir | path join $"($tag).stderr")
-    let cleanup = (stop_current $work)
+    let cleanup = (try { stop_current $work } catch {|err|
+        {tag: $tag, state: 'hold-per-boot', reason: $err.msg, forced: false} | to json --raw | save --raw --force ($dir | path join 'hold-sticky.json')
+        error make {msg: $err.msg}
+    })
     require ((digest $release) == $release_sha and (digest ($work | path join 'firecracker')) == $binary_sha) 'pinned ELF or VMM bytes changed during boot'
     require (not $cleanup.forced) $"($tag) cleanup was forced; stop experiment"
     require ($run.exit_code == 0) $"($tag) Expect failed rc=($run.exit_code); raw retained"
@@ -286,26 +324,30 @@ def one_boot [work: string, tag: string, variant: string, mode: string, release:
     require ($raw | str contains $"SMOLFIRE_NET_OK ($nonce)") $"($tag) raw nonce missing"
     require ($raw | str contains 'SMOLFIRE_READY') $"($tag) READY missing"
     if $mode == 'panic' {
-        require (($raw | str contains 'PANIC_CONTROL=pass') and (panic_kernel_seen $raw)) 'muted same-ELF kernel panic output absent'
+        require (($raw | str contains 'OWNER_VERIFY=pass') and ($raw | str contains 'PANIC_TRIGGER_SENT=1') and ($raw | str contains 'PANIC_CONTROL=pass') and ($raw | str contains 'CONSOLE_EOF=after_panic') and (panic_kernel_seen $raw)) 'muted same-ELF kernel panic/owner/natural-exit evidence absent'
     } else {
         require (($raw | str contains 'SHELL_GATE=pass') and ($raw | str contains 'HOST_PING=pass') and ($raw | str contains 'OWNER_VERIFY=pass') and ($raw | str contains 'GUEST_REBOOT_SENT=1') and ($raw | str contains 'CONSOLE_EOF=after_reboot') and not ($raw | str contains 'panic:')) $"($tag) functional/reboot/panic gate failed"
     }
-    {tag: $tag, variant: $variant, nonce: $nonce, release_elf_sha256: $release_sha, firecracker_sha256: $binary_sha, config_path: $config_path, config_sha256: (digest $config_path), intent_path: ($dir | path join $"($tag)-intent.json"), intent_sha256: (digest ($dir | path join $"($tag)-intent.json")), owner_path: $owner, owner_sha256: (digest $owner), pre_reboot_owner_path: (if $mode == 'panic' { '' } else { $dir | path join $"($tag)-pre-reboot-owner.json" }), pre_reboot_owner_sha256: (if $mode == 'panic' { '' } else { digest ($dir | path join $"($tag)-pre-reboot-owner.json") }), raw_path: $log, raw_sha256: (digest $log), stderr_path: ($dir | path join $"($tag).stderr"), cleanup_path: ($dir | path join $"($tag)-cleanup.json"), cleanup_sha256: (digest ($dir | path join $"($tag)-cleanup.json")), argv: (argv $work $config_path), time_to_ready_ms: (if $mode == 'panic' { null } else { let rows = ($raw | parse -r 'TIME_TO_READY=(?<ms>[0-9]+)ms'); require (($rows | length) == 1) 'ambiguous READY time'; $rows.0.ms | into int })}
+    {tag: $tag, variant: $variant, nonce: $nonce, release_elf_sha256: $release_sha, firecracker_sha256: $binary_sha, config_path: $config_path, config_sha256: (digest $config_path), intent_path: ($dir | path join $"($tag)-intent.json"), intent_sha256: (digest ($dir | path join $"($tag)-intent.json")), owner_path: $owner, owner_sha256: (digest $owner), pre_control_owner_path: ($dir | path join $"($tag)-(if $mode == 'panic' { 'pre-panic' } else { 'pre-reboot' })-owner.json"), pre_control_owner_sha256: (digest ($dir | path join $"($tag)-(if $mode == 'panic' { 'pre-panic' } else { 'pre-reboot' })-owner.json")), raw_path: $log, raw_sha256: (digest $log), stderr_path: ($dir | path join $"($tag).stderr"), cleanup_path: ($dir | path join $"($tag)-cleanup.json"), cleanup_sha256: (digest ($dir | path join $"($tag)-cleanup.json")), argv: (argv $work $config_path), time_to_ready_ms: (if $mode == 'panic' { null } else { let rows = ($raw | parse -r 'TIME_TO_READY=(?<ms>[0-9]+)ms'); require (($rows | length) == 1) 'ambiguous READY time'; $rows.0.ms | into int })}
 }
 
-def main [--execute, --verify-current, --cleanup-only, --tag: string = '', --work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecracker-boot-mute-audit.nu'] {
+def main [--execute, --verify-current, --cleanup-only, --tag: string = '', --mode: string = '', --work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecracker-boot-mute-audit.nu'] {
     require (($execute | into int) + ($verify_current | into int) + ($cleanup_only | into int) <= 1) 'choose one operation'
     if $verify_current {
         require (($env.GITHUB_ACTIONS? | default '') == 'true' and ($env.RUNNER_OS? | default '') == 'Linux') 'owner verification requires hosted Linux'
-        print ((verify_current $work $tag) | to json --raw)
+        print ((verify_current $work $tag $mode) | to json --raw)
         return
     }
     if $cleanup_only {
         require (($env.GITHUB_ACTIONS? | default '') == 'true' and ($env.RUNNER_OS? | default '') == 'Linux') 'cleanup requires hosted Linux'
         let outcome = (try { {ok: true, value: (stop_current $work)} } catch {|err| {ok: false, value: {tag: '', pid: '', forced: false, state: 'hold-unresolved', reason: $err.msg}} })
-        print ($outcome.value | to json --raw)
+        let sticky = ($work | path join 'firecracker-boot-mute' 'hold-sticky.json')
+        let prior_hold = ($sticky | path exists)
+        let receipt = (if $outcome.ok { late_receipt $outcome.value $sticky $prior_hold } else { $outcome.value })
+        print ($receipt | to json --raw)
         if not $outcome.ok { error make {msg: $outcome.value.reason} }
         require (not $outcome.value.forced) 'forced cleanup is a failed diagnostic'
+        require ((retention_decision $outcome.ok $prior_hold) == 'CLEAR') 'earlier per-boot owner HOLD; retain TAP and early receipt despite late reconciliation'
         return
     }
     if not $execute { print 'SOURCE ONLY: no Firecracker launched'; return }
@@ -313,7 +355,6 @@ def main [--execute, --verify-current, --cleanup-only, --tag: string = '', --wor
     require (($env.GITHUB_REF? | default '') | str starts-with 'refs/heads/exp/boot-mute-') 'isolated branch required'
     require (($env.GITHUB_SHA? | default '' | str length) == 40) 'source SHA missing'
     require ((^git rev-parse HEAD | str trim) == $env.GITHUB_SHA) 'checked-out head differs from GITHUB_SHA'
-    require false 'panic-control owner-safe shutdown is a separate source gate; no A/B spawn until reviewed'
     require ('/dev/kvm' | path exists) 'hosted KVM missing'
     let release = ($work | path join 'smolfire-kernel')
     let binary = ($work | path join 'firecracker')

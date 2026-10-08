@@ -33,8 +33,19 @@ let verify_call = ($source_text | str index-of 'exec nu $env(FC_AB_HELPER) --ver
 let reboot_send = ($source_text | str index-of 'send -- "reboot\r"')
 let eof_gate = ($source_text | str index-of 'CONSOLE_EOF=after_reboot')
 if $verify_call < 0 or $reboot_send <= $verify_call or $eof_gate <= $reboot_send { error make {msg: 'attached-console reboot lost exact owner-before-send or EOF order'} }
-if not ($source_text | str contains "require ($mode == 'release') 'panic-control boot has no reviewed natural-exit lifecycle; refuse spawn'") { error make {msg: 'panic-control spawn is not fail-closed'} }
-if not ($source_text | str contains "require false 'panic-control owner-safe shutdown is a separate source gate; no A/B spawn until reviewed'") { error make {msg: 'selected A/B job can spawn before panic-control lifecycle review'} }
+let verify_panic = ($source_text | str index-of 'if {$rc == 0 && $env(FC_AB_MODE) == "panic"}')
+let debugger_off = ($source_text | str index-of 'send -- "sysctl debug.debugger_on_panic=0\r"')
+let debugger_readback = ($source_text | str index-of 'PANIC_DEBUGGER_READBACK=0')
+let panic_trigger = ($source_text | str index-of 'send -- "sysctl debug.kdb.panic=1\r"')
+let panic_eof = ($source_text | str index-of 'CONSOLE_EOF=after_panic')
+if $verify_panic < 0 or $debugger_off <= $verify_panic or $debugger_readback <= $debugger_off or $panic_trigger <= $debugger_readback or $panic_eof <= $panic_trigger { error make {msg: 'panic-control lost verified debugger disarm or bounded EOF order'} }
+if not ($source_text | str contains "($mode == 'panic') and ($tag == 'panic-control')") { error make {msg: 'panic-control owner verification lost exact mode/tag binding'} }
+if not ($source_text | str contains "state: 'hold-per-boot'") or not ($source_text | str contains "'hold-sticky.json'") { error make {msg: 'per-boot cleanup HOLD cannot be retained through late cleanup'} }
+if (retention_decision true false) != 'CLEAR' or (retention_decision true true) != 'HOLD' or (retention_decision false false) != 'HOLD' { error make {msg: 'late retention decision admitted unresolved or sticky owner'} }
+let no_owner = {state: 'no-owner', forced: false, matching_config_pids: [], global_firecracker_pids: []}
+if (late_receipt $no_owner '/tmp/hold-sticky.json' true).state != 'hold-prior-per-boot' or (late_receipt $no_owner '/tmp/hold-sticky.json' false).state != 'no-owner' { error make {msg: 'late receipt obscures an earlier per-boot HOLD'} }
+let workflow = (open --raw ($env.CURRENT_FILE | path dirname | path join '..' '.github' 'workflows' 'smolfire.yml'))
+if not ($workflow | str contains '[ "$FC_AB_CLEANUP_FAIL" != 0 ]') or not ($workflow | str contains 'steps.firecracker_boot_mute_control.outcome') or not ($workflow | str contains 'firecracker-boot-mute/hold-sticky.json') { error make {msg: 'A/B teardown can delete TAP after owner HOLD or lose sticky receipt'} }
 if (read_decision false false false) != 'GONE' { error make {msg: 'vanished PID should be ignored'} }
 if (read_decision true true true) != 'INSPECT' { error make {msg: 'readable present PID should be inspected'} }
 for bad in [[true false false] [true true false] [true false true]] {
@@ -48,9 +59,11 @@ mkdir $result
 'foreign-tag' | save --raw ($result | path join 'current-tag')
 let malformed = (with-env {GITHUB_ACTIONS: 'true', RUNNER_OS: 'Linux'} { ^nu ($env.CURRENT_FILE | path dirname | path join 'firecracker-boot-mute-pairs.nu') --cleanup-only --work $fixture | complete })
 if $malformed.exit_code == 0 or ($malformed.stdout | from json).state != 'hold-unresolved' { error make {msg: 'malformed A/B journal failed without a structured late HOLD receipt'} }
-let foreign_verify = (with-env {GITHUB_ACTIONS: 'true', RUNNER_OS: 'Linux'} { ^nu ($env.CURRENT_FILE | path dirname | path join 'firecracker-boot-mute-pairs.nu') --verify-current --work $fixture --tag panic-control | complete })
+let foreign_verify = (with-env {GITHUB_ACTIONS: 'true', RUNNER_OS: 'Linux'} { ^nu ($env.CURRENT_FILE | path dirname | path join 'firecracker-boot-mute-pairs.nu') --verify-current --work $fixture --tag panic-control --mode release | complete })
 if $foreign_verify.exit_code == 0 { error make {msg: 'panic-control tag was admitted to normal reboot owner verification'} }
 let missing_verify = (with-env {GITHUB_ACTIONS: 'true', RUNNER_OS: 'Linux'} { ^nu ($env.CURRENT_FILE | path dirname | path join 'firecracker-boot-mute-pairs.nu') --verify-current --work $fixture --tag release-1-off | complete })
 if $missing_verify.exit_code == 0 { error make {msg: 'missing current-tag was admitted to normal reboot owner verification'} }
+let missing_panic_owner = (with-env {GITHUB_ACTIONS: 'true', RUNNER_OS: 'Linux'} { ^nu ($env.CURRENT_FILE | path dirname | path join 'firecracker-boot-mute-pairs.nu') --verify-current --work $fixture --tag panic-control --mode panic | complete })
+if $missing_panic_owner.exit_code == 0 { error make {msg: 'panic command admitted without current tag and exact owner'} }
 rm --recursive $fixture
 print 'synthetic source-only Firecracker owner policy PASS'

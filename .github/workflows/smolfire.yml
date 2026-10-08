@@ -646,9 +646,11 @@ jobs:
             --receipt "$WORK/vm-workflow-cleanup.json" \
             > "$WORK/vm-workflow-cleanup.stdout" \
             2> "$WORK/vm-workflow-cleanup.stderr" || BUILD_VM_CLEANUP_FAIL=1
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ] && \
-             [ "$EXIT_PROBE_CLEANUP_FAIL" != 0 ]; then
-            echo 'Exit witness owner unresolved; retain TAP for runner-level inspection'
+          if { [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ] && \
+               [ "$EXIT_PROBE_CLEANUP_FAIL" != 0 ]; } || \
+             { [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ] && \
+               { [ "$FC_AB_CLEANUP_FAIL" != 0 ] || [ "${{ steps.firecracker_boot_mute_control.outcome }}" != success ]; }; }; then
+            echo 'Firecracker diagnostic owner unresolved; retain TAP for runner-level inspection'
           else
             sudo ip link del tap0 2>/dev/null || true
           fi
@@ -692,6 +694,7 @@ jobs:
           path: |
             /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.json
             /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.stderr
+            /mnt/smolfire-ci/firecracker-boot-mute/hold-sticky.json
 
       - name: Upload Firecracker exit witness teardown receipt
         id: exit_probe_teardown_upload

@@ -25,6 +25,10 @@ TSLOG=no
 if [ "${SMOLFIRE_TSLOG:-0}" = 1 ]; then
     TSLOG=yes
 fi
+if [ "${SMOLFIRE_CPUID_DIAG:-0}" = 1 ] && [ "$TSLOG" != yes ]; then
+    echo "ERROR: CPUID diagnostic requires the separate TSLOG kernel" >&2
+    exit 1
+fi
 IMG_TSLOG=/root/smolfire-mfs-tslog.img
 OUT_TSLOG=/root/smolfire-kernel-tslog
 
@@ -309,6 +313,17 @@ if [ "$TSLOG" = yes ]; then
         || { echo "ERROR: $SRC/sys/amd64/conf/SMOLFIRE-TSLOG missing — copy sys/amd64/conf/SMOLFIRE* into the tree"; exit 1; }
     echo "==> TSLOG variant: rc tail + makefs + buildkernel SMOLFIRE-TSLOG"
     write_rc tslog
+    if [ "${SMOLFIRE_CPUID_DIAG:-0}" = 1 ]; then
+        # The release ELF above has already been copied. Only this
+        # measurement-only rootfs receives the guest CPUID reporter.
+        CPUID_SRC="$REPO_DIR/tests/guest-cpuid-40000010.c"
+        test -f "$CPUID_SRC" || { echo "ERROR: CPUID reporter missing" >&2; exit 1; }
+        cc -static -O2 -Wall -Wextra -Werror \
+            -o "$ROOT/rescue/cpuid_40000010" "$CPUID_SRC"
+        test -s "$ROOT/rescue/cpuid_40000010" \
+            || { echo "ERROR: CPUID reporter output missing" >&2; exit 1; }
+        echo "==> diagnostic-only guest CPUID reporter included in TSLOG rootfs"
+    fi
     makefs -t ffs -o version=2 -o label=smolfire -b 10% "$IMG_TSLOG" "$ROOT"
     make -C "$SRC" -j "$NCPU" buildkernel \
         KERNCONF=SMOLFIRE-TSLOG MFS_IMAGE="$IMG_TSLOG" >> "$LOG" 2>&1

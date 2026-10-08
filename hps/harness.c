@@ -68,12 +68,14 @@
 
 #define CMD_WRITE 0x01u
 #define CMD_READ  0x02u
+#define CMD_READ_BOUND 0x06u
 #define CMD_RESET 0x03u
 #define CMD_PING  0x04u
 #define CMD_BURST 0x05u
 
 #define RSP_WRITE 0x81u
 #define RSP_READ  0x82u
+#define RSP_READ_BOUND 0x86u
 #define RSP_RESET 0x83u
 #define RSP_PING  0x84u
 #define RSP_BURST 0x85u
@@ -127,6 +129,10 @@
 #define SILENCE_MS 400u
 
 static int g_fd = -1;
+/* Diagnostics only: unique until exhaustion within this process. A
+ * cross-restart, nonrollback allocator is still required before this can
+ * authorize durable media. Durable modes remain unconditionally closed. */
+static uint64_t g_bound_nonce_next = 1;
 
 /* ---- host-anchored durability v2: sealed frame receipts ----
  *
@@ -572,6 +578,44 @@ static int rsp_frame(uint8_t want, uint32_t *data, unsigned timeout_ms)
     return 0;
 }
 
+/* READ_BOUND has its own fixed 13-byte response. Never interpret a legacy
+ * RSP_READ as a bound reply, and expose no value until every field matches. */
+static int rsp_bound_frame(uint8_t addr, uint32_t challenge, uint32_t *data,
+                           unsigned timeout_ms)
+{
+    uint8_t f[13];
+    uint8_t sum = 0;
+    size_t got = 0, i;
+    uint32_t echoed;
+    uint64_t deadline = now_ms() + timeout_ms;
+    while (got < sizeof f) {
+        ssize_t n = read(g_fd, f + got, sizeof f - got);
+        if (n > 0) {
+            got += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno != EINTR && errno != EAGAIN)
+            return -1;
+        if (now_ms() >= deadline)
+            return -1;
+        usleep(1000);
+    }
+    if (f[0] != M_MAGIC0 || f[1] != M_MAGIC1 ||
+        f[2] != RSP_READ_BOUND || f[3] != addr)
+        return -1;
+    for (i = 2; i < 12; i++)
+        sum = (uint8_t)(sum + f[i]);
+    if (sum != f[12])
+        return -1;
+    echoed = (uint32_t)f[4] | ((uint32_t)f[5] << 8) |
+             ((uint32_t)f[6] << 16) | ((uint32_t)f[7] << 24);
+    if (echoed != challenge)
+        return -1;
+    *data = (uint32_t)f[8] | ((uint32_t)f[9] << 8) |
+            ((uint32_t)f[10] << 16) | ((uint32_t)f[11] << 24);
+    return 0;
+}
+
 /* ---- commands PING/WRITE/READ/RESET ---- */
 static int u_write(uint8_t addr, uint32_t val)
 {
@@ -590,14 +634,25 @@ static int u_read(uint8_t addr, uint32_t *val)
     return rsp_frame(RSP_READ, val, RSP_TIMEOUT_MS);
 }
 
-/* The proposed capability ABI is read-only, but flags are only a
- * prerequisite. This HPS client has no request-bound identity receipt
- * readback to compare with the sealed log, so durable modes remain closed. */
+static int u_read_bound(uint8_t addr, uint32_t *val)
+{
+    uint32_t challenge;
+    if (g_bound_nonce_next > UINT32_MAX)
+        return -1; /* no wrap or same-process reuse */
+    challenge = (uint32_t)g_bound_nonce_next++;
+    if (cmd_frame(CMD_READ_BOUND, addr, challenge) != 0)
+        return -1;
+    return rsp_bound_frame(addr, challenge, val, RSP_TIMEOUT_MS);
+}
+
+/* Bound diagnostic reads prevent a stale ID response from satisfying a
+ * different request. They do not bind a media receipt to the sealed log;
+ * the local challenge counter is not proven unique across restarts. */
 static int durable_backend_ready(void)
 {
     uint32_t probe = 0, caps = 0;
-    if (u_read(R_ID_PROBE, &probe) != 0 ||
-        u_read(R_ID_CAPS, &caps) != 0 ||
+    if (u_read_bound(R_ID_PROBE, &probe) != 0 ||
+        u_read_bound(R_ID_CAPS, &caps) != 0 ||
         probe != ID_PROBE_SSP1 ||
         (caps & CAP_DURABLE_REQUIRED) != CAP_DURABLE_REQUIRED) {
         fprintf(stderr,
@@ -606,8 +661,8 @@ static int durable_backend_ready(void)
         return -1;
     }
     fprintf(stderr,
-            "harness: request-bound identity receipt readback is not"
-            " implemented; refusing durable mode\n");
+            "harness: request-bound media receipt and cross-restart"
+            " challenge authority are not implemented; refusing durable mode\n");
     return -1;
 }
 

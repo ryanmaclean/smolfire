@@ -8,6 +8,16 @@ def require [ok: bool, why: string] {
 }
 def fail [why: string] { error make {msg: $why} }
 
+def require_external_success [result: record, context: string] {
+    # Nu 0.115.1 can silently end a script with rc=0 while interpolating an
+    # empty external stderr into an eagerly evaluated success-path message.
+    if $result.exit_code != 0 {
+        let detail = ($result.stderr | str trim)
+        let shown = (if $detail == '' { 'empty stderr' } else { $detail })
+        fail $"($context): exit ($result.exit_code): ($shown)"
+    }
+}
+
 def digest [p: string] { open --raw $p | hash sha256 }
 
 def qemu_argv [work: string, kernel: string, variant: string] {
@@ -125,7 +135,7 @@ def qmp_accepts [variant: string] {
     # Use the same machine class as the guest boots. -M none with a KVM host
     # CPU failed before option validation (apic-id was not initialized).
     let result = ($request | ^timeout 10s qemu-system-x86_64 -M microvm -accel kvm -cpu $"host,+invtsc,vmware-cpuid-freq=($variant)" -S -nodefaults -display none -monitor none -serial none -qmp stdio | complete)
-    require ($result.exit_code == 0) $"QEMU rejected vmware-cpuid-freq=($variant): ($result.stderr)"
+    require_external_success $result $"QEMU rejected vmware-cpuid-freq=($variant)"
 }
 
 def expect_program [] {
@@ -229,7 +239,7 @@ def boot [work: string, kernel: string, variant: string, mode: string, tag: stri
     let cleanup = (stop_owned_qemu $pidfile $release $tslog)
     $cleanup | to json --raw | save --raw --force ($result_dir | path join $"($tag)-cleanup.json")
     require (not $cleanup.forced) $"($tag) QEMU needed ownership-checked KILL; raw log retained"
-    require ($run.exit_code == 0) $"($tag) VM gate failed (exit ($run.exit_code)); see ($log): ($run.stderr)"
+    require_external_success $run $"($tag) VM gate failed; see ($log)"
     require ($run.stdout | str contains $"SMOLFIRE_NET_OK ($nonce)") $"($tag) raw network nonce missing"
     if $mode == 'panic' {
         require ($run.stdout | str contains 'PANIC_CONTROL=pass') $"($tag) raw panic control missing"
@@ -349,7 +359,7 @@ def main [--execute, --cleanup-only, --work: string = '/mnt/smolfire-ci', --audi
     } | to json --indent 2 | save --raw $report
     let checked = (^nu $audit $report | complete)
     $checked.stdout | save --raw ($result_dir | path join 'audit.json')
-    require ($checked.exit_code == 0) $"paired receipt audit failed: ($checked.stderr)"
+    require_external_success $checked 'paired receipt audit failed'
     let verdict = ($checked.stdout | from json)
     print $checked.stdout
     require ($verdict.candidate_all_within_100ms) 'QEMU candidates missed the strict 100ms diagnostic threshold; Firecracker goal remains open'

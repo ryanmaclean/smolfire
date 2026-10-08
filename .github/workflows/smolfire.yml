@@ -398,6 +398,11 @@ jobs:
         run: |
           set -eu
           nu tests/cpuid-pair.nu --execute --work "$WORK" --audit tests/cpuid-pair-audit.nu
+          test -s "$WORK/cpuid-control/report.json"
+          test -s "$WORK/cpuid-control/audit.json"
+          nu tests/cpuid-pair-audit.nu "$WORK/cpuid-control/report.json" \
+            > "$WORK/cpuid-control/workflow-audit.json"
+          nu -c 'let v = (open ($env.WORK | path join "cpuid-control" "workflow-audit.json")); if $v.mechanism_control != "PASS" or not $v.candidate_all_within_100ms or $v.firecracker_goal != "UNPROVEN" { exit 1 }'
 
       - name: TSLOG capture — 3 TSLOG boots + 3 release wall-clock boots (tslog only)
         # Measurement, not a gate: runs after the gates whatever they said

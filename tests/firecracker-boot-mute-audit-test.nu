@@ -49,7 +49,7 @@ def main [] {
         {pid: $pid, generation: $"10($i)", config: $cfg, exe: $binary, argv: $args} | to json --raw | save --raw $owner_path
         $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=($ms)ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n" | save --raw $raw_path
         '' | save --raw $stderr_path
-        {tag: $tag, pid: $pid, generation: $"10($i)", forced: false, state: 'term-exited'} | to json --raw | save --raw $cleanup_path
+        {tag: $tag, pid: $pid, generation: $"10($i)", forced: false, state: 'already-exited', scanned_config: $cfg, matching_config_pids: []} | to json --raw | save --raw $cleanup_path
         $samples = ($samples | append {tag: $tag, variant: $variant, nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: $ms, pair: (((($i - 1) / 2) | math floor) + 1), order_index: $i})
     }
     let tag = 'panic-control'
@@ -66,7 +66,7 @@ def main [] {
     {pid: '907', generation: '107', config: $cfg, exe: $binary, argv: $args} | to json --raw | save --raw $owner_path
     $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nsysctl debug.kdb.panic=1\ndebug.kdb.panic: 0panic: kdb_sysctl_panic\nPANIC_CONTROL=pass\n" | save --raw $raw_path
     '' | save --raw $stderr_path
-    {tag: $tag, pid: '907', generation: '107', forced: false, state: 'term-exited'} | to json --raw | save --raw $cleanup_path
+    {tag: $tag, pid: '907', generation: '107', forced: false, state: 'already-exited', scanned_config: $cfg, matching_config_pids: []} | to json --raw | save --raw $cleanup_path
     let panic = {tag: $tag, variant: 'on', nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: null}
     let report = {kind: 'firecracker-boot-mute-pairs-v1', source_commit: ('a' | fill -c a -w 40), host_class: 'github-hosted-linux-kvm', host_cpu: 'synthetic CPU', firecracker_version: 'Firecracker v1.12.0', firecracker_path: $binary, firecracker_sha256: (sha $binary), release_elf_path: $release, release_elf_sha256: (sha $release), base_config_path: $base_path, base_config_sha256: (sha $base_path), samples: $samples, panic_control: $panic}
     let report_path = ($dir | path join 'report.json')
@@ -100,7 +100,7 @@ def main [] {
     let observation_path = ($dir | path join $"($samples.0.tag)-owner-observation.json")
     let observation = {pid: '901', generation: '101', state: 'Z', argv: [], exe: ''}
     $observation | to json --raw | save --raw $observation_path
-    let reconciled = {tag: $samples.0.tag, pid: '901', generation: '101', forced: false, state: 'already-exited-reconciled', observation_path: $observation_path, observation_sha256: (sha $observation_path), scanned_config: $samples.0.config_path, matching_config_pids: []}
+    let reconciled = {tag: $samples.0.tag, pid: '901', generation: '101', forced: false, state: 'naturally-exited', observation_path: $observation_path, observation_sha256: (sha $observation_path), scanned_config: $samples.0.config_path, matching_config_pids: []}
     $reconciled | to json --raw | save --raw --force $samples.0.cleanup_path
     let reconciled_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
     $reconciled_report | to json --raw | save --raw --force $report_path
@@ -121,12 +121,12 @@ def main [] {
     let residual_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
     $residual_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'reconciled cleanup retained matching config PID'
-    ($observation | upsert state 'R' | upsert argv $samples.0.argv | upsert exe $binary) | to json --raw | save --raw --force $observation_path
+    ($observation | upsert state '') | to json --raw | save --raw --force $observation_path
     let live_observation = ($reconciled | upsert observation_sha256 (sha $observation_path))
     $live_observation | to json --raw | save --raw --force $samples.0.cleanup_path
     let live_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
     $live_report | to json --raw | save --raw --force $report_path
-    reject $audit $report_path 'exact live owner falsely called reconciled'
+    reject $audit $report_path 'unreadable observed process state'
     $original_first_cleanup | save --raw --force $samples.0.cleanup_path
     $original_report | save --raw --force $report_path
     $good.stdout | save --raw --force ($dir | path join 'audit.json')
@@ -161,11 +161,11 @@ def main [] {
     $extra_argv | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'extra argv'
     ($samples.0 | select tag variant nonce config_path config_sha256 argv | rename tag variant nonce config config_sha256 argv) | to json --raw | save --raw --force $samples.0.intent_path
-    {tag: $samples.0.tag, pid: '901', generation: '999', forced: false, state: 'term-exited'} | to json --raw | save --raw --force $samples.0.cleanup_path
+    {tag: $samples.0.tag, pid: '901', generation: '999', forced: false, state: 'already-exited', scanned_config: $samples.0.config_path, matching_config_pids: []} | to json --raw | save --raw --force $samples.0.cleanup_path
     let bad_gen = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
     $bad_gen | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'changed cleanup generation receipt'
-    {tag: $samples.0.tag, pid: '901', generation: '101', forced: false, state: 'term-exited'} | to json --raw | save --raw --force $samples.0.cleanup_path
+    {tag: $samples.0.tag, pid: '901', generation: '101', forced: false, state: 'already-exited', scanned_config: $samples.0.config_path, matching_config_pids: []} | to json --raw | save --raw --force $samples.0.cleanup_path
     let early_ready = $"SMOLFIRE_READY\nSMOLFIRE_NET_OK ($samples.0.nonce)\nNET_GATE=pass\nTIME_TO_READY=180ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n"
     $early_ready | save --raw --force $samples.0.raw_path
     let early_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
@@ -193,6 +193,12 @@ def main [] {
     $owner_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'absent owner generation'
     $original_first_owner | save --raw --force $samples.0.owner_path
+    let signalled_cleanup = ((open $samples.0.cleanup_path) | upsert state 'term-exited')
+    $signalled_cleanup | to json --raw | save --raw --force $samples.0.cleanup_path
+    let signalled_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
+    $signalled_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'forged signalled-owner cleanup'
+    $original_first_cleanup | save --raw --force $samples.0.cleanup_path
     let forced_cleanup = ((open $samples.0.cleanup_path) | upsert forced true | upsert state 'kill-exited')
     $forced_cleanup | to json --raw | save --raw --force $samples.0.cleanup_path
     let forced_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))

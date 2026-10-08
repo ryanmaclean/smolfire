@@ -45,16 +45,17 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
     require (($owner.pid | into string) =~ '^[0-9]+$' and ($owner.generation | into string) =~ '^[0-9]+$' and $owner.config == $s.config_path and $owner.exe == $r.firecracker_path and $owner.argv == $expected_argv) 'spawn-time owner PID/generation/config/executable/argv invalid'
     let cleanup = (open $s.cleanup_path)
     require ($cleanup.tag == $s.tag and ($cleanup.pid | into string) == ($owner.pid | into string) and ($cleanup.generation | into string) == ($owner.generation | into string)) 'cleanup owner generation mismatch'
-    require (not $cleanup.forced and ($cleanup.state in ['term-exited' 'already-exited' 'already-exited-reconciled'])) 'cleanup was forced, mismatched or unresolved'
-    if $cleanup.state == 'already-exited-reconciled' {
-        require (($cleanup | columns | sort) == ['forced' 'generation' 'matching_config_pids' 'observation_path' 'observation_sha256' 'pid' 'scanned_config' 'state' 'tag']) 'reconciled cleanup schema malformed'
+    require (not $cleanup.forced and ($cleanup.state in ['already-exited' 'naturally-exited'])) 'cleanup was forced, signalled or unresolved'
+    require ($cleanup.scanned_config == $s.config_path and $cleanup.matching_config_pids == []) 'cleanup lacks empty exact-config scan'
+    if $cleanup.state == 'naturally-exited' {
+        require (($cleanup | columns | sort) == ['forced' 'generation' 'matching_config_pids' 'observation_path' 'observation_sha256' 'pid' 'scanned_config' 'state' 'tag']) 'natural exit cleanup schema malformed'
         require ($cleanup.observation_path == ($dir | path join $"($s.tag)-owner-observation.json")) 'owner observation path differs from tag'
         assert_sha $cleanup.observation_path $cleanup.observation_sha256
         let observation = (open $cleanup.observation_path)
         require (($observation | columns | sort) == ['argv' 'exe' 'generation' 'pid' 'state']) 'owner observation schema malformed'
         require (($observation.pid | into string) == ($owner.pid | into string) and ($observation.generation | into string) == ($owner.generation | into string) and $observation.state =~ '^[A-Za-z]$') 'owner observation generation or state invalid'
-        require (($observation.state in ['Z' 'X' 'x']) or $observation.argv != $expected_argv or $observation.exe != $r.firecracker_path) 'reconciliation did not record a non-signallable owner'
-        require ($cleanup.scanned_config == $s.config_path and $cleanup.matching_config_pids == []) 'reconciled cleanup lacks empty exact-config scan'
+    } else {
+        require (($cleanup | columns | sort) == ['forced' 'generation' 'matching_config_pids' 'pid' 'scanned_config' 'state' 'tag']) 'already exited cleanup schema malformed'
     }
     let raw = (open --raw $s.raw_path)
     require ($s.nonce =~ '^fc-ab-[0-9a-f-]+$') 'nonce format invalid'

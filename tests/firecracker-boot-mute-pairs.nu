@@ -36,22 +36,16 @@ def proc_snapshot [pid: string] {
     require ((proc_generation $pid) == $fields.19) 'owner PID generation changed during observation'
     {pid: $pid, generation: $fields.19, state: $state, argv: $args, exe: (if $exe.exit_code == 0 { $exe.stdout | str trim } else { '' })}
 }
-def owner_decision [same_generation: bool, state: string, exact_argv: bool, exact_exe: bool, readable: bool] {
+def owner_decision [same_generation: bool, state: string, readable: bool] {
     if not $same_generation or not $readable { return 'HOLD' }
-    if $state in ['Z' 'X' 'x'] { return 'WAIT_ABSENT' }
-    if $exact_argv and $exact_exe { 'SIGNAL' } else { 'WAIT_ABSENT' }
+    if not ($state =~ '^[A-Za-z]$') { return 'HOLD' }
+    'WAIT_ABSENT'
 }
 def validate_owner_record [owner: record, intent: record] {
     require ($owner.pid =~ '^[0-9]+$') 'owner PID is malformed'
     require (($owner.generation | str length) > 0) 'owner generation is absent'
     require ($owner.config == $intent.config) 'owner config differs from intent'
     require ($owner.exe == $intent.argv.0 and $owner.argv == $intent.argv) 'spawn-time owner executable/argv differs from intent'
-}
-def check_owner [owner: record, intent: record] {
-    validate_owner_record $owner $intent
-    let observed = (proc_snapshot $owner.pid)
-    require ((owner_decision ($observed.generation == $owner.generation) $observed.state ($observed.argv == $intent.argv) ($observed.exe == $intent.argv.0) true) == 'SIGNAL') 'owner identity changed; refuse signal'
-    $observed
 }
 def no_matching_config [config: string] {
     let matches = (matching_config_pids [$config])
@@ -68,13 +62,9 @@ def wait_absent [pid: string, generation: string] {
     }
     not ($proc | path exists)
 }
-def cleanup_decision [same_generation: bool, exact_argv: bool, term_wait_elapsed: bool] {
-    if not $same_generation or not $exact_argv { return 'REFUSE' }
-    if $term_wait_elapsed { 'KILL' } else { 'WAIT' }
-}
 def prior_firecracker_decision [pgrep_exit_code: int] {
-    # No spawn-time generation exists for the ordinary gate's PID. Even an
-    # identical argv is not enough to authorize a signal from this harness.
+    # No spawn-time generation exists for the ordinary gate's PID. This
+    # diagnostic never signals any process, including its own Firecracker.
     if $pgrep_exit_code == 1 { 'CLEAR' } else { 'HOLD' }
 }
 def stop_current [work: string] {
@@ -115,8 +105,8 @@ def stop_current [work: string] {
     let proc = $"/proc/($pid)"
     if not ($proc | path exists) {
         try {
-            no_matching_config $intent.config | ignore
-            let receipt = {tag: $tag, pid: $pid, forced: false, state: 'already-exited', generation: $owner.generation}
+            let matches = (no_matching_config $intent.config)
+            let receipt = {tag: $tag, pid: $pid, forced: false, state: 'already-exited', generation: $owner.generation, scanned_config: $intent.config, matching_config_pids: $matches}
             $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
             rm $current
             return $receipt
@@ -128,48 +118,15 @@ def stop_current [work: string] {
     }
     try {
         let first = (proc_snapshot $pid)
-        let decision = (owner_decision ($first.generation == $owner.generation) $first.state ($first.argv == $intent.argv) ($first.exe == $intent.argv.0) true)
-        require ($decision != 'HOLD') 'owner PID generation changed; refuse reconciliation'
-        if $decision == 'WAIT_ABSENT' {
-            let observation_path = ($dir | path join $"($tag)-owner-observation.json")
-            $first | to json --raw | save --raw --force $observation_path
-            require (wait_absent $pid $owner.generation) 'unmatched owner did not disappear within bounded wait'
-            let matches = (no_matching_config $intent.config)
-            let receipt = {tag: $tag, pid: $pid, forced: false, state: 'already-exited-reconciled', generation: $owner.generation, observation_path: $observation_path, observation_sha256: (digest $observation_path), scanned_config: $intent.config, matching_config_pids: $matches}
-            $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
-            rm $current
-            return $receipt
-        }
-        check_owner $owner $intent
-        let term = (^kill -TERM $pid | complete)
-        require ($term.exit_code == 0) 'TERM failed for exact owner'
-        for _ in 1..20 {
-            if not ($proc | path exists) {
-                no_matching_config $intent.config | ignore
-                let receipt = {tag: $tag, pid: $pid, forced: false, state: 'term-exited', generation: $owner.generation}
-                $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
-                rm $current
-                return $receipt
-            }
-            require (((proc_snapshot $pid).generation) == $owner.generation) 'PID generation changed after TERM; refuse replacement'
-            sleep 200ms
-        }
-        let before_kill = (check_owner $owner $intent)
-        require ((cleanup_decision ($before_kill.generation == $owner.generation) ($before_kill.argv == $intent.argv and $before_kill.exe == $intent.argv.0) true) == 'KILL') 'identity changed before KILL; refuse signal'
-        let killed = (^kill -KILL $pid | complete)
-        require ($killed.exit_code == 0) 'KILL failed for exact stubborn owner'
-        for _ in 1..25 {
-            if not ($proc | path exists) {
-                no_matching_config $intent.config | ignore
-                let receipt = {tag: $tag, pid: $pid, forced: true, state: 'kill-exited', generation: $owner.generation}
-                $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
-                rm $current
-                return $receipt
-            }
-            require (((proc_snapshot $pid).generation) == $owner.generation) 'PID generation changed after KILL'
-            sleep 200ms
-        }
-        error make {msg: 'exact owner remains after bounded KILL wait'}
+        require ((owner_decision ($first.generation == $owner.generation) $first.state true) == 'WAIT_ABSENT') 'owner PID generation or state changed; refuse reconciliation'
+        let observation_path = ($dir | path join $"($tag)-owner-observation.json")
+        $first | to json --raw | save --raw --force $observation_path
+        require (wait_absent $pid $owner.generation) 'owner did not exit naturally within bounded wait'
+        let matches = (no_matching_config $intent.config)
+        let receipt = {tag: $tag, pid: $pid, forced: false, state: 'naturally-exited', generation: $owner.generation, observation_path: $observation_path, observation_sha256: (digest $observation_path), scanned_config: $intent.config, matching_config_pids: $matches}
+        $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
+        rm $current
+        return $receipt
     } catch {|err|
         let receipt = {tag: $tag, pid: $pid, forced: false, state: 'hold-unresolved', generation: $owner.generation, reason: $err.msg}
         $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
@@ -196,9 +153,7 @@ if {[catch {
   puts $out "{\"pid\":\"$child\",\"generation\":\"$generation\",\"config\":\"$env(FC_AB_CONFIG)\",\"exe\":\"$env(FC_AB_BINARY)\",\"argv\":\[\"$env(FC_AB_BINARY)\",\"--no-api\",\"--config-file\",\"$env(FC_AB_CONFIG)\"\]}"
   close $out
 } why]} {
-  catch {exec kill -TERM $child}
   catch {close}
-  catch {wait}
   puts "OWNER_RECORD=fail $why"
   exit 9
 }
@@ -266,13 +221,13 @@ def one_boot [work: string, tag: string, variant: string, mode: string, release:
     let log = ($dir | path join $"($tag).raw")
     let owner = ($dir | path join $"($tag)-owner.json")
     let run = (with-env {FC_AB_BINARY: ($work | path join 'firecracker'), FC_AB_CONFIG: $config_path, FC_AB_OWNER: $owner, FC_AB_NONCE: $nonce, FC_AB_MODE: $mode} {
-        ^timeout --signal=TERM --kill-after=5s 60s expect -c (expect_program) | complete
+        ^expect -c (expect_program) | complete
     })
     $run.stdout | save --raw $log
     $run.stderr | save --raw ($dir | path join $"($tag).stderr")
     let cleanup = (stop_current $work)
     require ((digest $release) == $release_sha and (digest ($work | path join 'firecracker')) == $binary_sha) 'pinned ELF or VMM bytes changed during boot'
-    require (not $cleanup.forced) $"($tag) needed forced KILL; stop experiment"
+    require (not $cleanup.forced) $"($tag) cleanup was forced; stop experiment"
     require ($run.exit_code == 0) $"($tag) Expect failed rc=($run.exit_code); raw retained"
     let raw = (open --raw $log)
     require ($raw | str contains $"SMOLFIRE_NET_OK ($nonce)") $"($tag) raw nonce missing"

@@ -57,6 +57,7 @@
 #include <sys/file.h>
 #include <limits.h>
 #include <sys/time.h>
+#include <time.h>
 
 /* ---- transport ---- */
 #define UART_PATH "/dev/ttyUSB1" /* BL616 debugger UART on the Tang Console */
@@ -578,6 +579,18 @@ static int rsp_frame(uint8_t want, uint32_t *data, unsigned timeout_ms)
     return 0;
 }
 
+/* Bound diagnostics must use elapsed time: gettimeofday can move backward
+ * and indefinitely extend a wall-clock deadline during a silent reply. */
+static int bound_monotonic_ms(uint64_t *ms)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0 || ts.tv_sec < 0)
+        return -1;
+    *ms = (uint64_t)ts.tv_sec * 1000u +
+          (uint64_t)ts.tv_nsec / 1000000u;
+    return 0;
+}
+
 /* READ_BOUND has its own fixed 13-byte response. Never interpret a legacy
  * RSP_READ as a bound reply, and expose no value until every field matches. */
 static int rsp_bound_frame(uint8_t addr, uint32_t challenge, uint32_t *data,
@@ -587,8 +600,13 @@ static int rsp_bound_frame(uint8_t addr, uint32_t challenge, uint32_t *data,
     uint8_t sum = 0;
     size_t got = 0, i;
     uint32_t echoed;
-    uint64_t deadline = now_ms() + timeout_ms;
+    uint64_t now, deadline;
+    if (bound_monotonic_ms(&now) != 0 || now > UINT64_MAX - timeout_ms)
+        return -1;
+    deadline = now + timeout_ms;
     while (got < sizeof f) {
+        if (bound_monotonic_ms(&now) != 0 || now >= deadline)
+            return -1;
         ssize_t n = read(g_fd, f + got, sizeof f - got);
         if (n > 0) {
             got += (size_t)n;
@@ -596,10 +614,10 @@ static int rsp_bound_frame(uint8_t addr, uint32_t challenge, uint32_t *data,
         }
         if (n < 0 && errno != EINTR && errno != EAGAIN)
             return -1;
-        if (now_ms() >= deadline)
-            return -1;
         usleep(1000);
     }
+    if (bound_monotonic_ms(&now) != 0 || now >= deadline)
+        return -1;
     if (f[0] != M_MAGIC0 || f[1] != M_MAGIC1 ||
         f[2] != RSP_READ_BOUND || f[3] != addr)
         return -1;

@@ -646,7 +646,12 @@ jobs:
             --receipt "$WORK/vm-workflow-cleanup.json" \
             > "$WORK/vm-workflow-cleanup.stdout" \
             2> "$WORK/vm-workflow-cleanup.stderr" || BUILD_VM_CLEANUP_FAIL=1
-          sudo ip link del tap0 2>/dev/null || true
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ] && \
+             [ "$EXIT_PROBE_CLEANUP_FAIL" != 0 ]; then
+            echo 'Exit witness owner unresolved; retain TAP for runner-level inspection'
+          else
+            sudo ip link del tap0 2>/dev/null || true
+          fi
           test "$CPUID_CLEANUP_FAIL" = 0
           test "$TSLOG_CLEANUP_FAIL" = 0
           test "$FC_AB_CLEANUP_FAIL" = 0

@@ -39,7 +39,7 @@ def main [--work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecrac
     for s in $all {
         require ((sha $s.cleanup_path) == $s.cleanup_sha256) 'per-boot cleanup changed after audit'
         let receipt = (open $s.cleanup_path)
-        require (not $receipt.forced and ($receipt.state in ['term-exited' 'already-exited'])) 'forced or unresolved per-boot owner'
+        require (not $receipt.forced and ($receipt.state in ['term-exited' 'already-exited' 'already-exited-reconciled'])) 'forced or unresolved per-boot owner'
         if (($env.GITHUB_ACTIONS? | default '') == 'true') {
             require ((live_generation ($receipt.pid | into string)) != ($receipt.generation | into string)) 'an exact owned VM remains live after teardown'
         }

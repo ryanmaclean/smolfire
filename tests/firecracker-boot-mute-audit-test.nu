@@ -97,6 +97,40 @@ def main [] {
     {tag: '', pid: '', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []} | to json --raw | save --raw ($dir | path join 'workflow-cleanup.json')
     let final_good = (^nu $finalize --work $work --audit $audit | complete)
     require ($final_good.exit_code == 0) $"synthetic finalizer rejected resolved receipt: ($final_good.stderr)"
+    let observation_path = ($dir | path join $"($samples.0.tag)-owner-observation.json")
+    let observation = {pid: '901', generation: '101', state: 'Z', argv: [], exe: ''}
+    $observation | to json --raw | save --raw $observation_path
+    let reconciled = {tag: $samples.0.tag, pid: '901', generation: '101', forced: false, state: 'already-exited-reconciled', observation_path: $observation_path, observation_sha256: (sha $observation_path), scanned_config: $samples.0.config_path, matching_config_pids: []}
+    $reconciled | to json --raw | save --raw --force $samples.0.cleanup_path
+    let reconciled_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
+    $reconciled_report | to json --raw | save --raw --force $report_path
+    let reconciled_good = (run_audit $audit $report_path)
+    require ($reconciled_good.exit_code == 0) $"reconciled exited-owner positive fixture failed: ($reconciled_good.stderr)"
+    $reconciled_good.stdout | save --raw --force ($dir | path join 'audit.json')
+    $reconciled_good.stdout | save --raw --force ($dir | path join 'workflow-audit.json')
+    let reconciled_final = (^nu $finalize --work $work --audit $audit | complete)
+    require ($reconciled_final.exit_code == 0) $"finalizer rejected independently audited reconciled owner: ($reconciled_final.stderr)"
+    ($observation | upsert generation '999') | to json --raw | save --raw --force $observation_path
+    let bad_observation = ($reconciled | upsert observation_sha256 (sha $observation_path))
+    $bad_observation | to json --raw | save --raw --force $samples.0.cleanup_path
+    let bad_observation_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
+    $bad_observation_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'reconciled observation generation changed with recomputed hashes'
+    $observation | to json --raw | save --raw --force $observation_path
+    ($reconciled | upsert matching_config_pids ['999']) | to json --raw | save --raw --force $samples.0.cleanup_path
+    let residual_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
+    $residual_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'reconciled cleanup retained matching config PID'
+    ($observation | upsert state 'R' | upsert argv $samples.0.argv | upsert exe $binary) | to json --raw | save --raw --force $observation_path
+    let live_observation = ($reconciled | upsert observation_sha256 (sha $observation_path))
+    $live_observation | to json --raw | save --raw --force $samples.0.cleanup_path
+    let live_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
+    $live_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'exact live owner falsely called reconciled'
+    $original_first_cleanup | save --raw --force $samples.0.cleanup_path
+    $original_report | save --raw --force $report_path
+    $good.stdout | save --raw --force ($dir | path join 'audit.json')
+    $good.stdout | save --raw --force ($dir | path join 'workflow-audit.json')
     let missing_arm = ($report | upsert samples ($samples | drop 1))
     $missing_arm | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'missing arm'

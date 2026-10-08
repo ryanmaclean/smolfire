@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Hosted, branch-only Firecracker boot_mute mechanism experiment.
 use cpuid-panic-evidence.nu panic_kernel_seen
+use firecracker-version-evidence.nu stable_firecracker_version
 use firecracker-owner-scan.nu matching_config_pids
 
 def require [ok: bool, why: string] { if not $ok { error make {msg: $why} } }
@@ -366,7 +367,9 @@ def main [--execute, --verify-current, --cleanup-only, --tag: string = '', --mod
     let elf_strings = (^strings $release | complete)
     require ($elf_strings.exit_code == 0 and not ($elf_strings.stdout | str contains 'SMOLFIRE_TSLOG_BEGIN')) 'release ELF is instrumented'
     let fc_version = (^$binary --version | complete)
-    require ($fc_version.exit_code == 0 and ($fc_version.stdout | str contains 'v1.12.0')) 'Firecracker version mismatch'
+    require ($fc_version.exit_code == 0) 'Firecracker version command failed'
+    let stable_version = (stable_firecracker_version $fc_version.stdout)
+    require ($stable_version == 'Firecracker v1.12.0') 'Firecracker version mismatch'
     let tap = (^ip -4 addr show dev tap0 | complete)
     require ($tap.exit_code == 0 and ($tap.stdout | str contains '172.16.0.1/30')) 'TAP config mismatch'
     require (($work | path join 'www' 'token.txt' | path exists)) 'token server file absent'
@@ -390,7 +393,7 @@ def main [--execute, --verify-current, --cleanup-only, --tag: string = '', --mod
     let host_cpu = (open --raw /proc/cpuinfo | lines | where {|x| $x | str starts-with 'model name'} | first)
     let report_path = ($dir | path join 'report.json')
     require ((digest $release) == $release_sha and (digest $binary) == $binary_sha) 'pinned ELF or VMM bytes changed before report'
-    {kind: 'firecracker-boot-mute-pairs-v1', source_commit: $env.GITHUB_SHA, host_class: 'github-hosted-linux-kvm', host_cpu: $host_cpu, firecracker_version: ($fc_version.stdout | str trim), firecracker_path: $binary, firecracker_sha256: $binary_sha, release_elf_path: $release, release_elf_sha256: $release_sha, base_config_path: ($work | path join 'fc.json'), base_config_sha256: (digest ($work | path join 'fc.json')), samples: $samples, panic_control: $panic} | to json --indent 2 | save --raw $report_path
+    {kind: 'firecracker-boot-mute-pairs-v1', source_commit: $env.GITHUB_SHA, host_class: 'github-hosted-linux-kvm', host_cpu: $host_cpu, firecracker_version: $fc_version.stdout, firecracker_path: $binary, firecracker_sha256: $binary_sha, release_elf_path: $release, release_elf_sha256: $release_sha, base_config_path: ($work | path join 'fc.json'), base_config_sha256: (digest ($work | path join 'fc.json')), samples: $samples, panic_control: $panic} | to json --indent 2 | save --raw $report_path
     let audit_result = (^nu $audit $report_path | complete)
     $audit_result.stdout | save --raw ($dir | path join 'audit.json')
     $audit_result.stderr | save --raw ($dir | path join 'audit.stderr')

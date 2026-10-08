@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Read-only, raw-derived audit. This stage can only emit PENDING_TEARDOWN.
 use cpuid-panic-evidence.nu panic_kernel_seen
+use firecracker-version-evidence.nu stable_firecracker_version
 
 def require [ok: bool, why: string] { if not $ok { error make {msg: $why} } }
 def file_sha [path: string] {
@@ -95,7 +96,7 @@ def main [report: path] {
     require ($r.host_class == 'github-hosted-linux-kvm') 'wrong host class'
     require ($r.source_commit =~ '^[0-9a-f]{40}$') 'source SHA absent'
     require (($r.host_cpu | str length) > 0) 'host CPU missing'
-    require ($r.firecracker_version | str contains 'v1.12.0') 'unpinned Firecracker version'
+    let reported_version = (stable_firecracker_version $r.firecracker_version)
     let work = ($r.base_config_path | path dirname)
     require ($r.firecracker_path == ($work | path join 'firecracker')) 'VMM path wrong'
     require ($r.release_elf_path == ($work | path join 'smolfire-kernel')) 'release ELF path wrong'
@@ -110,7 +111,8 @@ def main [report: path] {
     if (($env.GITHUB_ACTIONS? | default '') == 'true') {
         require ($r.source_commit == ($env.GITHUB_SHA? | default '')) 'report SHA differs from hosted checkout'
         let version = (^$r.firecracker_path --version | complete)
-        require ($version.exit_code == 0 and ($version.stdout | str trim) == $r.firecracker_version) 'Firecracker version report differs from pinned executable'
+        require ($version.exit_code == 0) 'Firecracker version command failed during audit'
+        require ((stable_firecracker_version $version.stdout) == $reported_version) 'Firecracker version report differs from pinned executable'
     }
     let baseline = (normalized_config $base)
     require (($r.samples | length) == 6) 'not exactly six timed boots'

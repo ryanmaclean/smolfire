@@ -8,11 +8,17 @@ def expected_args [variant: string] {
     if $variant == 'on' { $"($base) boot_mute=YES" } else { $base }
 }
 def run_audit [script: string, report: string] { ^nu $script $report | complete }
+def run_hosted_audit [script: string, report: string, timestamp: string] {
+    with-env {GITHUB_ACTIONS: 'true', GITHUB_SHA: ('a' | fill -c a -w 40), FC_EXIT_TS: $timestamp} {
+        ^nu $script $report | complete
+    }
+}
 def reject [script: string, report: string, name: string] {
     let result = (run_audit $script $report)
     require ($result.exit_code != 0) $"audit accepted negative fixture ($name)"
 }
 def main [] {
+    if 'GITHUB_ACTIONS' in $env { hide-env GITHUB_ACTIONS }
     let here = ($env.CURRENT_FILE | path dirname)
     let audit = ($here | path join 'firecracker-boot-mute-audit.nu')
     let finalize = ($here | path join 'firecracker-boot-mute-finalize.nu')
@@ -24,7 +30,13 @@ def main [] {
     let binary = ($work | path join 'firecracker')
     let release = ($work | path join 'smolfire-kernel')
     let base_path = ($work | path join 'fc.json')
-    'synthetic-firecracker-v1.12.0' | save --raw $binary
+    '#!/usr/bin/env nu
+def main [--version] {
+    if not $version { exit 2 }
+    let ts = ($env.FC_EXIT_TS? | default "2026-10-08T20:47:11.627668500")
+    print $"Firecracker v1.12.0\n\n($ts) [anonymous-instance:main] Firecracker exiting successfully. exit_code=0"
+}' | save --raw $binary
+    ^chmod +x $binary
     'synthetic-release-elf' | save --raw $release
     let base = {'boot-source': {kernel_image_path: $release, boot_args: (expected_args 'off')}, drives: [], 'network-interfaces': [{iface_id: 'eth0', guest_mac: '06:00:AC:10:00:02', host_dev_name: 'tap0'}], 'machine-config': {vcpu_count: 1, mem_size_mib: 512}}
     $base | to json --indent 2 | save --raw $base_path
@@ -89,6 +101,17 @@ def main [] {
     require ($good.exit_code == 0) $"positive synthetic fixture failed: ($good.stderr)"
     let verdict = ($good.stdout | from json)
     require ($verdict.firecracker_release_goal == 'PENDING_TEARDOWN' and $verdict.all_muted_within_100ms) 'audit emitted premature PASS or wrong timing result'
+    let first_version = "Firecracker v1.12.0\n\n2026-10-08T20:45:16.864503670 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0\n"
+    let timestamped_report = ($report | upsert firecracker_version $first_version)
+    $timestamped_report | to json --raw | save --raw --force $report_path
+    let hosted_good = (run_hosted_audit $audit $report_path '2026-10-08T20:47:11.627668500')
+    require ($hosted_good.exit_code == 0) $"different hosted version timestamps rejected: ($hosted_good.stderr)"
+    require (($hosted_good.stdout | from json).firecracker_release_goal == 'PENDING_TEARDOWN') 'hosted audit emitted premature final verdict'
+    let bad_executable_sha = ($timestamped_report | upsert firecracker_sha256 ('b' | fill -c b -w 64))
+    $bad_executable_sha | to json --raw | save --raw --force $report_path
+    let sha_rejected = (run_hosted_audit $audit $report_path '2026-10-08T20:47:11.627668500')
+    require ($sha_rejected.exit_code != 0 and ($sha_rejected.stderr | str contains 'digest mismatch')) 'hosted audit did not enforce VMM executable SHA'
+    $original_report | save --raw --force $report_path
     let doubled_cr = ($original_first_raw | str replace $"SMOLFIRE_NET_OK ($samples.0.nonce)\n" $"SMOLFIRE_NET_OK ($samples.0.nonce)\r\r\n")
     $doubled_cr | save --raw --force $samples.0.raw_path
     let cr_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))

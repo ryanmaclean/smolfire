@@ -38,7 +38,7 @@ for skipped in [$network $boot_time $shell_gate $qemu $tslog] {
     if not ($skipped.if | str contains $selector) or not ($skipped.if | str contains '!(') { error make {msg: $"ordinary gate ($skipped.name) still runs for A/B diagnostic"} }
 }
 if not ($record.run | str contains $selector) or not ($record.run | str contains 'if [') or not ($record.run | str contains 'firecracker_boot_mute_control=') { error make {msg: 'A/B gate results may admit skipped ordinary gates'} }
-if not ($teardown.run | str contains $selector) or not ($teardown.run | str contains 'qemu-microvm.pid') { error make {msg: 'A/B teardown may signal ordinary QEMU PID'} }
+if not ($teardown.run | str contains $selector) or not ($teardown.run | str contains 'selector-skipped') { error make {msg: 'A/B teardown may enter ordinary QEMU path'} }
 if ($teardown.run | str contains 'kill "$(cat "$WORK/firecracker.pid")"') or not ($teardown.run | str contains 'firecracker-ordinary-cleanup.nu') { error make {msg: 'ordinary always teardown retained numeric PID kill or lost no-signal cleanup'} }
 if not ($record.run | str contains 'firecracker_trace=') { error make {msg: 'ordinary cleanup failure can be omitted from enforcement'} }
 if not ($finalizer.if | str contains "steps.teardown_vm.outcome == 'success'") or not ($finalizer.if | str contains "steps.firecracker_boot_mute_teardown_upload.outcome == 'success'") { error make {msg: 'finalizer can run before successful teardown/upload'} }
@@ -51,5 +51,15 @@ if (do $index 'Upload artifacts') >= (do $index 'Teardown VM') { error make {msg
 if (do $index 'Teardown VM') >= (do $index 'Upload Firecracker A/B teardown receipt') { error make {msg: 'late receipt upload precedes teardown'} }
 if (do $index 'Teardown VM') >= (do $index 'Upload ordinary Firecracker teardown receipt') { error make {msg: 'ordinary late receipt upload precedes teardown'} }
 if not ($enforce.run | str contains 'steps.ordinary_firecracker_teardown_upload.outcome') { error make {msg: 'ordinary late receipt upload outcome not enforced'} }
+let build = ($steps | where {|x| ($x.name? | default '') == 'Boot FreeBSD build VM (KVM)'} | first)
+let hosted_qemu_upload = ($steps | where {|x| ($x.name? | default '') == 'Upload hosted QEMU teardown receipts'} | first)
+if not ($build.run | str contains 'hosted-qemu-owner.nu" --mode build --capture') { error make {msg: 'build VM owner is not captured after launch'} }
+if not ($qemu.run | str contains 'hosted-qemu-owner.nu --mode microvm --capture') or not ($qemu.run | str contains '--mode microvm --cleanup') { error make {msg: 'ordinary QEMU gate lacks ownership and natural-exit reconciliation'} }
+if ($qemu.run | str contains 'timeout 60 expect') or ($teardown.run | str contains 'kill "$(cat "$WORK/qemu-microvm.pid")"') or ($teardown.run | str contains 'kill "$(cat "$WORK/vm.pid")"') { error make {msg: 'automatic workflow retained numeric or wrapper signal path'} }
+if not ($teardown.run | str contains '--mode build --cleanup') or not ($teardown.run | str contains '--mode microvm --cleanup') { error make {msg: 'QEMU late teardown missing'} }
+if not ($parsed.jobs.smolfire.services.token-http.image | str starts-with 'nginx@sha256:') or ($teardown.run | str contains 'httpd.pid') { error make {msg: 'token server is not runner-managed'} }
+if $hosted_qemu_upload.if != 'always()' or not ($hosted_qemu_upload.with.path | str contains 'vm-workflow-cleanup.json') { error make {msg: 'QEMU late cleanup receipt not uploaded'} }
+if not ($enforce.run | str contains 'steps.hosted_qemu_teardown_upload.outcome') { error make {msg: 'QEMU late receipt upload outcome not enforced'} }
+if (do $index 'Teardown VM') >= (do $index 'Upload hosted QEMU teardown receipts') { error make {msg: 'QEMU late receipt upload precedes teardown'} }
 if (do $index 'Upload Firecracker A/B teardown receipt') >= (do $index 'Finalize Firecracker A/B after teardown') { error make {msg: 'final verdict precedes late upload'} }
 print 'synthetic source-only workflow selector/order PASS: PR and push cannot request branch-only diagnostic'

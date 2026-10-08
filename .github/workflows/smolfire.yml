@@ -38,6 +38,7 @@ on:
       - 'tests/firecracker-boot-mute-*.nu'
       - 'tests/firecracker-ordinary-cleanup*.nu'
       - 'tests/firecracker-owner-scan.nu'
+      - 'tests/hosted-qemu-owner*.nu'
   push:
     paths:
       - '.github/workflows/smolfire.yml'
@@ -52,6 +53,7 @@ on:
       - 'tests/firecracker-boot-mute-*.nu'
       - 'tests/firecracker-ordinary-cleanup*.nu'
       - 'tests/firecracker-owner-scan.nu'
+      - 'tests/hosted-qemu-owner*.nu'
   workflow_dispatch:
     inputs:
       tslog:
@@ -81,6 +83,14 @@ jobs:
     name: Build + microVM gates
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    services:
+      token-http:
+        # Hosted runner owns this service lifetime; no HTTP-server PID kill.
+        image: nginx@sha256:0530961ff0592b58c10f767535cc0abdfccf9e389ff7cc90f87320c1bc7e8506
+        ports:
+          - 8080:80
+        volumes:
+          - /mnt/smolfire-ci/www:/usr/share/nginx/html:ro
     defaults:
       run:
         shell: bash
@@ -93,7 +103,7 @@ jobs:
           set -e
           test -c /dev/kvm || { echo "ERROR: no /dev/kvm"; exit 1; }
           sudo chmod 666 /dev/kvm
-          sudo mkdir -p "$WORK" && sudo chown "$(id -u)" "$WORK"
+          sudo mkdir -p "$WORK/www" && sudo chown -R "$(id -u)" "$WORK"
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils expect xz-utils genisoimage openssh-client
@@ -135,6 +145,25 @@ jobs:
           } > user-data
           genisoimage -output seed.iso -volid cidata -joliet -rock user-data meta-data
 
+      - name: Install Nushell for hosted gates
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
+          ARCH="$(uname -m)"
+          test "$NU_VERSION" = 0.115.1
+          test "$ARCH" = x86_64
+          TRIPLE="${ARCH}-unknown-linux-musl"
+          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
+          NU_SHA256=8a9722177ddd421eba927b4baae4ae341a4d1c3434504be7b1b17d998bafdd87
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
+            -o "$RUNNER_TEMP/$ARCHIVE"
+          printf '%s  %s\n' "$NU_SHA256" "$RUNNER_TEMP/$ARCHIVE" | sha256sum --check --status
+          tar -xz -C "$HOME/.local/bin" --strip-components=1 \
+            -f "$RUNNER_TEMP/$ARCHIVE" "nu-${NU_VERSION}-${TRIPLE}/nu"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Boot FreeBSD build VM (KVM)
         run: |
           set -e
@@ -148,6 +177,7 @@ jobs:
             -display none -daemonize \
             -serial "file:${WORK}/serial.log" \
             -pidfile "${WORK}/vm.pid"
+          nu "$GITHUB_WORKSPACE/tests/hosted-qemu-owner.nu" --mode build --capture --work "$WORK"
           echo "Waiting for SSH ..."
           for i in $(seq 1 120); do
             if ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -211,25 +241,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install Nushell for hosted gates
-        if: ${{ !cancelled() }}
-        run: |
-          set -eu
-          NU_VERSION="$(tr -d '[:space:]' < .github/nu-version)"
-          ARCH="$(uname -m)"
-          test "$NU_VERSION" = 0.115.1
-          test "$ARCH" = x86_64
-          TRIPLE="${ARCH}-unknown-linux-musl"
-          ARCHIVE="nu-${NU_VERSION}-${TRIPLE}.tar.gz"
-          NU_SHA256=8a9722177ddd421eba927b4baae4ae341a4d1c3434504be7b1b17d998bafdd87
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${ARCHIVE}" \
-            -o "$RUNNER_TEMP/$ARCHIVE"
-          printf '%s  %s\n' "$NU_SHA256" "$RUNNER_TEMP/$ARCHIVE" | sha256sum --check --status
-          tar -xz -C "$HOME/.local/bin" --strip-components=1 \
-            -f "$RUNNER_TEMP/$ARCHIVE" "nu-${NU_VERSION}-${TRIPLE}/nu"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
       - name: Firecracker boot trace
         id: firecracker_trace
         continue-on-error: true
@@ -243,9 +254,6 @@ jobs:
           sudo ip link set tap0 up
           TOK="net-${RANDOM}${RANDOM}"
           mkdir -p "$WORK/www"; printf '%s' "$TOK" > "$WORK/www/token.txt"
-          ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
-          echo "$!" > "$WORK/httpd.pid"
-          sleep 1
           curl -fsS "http://172.16.0.1:8080/token.txt" >/dev/null || { echo "ERROR: token server not answering"; exit 1; }
           # boot_args re-enables ACPI: the FIRECRACKER conf bakes
           # hint.acpi.0.disabled=1 (static env), but the PVH cmdline env is
@@ -393,31 +401,40 @@ jobs:
           cd "$WORK"
           test -f "$WORK/smolfire-kernel" || { echo "no kernel built — skipping QEMU cross-check"; exit 0; }
           # Secondary consumer check: PVH direct boot on stock QEMU microvm.
-          timeout 60 expect -c '
+          set +e
+          expect -c '
             set timeout 30
             set t0 [clock milliseconds]
             spawn qemu-system-x86_64 -M microvm -accel kvm -cpu host -m 512M \
               -kernel '"$WORK"'/smolfire-kernel \
               -append "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.fetch=http://10.0.2.2:8080/token.txt" \
               -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
-              -display none -serial mon:stdio
+              -display none -serial mon:stdio -no-reboot
             set qemu_pid [exp_pid]
-            exec sh -c "echo $qemu_pid > '"$WORK"'/qemu-microvm.pid"
+            set pidfile [open "'"$WORK"'/qemu-microvm.pid" w]
+            puts $pidfile $qemu_pid
+            close $pidfile
+            exec nu '"$GITHUB_WORKSPACE"'/tests/hosted-qemu-owner.nu --mode microvm --capture --work '"$WORK"'
             expect {
               "SMOLFIRE_NET_OK" { puts "\nMICROVM_NET=pass (SLIRP guest-initiated TCP)" }
               "SMOLFIRE_NET_FAIL" { puts "\nMICROVM_NET=fail"; exit 1 }
-              "SMOLFIRE_READY"  { puts "\nMICROVM_TIME_TO_READY=[expr [clock milliseconds]-$t0]ms (net markers skipped)"; exit 0 }
+              "SMOLFIRE_READY"  { puts "\nMICROVM_TIME_TO_READY=[expr [clock milliseconds]-$t0]ms (net markers skipped)"; send -- "reboot\r"; expect { eof { puts "\nMICROVM_EXIT=pass"; exit 0 } timeout { puts "\nMICROVM_EXIT=fail"; exit 5 } } }
               timeout           { puts "\nMICROVM: no output"; exit 1 }
               eof               { puts "\nMICROVM: qemu exited"; exit 1 }
             }
             expect {
-              "SMOLFIRE_READY" { puts "\nMICROVM_TIME_TO_READY=[expr [clock milliseconds]-$t0]ms"; exit 0 }
+              "SMOLFIRE_READY" { puts "\nMICROVM_TIME_TO_READY=[expr [clock milliseconds]-$t0]ms"; send -- "reboot\r"; expect { eof { puts "\nMICROVM_EXIT=pass"; exit 0 } timeout { puts "\nMICROVM_EXIT=fail"; exit 5 } } }
               timeout          { puts "\nMICROVM: no READY"; exit 1 }
               eof              { puts "\nMICROVM: qemu exited"; exit 1 }
             }' | tee qemu-microvm.log
           RC=${PIPESTATUS[0]}
           echo "qemu_expect_rc=$RC"
-          exit $RC
+          nu "$GITHUB_WORKSPACE/tests/hosted-qemu-owner.nu" --mode microvm --cleanup --work "$WORK" \
+            > "$WORK/qemu-microvm-cleanup.stdout" \
+            2> "$WORK/qemu-microvm-cleanup.stderr"
+          CLEANUP_RC=$?
+          echo "qemu_cleanup_rc=$CLEANUP_RC"
+          test "$RC" -eq 0 && test "$CLEANUP_RC" -eq 0
 
       - name: QEMU CPUID frequency paired control (diagnostic only)
         id: cpuid_control
@@ -450,11 +467,9 @@ jobs:
             sudo ip addr add 172.16.0.1/30 dev tap0
             sudo ip link set tap0 up
           }
-          if ! curl -fsS "http://172.16.0.1:8080/token.txt" >/dev/null 2>&1; then
-            mkdir -p "$WORK/www"; printf 'tslog' > "$WORK/www/token.txt"
-            ( cd "$WORK/www" && exec python3 -m http.server 8080 --bind 0.0.0.0 ) >/dev/null 2>&1 &
-            echo "$!" > "$WORK/httpd.pid"; sleep 1
-          fi
+          curl -fsS "http://172.16.0.1:8080/token.txt" >/dev/null || {
+            echo "hosted token HTTP service unavailable"; exit 1;
+          }
           mkfc() {  # $1 = kernel file name
             printf '{\n "boot-source": { "kernel_image_path": "%s/%s", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" "$1"
           }
@@ -533,6 +548,15 @@ jobs:
             /mnt/smolfire-ci/firecracker-ordinary-cleanup.stderr
             /mnt/smolfire-ci/qemu-microvm.log
             /mnt/smolfire-ci/qemu-microvm.pid
+            /mnt/smolfire-ci/qemu-microvm-owner.json
+            /mnt/smolfire-ci/qemu-microvm-observation.json
+            /mnt/smolfire-ci/qemu-microvm-cleanup.json
+            /mnt/smolfire-ci/qemu-microvm-cleanup.stdout
+            /mnt/smolfire-ci/qemu-microvm-cleanup.stderr
+            /mnt/smolfire-ci/vm.pid
+            /mnt/smolfire-ci/vm-owner.json
+            /mnt/smolfire-ci/vm-observation.json
+            /mnt/smolfire-ci/vm-cleanup.json
             /mnt/smolfire-ci/release-run*.log
             /mnt/smolfire-ci/tslog-run*.log
             /mnt/smolfire-ci/build.log
@@ -574,6 +598,9 @@ jobs:
           CPUID_CLEANUP_FAIL=0
           FC_AB_CLEANUP_FAIL=0
           ORDINARY_CLEANUP_FAIL=0
+          QEMU_CLEANUP_FAIL=0
+          BUILD_VM_CLEANUP_FAIL=0
+          mkdir -p "$WORK"
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ] && [ -e "$WORK/fc.json" ]; then
             if command -v nu >/dev/null 2>&1; then
               nu tests/firecracker-ordinary-cleanup.nu --work "$WORK" \
@@ -606,17 +633,26 @@ jobs:
             printf '%s\n' '{"pid":"","forced":false,"state":"no-pidfile"}' > "$WORK/cpuid-control/workflow-cleanup.json"
             : > "$WORK/cpuid-control/workflow-cleanup.stderr"
           fi
-          # Neither ordinary nor A/B Firecracker cleanup follows a numeric
-          # PID file with kill. An ambiguous owner is a failed hosted gate.
+          # Natural guest exit plus exact-owner/config reconciliation only.
+          # An ambiguous owner is a failed hosted gate; no numeric PID signal.
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
-            [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
+            nu tests/hosted-qemu-owner.nu --mode microvm --cleanup --work "$WORK" \
+              --receipt "$WORK/qemu-microvm-workflow-cleanup.json" \
+              > "$WORK/qemu-microvm-workflow-cleanup.stdout" \
+              2> "$WORK/qemu-microvm-workflow-cleanup.stderr" || QEMU_CLEANUP_FAIL=1
+          else
+            printf '%s\n' '{"mode":"microvm","state":"selector-skipped","forced":false}' > "$WORK/qemu-microvm-workflow-cleanup.json"
           fi
-          [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
-          [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
+          nu tests/hosted-qemu-owner.nu --mode build --cleanup --work "$WORK" \
+            --receipt "$WORK/vm-workflow-cleanup.json" \
+            > "$WORK/vm-workflow-cleanup.stdout" \
+            2> "$WORK/vm-workflow-cleanup.stderr" || BUILD_VM_CLEANUP_FAIL=1
           sudo ip link del tap0 2>/dev/null || true
           test "$CPUID_CLEANUP_FAIL" = 0
           test "$FC_AB_CLEANUP_FAIL" = 0
           test "$ORDINARY_CLEANUP_FAIL" = 0
+          test "$QEMU_CLEANUP_FAIL" = 0
+          test "$BUILD_VM_CLEANUP_FAIL" = 0
 
       - name: Upload diagnostic teardown receipt
         if: ${{ always() && inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-') }}
@@ -651,6 +687,21 @@ jobs:
             /mnt/smolfire-ci/firecracker-ordinary-workflow-cleanup.stdout
             /mnt/smolfire-ci/firecracker-ordinary-workflow-cleanup.stderr
 
+      - name: Upload hosted QEMU teardown receipts
+        id: hosted_qemu_teardown_upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-hosted-qemu-teardown
+          if-no-files-found: error
+          path: |
+            /mnt/smolfire-ci/qemu-microvm-workflow-cleanup.json
+            /mnt/smolfire-ci/qemu-microvm-workflow-cleanup.stdout
+            /mnt/smolfire-ci/qemu-microvm-workflow-cleanup.stderr
+            /mnt/smolfire-ci/vm-workflow-cleanup.json
+            /mnt/smolfire-ci/vm-workflow-cleanup.stdout
+            /mnt/smolfire-ci/vm-workflow-cleanup.stderr
+
       - name: Finalize Firecracker A/B after teardown
         id: firecracker_boot_mute_final
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && steps.teardown_vm.outcome == 'success' && steps.firecracker_boot_mute_teardown_upload.outcome == 'success' }}
@@ -675,10 +726,12 @@ jobs:
           test "$gate_fail" = 0
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
             test '${{ steps.teardown_vm.outcome }}' = success
+            test '${{ steps.hosted_qemu_teardown_upload.outcome }}' = success
             test '${{ steps.firecracker_boot_mute_teardown_upload.outcome }}' = success
             test '${{ steps.firecracker_boot_mute_final.outcome }}' = success
             test -s "$WORK/firecracker-boot-mute/final-verdict.json"
           else
             test '${{ steps.teardown_vm.outcome }}' = success
+            test '${{ steps.hosted_qemu_teardown_upload.outcome }}' = success
             test '${{ steps.ordinary_firecracker_teardown_upload.outcome }}' = success
           fi

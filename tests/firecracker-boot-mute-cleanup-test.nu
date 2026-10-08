@@ -11,6 +11,10 @@ if $exact != ['/mnt/smolfire-ci/firecracker' '--no-api' '--config-file' $cfg] {
 }
 if (cleanup_decision true true false) != 'WAIT' { error make {msg: 'exact owner must receive bounded TERM wait'} }
 if (cleanup_decision true true true) != 'KILL' { error make {msg: 'TERM-resistant exact owner must escalate to KILL'} }
+if (prior_firecracker_decision 1) != 'CLEAR' { error make {msg: 'no prior process was not admitted'} }
+for exit_code in [0 2] {
+    if (prior_firecracker_decision $exit_code) != 'HOLD' { error make {msg: 'live or unknown prior Firecracker was not held'} }
+}
 for bad in [[false true true] [true false true] [false false true]] {
     if (cleanup_decision ($bad | get 0) ($bad | get 1) ($bad | get 2)) != 'REFUSE' {
         error make {msg: 'changed PID generation or argv was eligible for signal'}

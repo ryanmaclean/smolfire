@@ -3,6 +3,17 @@
 # The only stage allowed to assert the hard Firecracker release goal.
 def require [ok: bool, why: string] { if not $ok { error make {msg: $why} } }
 def sha [path: string] { require ($path | path exists) $"missing ($path)"; open --raw $path | hash sha256 }
+def matching_config_pids [configs: list<string>] {
+    let ps = (^pgrep -x firecracker | complete)
+    if $ps.exit_code == 1 { return [] }
+    require ($ps.exit_code == 0) 'cannot enumerate Firecracker processes at finalization'
+    let pids = ($ps.stdout | lines | where $it =~ '^[0-9]+$')
+    $pids | where {|pid|
+        let path = $"/proc/($pid)/cmdline"
+        let args = (try { open --raw $path | decode utf-8 | split row (char nul) | where $it != '' } catch { [] })
+        $configs | any {|config| $config in $args}
+    }
+}
 def live_generation [pid: string] {
     let stat = $"/proc/($pid)/stat"
     if not ($stat | path exists) { return '' }
@@ -26,8 +37,13 @@ def main [--work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecrac
     require ($prior == $fresh and $replay == $fresh) 'pre-teardown and independent audit differ'
     require ($fresh.mechanism_pairs_complete and $fresh.panic_visibility and $fresh.firecracker_release_goal == 'PENDING_TEARDOWN') 'pre-teardown evidence incomplete'
     let late = (open $cleanup_path)
-    require (not $late.forced and $late.state == 'no-owner') 'late teardown did not reconcile to no-owner'
+    let configs = ($report.samples | get config_path | append $report.panic_control.config_path | sort)
+    require (($late | columns | sort) == ['forced' 'matching_config_pids' 'pid' 'scanned_configs' 'state' 'tag']) 'late cleanup schema malformed or forged'
+    require ($late.tag == '' and $late.pid == '' and not $late.forced and $late.state == 'no-owner' and $late.scanned_configs == $configs and $late.matching_config_pids == []) 'late teardown did not reconcile exact seven configs to no-owner'
     require (not ($dir | path join 'current-tag' | path exists)) 'current owner remains after teardown'
+    if (($env.GITHUB_ACTIONS? | default '') == 'true') {
+        require ((matching_config_pids $configs | length) == 0) 'an unreported Firecracker still uses a tagged config after teardown'
+    }
     require (($report.samples | length) == 6) 'report lacks six timed boots'
     let all = ($report.samples | append $report.panic_control)
     for s in $all {

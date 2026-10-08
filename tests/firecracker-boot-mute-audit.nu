@@ -24,6 +24,7 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
     let dir = ($s.config_path | path dirname)
     require (($s.tag | str contains '/') == false) 'tag contains a path separator'
     require ($s.config_path == ($dir | path join $"($s.tag)-config.json")) 'config path is not unique tagged path'
+    require ($s.release_elf_sha256 == $r.release_elf_sha256 and $s.firecracker_sha256 == $r.firecracker_sha256) 'per-boot ELF or VMM hash differs from pinned bytes'
     require ($s.intent_path == ($dir | path join $"($s.tag)-intent.json")) 'intent path mismatch'
     require ($s.owner_path == ($dir | path join $"($s.tag)-owner.json")) 'owner path mismatch'
     require ($s.raw_path == ($dir | path join $"($s.tag).raw")) 'raw path mismatch'
@@ -41,13 +42,15 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
     let intent = (open $s.intent_path)
     require ($intent.tag == $s.tag and $intent.variant == $s.variant and $intent.nonce == $s.nonce and $intent.config == $s.config_path and $intent.config_sha256 == $s.config_sha256 and $intent.argv == $expected_argv) 'intent differs from report'
     let owner = (open $s.owner_path)
-    require (($owner.pid | into string) =~ '^[0-9]+$' and ($owner.generation | into string) =~ '^[0-9]+$' and $owner.config == $s.config_path) 'owner PID/generation/config invalid'
+    require (($owner.pid | into string) =~ '^[0-9]+$' and ($owner.generation | into string) =~ '^[0-9]+$' and $owner.config == $s.config_path and $owner.exe == $r.firecracker_path and $owner.argv == $expected_argv) 'spawn-time owner PID/generation/config/executable/argv invalid'
     let cleanup = (open $s.cleanup_path)
     require ($cleanup.tag == $s.tag and ($cleanup.pid | into string) == ($owner.pid | into string) and ($cleanup.generation | into string) == ($owner.generation | into string)) 'cleanup owner generation mismatch'
     require (not $cleanup.forced and ($cleanup.state in ['term-exited' 'already-exited'])) 'cleanup was forced, mismatched or unresolved'
     let raw = (open --raw $s.raw_path)
     require ($s.nonce =~ '^fc-ab-[0-9a-f-]+$') 'nonce format invalid'
-    require (ordered $raw $"SMOLFIRE_NET_OK ($s.nonce)" 'SMOLFIRE_READY') 'network nonce absent or after READY'
+    let nonce_rows = ($raw | parse -r 'SMOLFIRE_NET_OK (?<observed>fc-ab-[0-9a-f-]+)\r?\n')
+    require (($nonce_rows | length) == 1 and $nonce_rows.0.observed == $s.nonce) 'raw network nonce missing, extended or ambiguous'
+    require (ordered $raw $"SMOLFIRE_NET_OK ($s.nonce)" 'SMOLFIRE_READY') 'network nonce after READY'
     require ($raw | str contains 'NET_GATE=pass') 'network gate marker absent'
     require (not ($raw | str contains 'SMOLFIRE_NET_FAIL')) 'guest network failure present'
     if $panic {

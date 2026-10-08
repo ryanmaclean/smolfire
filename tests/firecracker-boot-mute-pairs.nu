@@ -28,6 +28,7 @@ def check_owner [owner: record, intent: record] {
     require ($owner.pid =~ '^[0-9]+$') 'owner PID is malformed'
     require (($owner.generation | str length) > 0) 'owner generation is absent'
     require ($owner.config == $intent.config) 'owner config differs from intent'
+    require ($owner.exe == $intent.argv.0 and $owner.argv == $intent.argv) 'spawn-time owner executable/argv differs from intent'
     require ((proc_generation $owner.pid) == $owner.generation) 'owner PID generation changed; refuse signal'
     require ((proc_argv $owner.pid) == $intent.argv) 'owner argv changed; refuse signal'
     let exe = (^readlink -f $"/proc/($owner.pid)/exe" | complete)
@@ -36,6 +37,11 @@ def check_owner [owner: record, intent: record] {
 def cleanup_decision [same_generation: bool, exact_argv: bool, term_wait_elapsed: bool] {
     if not $same_generation or not $exact_argv { return 'REFUSE' }
     if $term_wait_elapsed { 'KILL' } else { 'WAIT' }
+}
+def prior_firecracker_decision [pgrep_exit_code: int] {
+    # No spawn-time generation exists for the ordinary gate's PID. Even an
+    # identical argv is not enough to authorize a signal from this harness.
+    if $pgrep_exit_code == 1 { 'CLEAR' } else { 'HOLD' }
 }
 def matching_config_pids [config: string] {
     let ps = (^pgrep -x firecracker | complete)
@@ -49,7 +55,23 @@ def matching_config_pids [config: string] {
 def stop_current [work: string] {
     let dir = (result_dir $work)
     let current = ($dir | path join 'current-tag')
-    if not ($current | path exists) { return {tag: '', pid: '', forced: false, state: 'no-owner'} }
+    if not ($current | path exists) {
+        mut configs = []
+        mut matching = []
+        for intent_path in (glob ($dir | path join '*-intent.json')) {
+            let intent = (open $intent_path)
+            $configs = ($configs | append $intent.config)
+            $matching = ($matching | append (matching_config_pids $intent.config))
+        }
+        let configs = ($configs | sort)
+        let matches = ($matching | flatten | uniq | sort)
+        if ($matches | length) > 0 {
+            let receipt = {tag: '', pid: '', forced: false, state: 'hold-unreported-owner', scanned_configs: $configs, matching_config_pids: $matches}
+            $receipt | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
+            error make {msg: 'unreported Firecracker still uses one of the tagged configs; refuse unverified signal'}
+        }
+        return {tag: '', pid: '', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []}
+    }
     let tag = (open --raw $current | str trim)
     require ($tag =~ '^(release-[1-6]-(off|on)|panic-control)$') 'current tag is malformed'
     let intent_path = ($dir | path join $"($tag)-intent.json")
@@ -123,7 +145,7 @@ if {[catch {
   set generation [lindex $fields 19]
   if {$generation eq ""} {error "no generation"}
   set out [open $env(FC_AB_OWNER) w]
-  puts $out "{\"pid\":\"$child\",\"generation\":\"$generation\",\"config\":\"$env(FC_AB_CONFIG)\"}"
+  puts $out "{\"pid\":\"$child\",\"generation\":\"$generation\",\"config\":\"$env(FC_AB_CONFIG)\",\"exe\":\"$env(FC_AB_BINARY)\",\"argv\":\[\"$env(FC_AB_BINARY)\",\"--no-api\",\"--config-file\",\"$env(FC_AB_CONFIG)\"\]}"
   close $out
 } why]} {
   catch {exec kill -TERM $child}
@@ -133,7 +155,7 @@ if {[catch {
   exit 9
 }
 expect {
-  -re "SMOLFIRE_NET_OK $env(FC_AB_NONCE)" { puts "NET_GATE=pass" }
+  -re "SMOLFIRE_NET_OK $env(FC_AB_NONCE)(\\r?\\n)" { puts "NET_GATE=pass" }
   "SMOLFIRE_NET_FAIL" { puts "NET_GATE=fail"; set rc 3 }
   -re {panic:} { puts "VERDICT=fail panic before network"; set rc 2 }
   timeout { puts "VERDICT=fail no network nonce"; set rc 3 }
@@ -174,8 +196,9 @@ exit $rc
 '
 }
 
-def one_boot [work: string, tag: string, variant: string, mode: string, release: string] {
+def one_boot [work: string, tag: string, variant: string, mode: string, release: string, release_sha: string, binary_sha: string] {
     let dir = (result_dir $work)
+    require ((digest $release) == $release_sha and (digest ($work | path join 'firecracker')) == $binary_sha) 'pinned ELF or VMM bytes changed before boot'
     let nonce = $"fc-ab-(random uuid)"
     let token = ($work | path join 'www' 'token.txt')
     $nonce | save --raw --force $token
@@ -200,6 +223,7 @@ def one_boot [work: string, tag: string, variant: string, mode: string, release:
     $run.stdout | save --raw $log
     $run.stderr | save --raw ($dir | path join $"($tag).stderr")
     let cleanup = (stop_current $work)
+    require ((digest $release) == $release_sha and (digest ($work | path join 'firecracker')) == $binary_sha) 'pinned ELF or VMM bytes changed during boot'
     require (not $cleanup.forced) $"($tag) needed forced KILL; stop experiment"
     require ($run.exit_code == 0) $"($tag) Expect failed rc=($run.exit_code); raw retained"
     let raw = (open --raw $log)
@@ -210,7 +234,7 @@ def one_boot [work: string, tag: string, variant: string, mode: string, release:
     } else {
         require (($raw | str contains 'SHELL_GATE=pass') and ($raw | str contains 'HOST_PING=pass') and not ($raw | str contains 'panic:')) $"($tag) functional/panic gate failed"
     }
-    {tag: $tag, variant: $variant, nonce: $nonce, config_path: $config_path, config_sha256: (digest $config_path), intent_path: ($dir | path join $"($tag)-intent.json"), intent_sha256: (digest ($dir | path join $"($tag)-intent.json")), owner_path: $owner, owner_sha256: (digest $owner), raw_path: $log, raw_sha256: (digest $log), stderr_path: ($dir | path join $"($tag).stderr"), cleanup_path: ($dir | path join $"($tag)-cleanup.json"), cleanup_sha256: (digest ($dir | path join $"($tag)-cleanup.json")), argv: (argv $work $config_path), time_to_ready_ms: (if $mode == 'panic' { null } else { let rows = ($raw | parse -r 'TIME_TO_READY=(?<ms>[0-9]+)ms'); require (($rows | length) == 1) 'ambiguous READY time'; $rows.0.ms | into int })}
+    {tag: $tag, variant: $variant, nonce: $nonce, release_elf_sha256: $release_sha, firecracker_sha256: $binary_sha, config_path: $config_path, config_sha256: (digest $config_path), intent_path: ($dir | path join $"($tag)-intent.json"), intent_sha256: (digest ($dir | path join $"($tag)-intent.json")), owner_path: $owner, owner_sha256: (digest $owner), raw_path: $log, raw_sha256: (digest $log), stderr_path: ($dir | path join $"($tag).stderr"), cleanup_path: ($dir | path join $"($tag)-cleanup.json"), cleanup_sha256: (digest ($dir | path join $"($tag)-cleanup.json")), argv: (argv $work $config_path), time_to_ready_ms: (if $mode == 'panic' { null } else { let rows = ($raw | parse -r 'TIME_TO_READY=(?<ms>[0-9]+)ms'); require (($rows | length) == 1) 'ambiguous READY time'; $rows.0.ms | into int })}
 }
 
 def main [--execute, --cleanup-only, --work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecracker-boot-mute-audit.nu'] {
@@ -230,6 +254,8 @@ def main [--execute, --cleanup-only, --work: string = '/mnt/smolfire-ci', --audi
     let release = ($work | path join 'smolfire-kernel')
     let binary = ($work | path join 'firecracker')
     require (($release | path exists) and ($binary | path exists) and ($audit | path exists)) 'pinned ELF, Firecracker or auditor absent'
+    let release_sha = (digest $release)
+    let binary_sha = (digest $binary)
     let elf_type = (^file -b $release | complete)
     require ($elf_type.exit_code == 0 and ($elf_type.stdout | str contains 'ELF 64-bit')) 'release is not 64-bit ELF'
     let elf_strings = (^strings $release | complete)
@@ -242,35 +268,24 @@ def main [--execute, --cleanup-only, --work: string = '/mnt/smolfire-ci', --audi
     let dir = (result_dir $work)
     require (not ($dir | path exists)) 'result directory exists; preserve and use fresh runner'
     mkdir $dir
-    let prior = ($work | path join 'firecracker.pid')
     let processes = (^pgrep -x firecracker | complete)
-    if $processes.exit_code == 0 {
-        require ($prior | path exists) 'live Firecracker without prior gate PID evidence'
-        let prior_pid = (open --raw $prior | str trim)
-        require (($processes.stdout | lines) == [$prior_pid]) 'ambiguous prior Firecracker processes'
-        let expected = (argv $work ($work | path join 'fc.json'))
-        require ((proc_argv $prior_pid) == $expected) 'prior Firecracker argv mismatch'
-        let prior_owner = {pid: $prior_pid, generation: (proc_generation $prior_pid), config: ($work | path join 'fc.json')}
-        let prior_intent = {argv: $expected, config: ($work | path join 'fc.json')}
-        check_owner $prior_owner $prior_intent
-        let term = (^kill -TERM $prior_pid | complete)
-        require ($term.exit_code == 0) 'prior Firecracker TERM failed'
-        for _ in 1..20 { if not ($"/proc/($prior_pid)" | path exists) { break }; sleep 200ms }
-        require (not ($"/proc/($prior_pid)" | path exists)) 'prior Firecracker did not stop; no diagnostic boot'
-    } else { require ($processes.exit_code == 1) 'cannot enumerate Firecracker processes' }
+    # The earlier ordinary gate does not record a spawn-time PID generation.
+    # Its live process cannot be safely signaled by this experiment; HOLD.
+    require ((prior_firecracker_decision $processes.exit_code) == 'CLEAR') 'prior or foreign Firecracker remains live; no diagnostic boot or signal'
     let plans = [{pair: 1, variants: ['off' 'on']} {pair: 2, variants: ['on' 'off']} {pair: 3, variants: ['off' 'on']}]
     mut samples = []
     for p in $plans {
         for variant in $p.variants {
             let i = (($samples | length) + 1)
-            let boot = (one_boot $work $"release-($i)-($variant)" $variant 'release' $release)
+            let boot = (one_boot $work $"release-($i)-($variant)" $variant 'release' $release $release_sha $binary_sha)
             $samples = ($samples | append ($boot | merge {pair: $p.pair, order_index: $i}))
         }
     }
-    let panic = (one_boot $work 'panic-control' 'on' 'panic' $release)
+    let panic = (one_boot $work 'panic-control' 'on' 'panic' $release $release_sha $binary_sha)
     let host_cpu = (open --raw /proc/cpuinfo | lines | where {|x| $x | str starts-with 'model name'} | first)
     let report_path = ($dir | path join 'report.json')
-    {kind: 'firecracker-boot-mute-pairs-v1', source_commit: $env.GITHUB_SHA, host_class: 'github-hosted-linux-kvm', host_cpu: $host_cpu, firecracker_version: ($fc_version.stdout | str trim), firecracker_path: $binary, firecracker_sha256: (digest $binary), release_elf_path: $release, release_elf_sha256: (digest $release), base_config_path: ($work | path join 'fc.json'), base_config_sha256: (digest ($work | path join 'fc.json')), samples: $samples, panic_control: $panic} | to json --indent 2 | save --raw $report_path
+    require ((digest $release) == $release_sha and (digest $binary) == $binary_sha) 'pinned ELF or VMM bytes changed before report'
+    {kind: 'firecracker-boot-mute-pairs-v1', source_commit: $env.GITHUB_SHA, host_class: 'github-hosted-linux-kvm', host_cpu: $host_cpu, firecracker_version: ($fc_version.stdout | str trim), firecracker_path: $binary, firecracker_sha256: $binary_sha, release_elf_path: $release, release_elf_sha256: $release_sha, base_config_path: ($work | path join 'fc.json'), base_config_sha256: (digest ($work | path join 'fc.json')), samples: $samples, panic_control: $panic} | to json --indent 2 | save --raw $report_path
     let audit_result = (^nu $audit $report_path | complete)
     $audit_result.stdout | save --raw ($dir | path join 'audit.json')
     $audit_result.stderr | save --raw ($dir | path join 'audit.stderr')

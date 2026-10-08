@@ -46,11 +46,11 @@ def main [] {
         let args = [$binary '--no-api' '--config-file' $cfg]
         {tag: $tag, variant: $variant, nonce: $nonce, config: $cfg, config_sha256: (sha $cfg), argv: $args} | to json --raw | save --raw $intent_path
         let pid = $"90($i)"
-        {pid: $pid, generation: $"10($i)", config: $cfg} | to json --raw | save --raw $owner_path
+        {pid: $pid, generation: $"10($i)", config: $cfg, exe: $binary, argv: $args} | to json --raw | save --raw $owner_path
         $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=($ms)ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n" | save --raw $raw_path
         '' | save --raw $stderr_path
         {tag: $tag, pid: $pid, generation: $"10($i)", forced: false, state: 'term-exited'} | to json --raw | save --raw $cleanup_path
-        $samples = ($samples | append {tag: $tag, variant: $variant, nonce: $nonce, config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: $ms, pair: (((($i - 1) / 2) | math floor) + 1), order_index: $i})
+        $samples = ($samples | append {tag: $tag, variant: $variant, nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: $ms, pair: (((($i - 1) / 2) | math floor) + 1), order_index: $i})
     }
     let tag = 'panic-control'
     let nonce = 'fc-ab-00000000-0000-0000-0000-000000000007'
@@ -63,28 +63,53 @@ def main [] {
     ($base | upsert 'boot-source' {kernel_image_path: $release, boot_args: (expected_args 'on')}) | to json --indent 2 | save --raw $cfg
     let args = [$binary '--no-api' '--config-file' $cfg]
     {tag: $tag, variant: 'on', nonce: $nonce, config: $cfg, config_sha256: (sha $cfg), argv: $args} | to json --raw | save --raw $intent_path
-    {pid: '907', generation: '107', config: $cfg} | to json --raw | save --raw $owner_path
+    {pid: '907', generation: '107', config: $cfg, exe: $binary, argv: $args} | to json --raw | save --raw $owner_path
     $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nsysctl debug.kdb.panic=1\ndebug.kdb.panic: 0panic: kdb_sysctl_panic\nPANIC_CONTROL=pass\n" | save --raw $raw_path
     '' | save --raw $stderr_path
     {tag: $tag, pid: '907', generation: '107', forced: false, state: 'term-exited'} | to json --raw | save --raw $cleanup_path
-    let panic = {tag: $tag, variant: 'on', nonce: $nonce, config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: null}
+    let panic = {tag: $tag, variant: 'on', nonce: $nonce, release_elf_sha256: (sha $release), firecracker_sha256: (sha $binary), config_path: $cfg, config_sha256: (sha $cfg), intent_path: $intent_path, intent_sha256: (sha $intent_path), owner_path: $owner_path, owner_sha256: (sha $owner_path), raw_path: $raw_path, raw_sha256: (sha $raw_path), stderr_path: $stderr_path, cleanup_path: $cleanup_path, cleanup_sha256: (sha $cleanup_path), argv: $args, time_to_ready_ms: null}
     let report = {kind: 'firecracker-boot-mute-pairs-v1', source_commit: ('a' | fill -c a -w 40), host_class: 'github-hosted-linux-kvm', host_cpu: 'synthetic CPU', firecracker_version: 'Firecracker v1.12.0', firecracker_path: $binary, firecracker_sha256: (sha $binary), release_elf_path: $release, release_elf_sha256: (sha $release), base_config_path: $base_path, base_config_sha256: (sha $base_path), samples: $samples, panic_control: $panic}
     let report_path = ($dir | path join 'report.json')
     $report | to json --indent 2 | save --raw $report_path
     let original_report = (open --raw $report_path)
     let original_panic_raw = (open --raw $raw_path)
+    let original_first_raw = (open --raw $samples.0.raw_path)
+    let original_first_config = (open --raw $samples.0.config_path)
+    let original_first_intent = (open --raw $samples.0.intent_path)
+    let original_first_owner = (open --raw $samples.0.owner_path)
+    let original_first_cleanup = (open --raw $samples.0.cleanup_path)
+    let original_release = (open --raw $release)
     let good = (run_audit $audit $report_path)
     require ($good.exit_code == 0) $"positive synthetic fixture failed: ($good.stderr)"
     let verdict = ($good.stdout | from json)
     require ($verdict.firecracker_release_goal == 'PENDING_TEARDOWN' and $verdict.all_muted_within_100ms) 'audit emitted premature PASS or wrong timing result'
     $good.stdout | save --raw ($dir | path join 'audit.json')
     $good.stdout | save --raw ($dir | path join 'workflow-audit.json')
-    {tag: '', pid: '', forced: false, state: 'no-owner'} | to json --raw | save --raw ($dir | path join 'workflow-cleanup.json')
+    let configs = ($samples | get config_path | append $panic.config_path | sort)
+    {tag: '', pid: '', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []} | to json --raw | save --raw ($dir | path join 'workflow-cleanup.json')
     let final_good = (^nu $finalize --work $work --audit $audit | complete)
     require ($final_good.exit_code == 0) $"synthetic finalizer rejected resolved receipt: ($final_good.stderr)"
     let missing_arm = ($report | upsert samples ($samples | drop 1))
     $missing_arm | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'missing arm'
+    ($original_first_raw + 'changed') | save --raw --force $samples.0.raw_path
+    $original_report | save --raw --force $report_path
+    reject $audit $report_path 'raw hash mismatch'
+    $original_first_raw | save --raw --force $samples.0.raw_path
+    'changed-release-elf' | save --raw --force $release
+    let changed_elf = ($report | upsert release_elf_sha256 (sha $release))
+    $changed_elf | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'ELF changed after per-boot pin'
+    $original_release | save --raw --force $release
+    let changed_cfg = ((open $samples.0.config_path) | upsert 'machine-config' {vcpu_count: 2, mem_size_mib: 512})
+    $changed_cfg | to json --raw | save --raw --force $samples.0.config_path
+    let changed_intent = ((open $samples.0.intent_path) | upsert config_sha256 (sha $samples.0.config_path))
+    $changed_intent | to json --raw | save --raw --force $samples.0.intent_path
+    let changed_config_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert config_sha256 (sha $samples.0.config_path) | upsert intent_sha256 (sha $samples.0.intent_path))))
+    $changed_config_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'config changed with recomputed hashes'
+    $original_first_config | save --raw --force $samples.0.config_path
+    $original_first_intent | save --raw --force $samples.0.intent_path
     let duplicate_nonce = ($report | upsert samples ($samples | update 1 ($samples.1 | upsert nonce $samples.0.nonce)))
     $duplicate_nonce | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'reused nonce'
@@ -104,12 +129,34 @@ def main [] {
     let early_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
     $early_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'READY before nonce'
+    let host_only = $"NET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=180ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n"
+    $host_only | save --raw --force $samples.0.raw_path
+    let host_only_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
+    $host_only_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'host-only token without guest raw marker'
+    let extended = $"SMOLFIRE_NET_OK ($samples.0.nonce)abcdef\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=180ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n"
+    $extended | save --raw --force $samples.0.raw_path
+    let extended_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
+    $extended_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'extended raw nonce prefix'
     let echoed_shell = $"SMOLFIRE_NET_OK ($samples.0.nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=180ms\necho FIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n"
     $echoed_shell | save --raw --force $samples.0.raw_path
     let echo_shell_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
     $echo_shell_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'echo-only shell'
-    $"SMOLFIRE_NET_OK ($samples.0.nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=180ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n" | save --raw --force $samples.0.raw_path
+    $original_first_raw | save --raw --force $samples.0.raw_path
+    let missing_generation = ((open $samples.0.owner_path) | upsert generation '')
+    $missing_generation | to json --raw | save --raw --force $samples.0.owner_path
+    let owner_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert owner_sha256 (sha $samples.0.owner_path))))
+    $owner_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'absent owner generation'
+    $original_first_owner | save --raw --force $samples.0.owner_path
+    let forced_cleanup = ((open $samples.0.cleanup_path) | upsert forced true | upsert state 'kill-exited')
+    $forced_cleanup | to json --raw | save --raw --force $samples.0.cleanup_path
+    let forced_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert cleanup_sha256 (sha $samples.0.cleanup_path))))
+    $forced_report | to json --raw | save --raw --force $report_path
+    reject $audit $report_path 'TERM-resistant forced KILL receipt'
+    $original_first_cleanup | save --raw --force $samples.0.cleanup_path
     let false_panic = $"SMOLFIRE_NET_OK ($nonce)\nNET_GATE=pass\nSMOLFIRE_READY\nsysctl debug.kdb.panic=1\ndebug.kdb.panic:PANIC_CONTROL=pass\n"
     $false_panic | save --raw --force $raw_path
     let echo_report = ($report | upsert panic_control ($panic | upsert raw_sha256 (sha $raw_path)))
@@ -119,10 +166,28 @@ def main [] {
     $original_report | save --raw --force $report_path
     let restaged = (run_audit $audit $report_path)
     require ($restaged.exit_code == 0 and (($restaged.stdout | from json).report_sha256 == (sha $report_path))) 'fixture was not restored before late teardown checks'
-    {tag: '', pid: '', forced: true, state: 'no-owner'} | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
+    {tag: '', pid: '', forced: true, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []} | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
     let final_bad = (^nu $finalize --work $work --audit $audit | complete)
     require ($final_bad.exit_code != 0) 'finalizer accepted forced late cleanup'
-    {tag: '', pid: '', forced: false, state: 'no-owner'} | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
+    {tag: '', pid: '999', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []} | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
+    let forged = (^nu $finalize --work $work --audit $audit | complete)
+    require ($forged.exit_code != 0) 'finalizer accepted forged late owner fields'
+    {tag: '', pid: '', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: ['999']} | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
+    let unreported = (^nu $finalize --work $work --audit $audit | complete)
+    require ($unreported.exit_code != 0) 'finalizer accepted unreported matching config process'
+    {tag: '', pid: '', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []} | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
+    rm ($dir | path join 'workflow-cleanup.json')
+    let missing_late = (^nu $finalize --work $work --audit $audit | complete)
+    require ($missing_late.exit_code != 0) 'finalizer accepted absent late cleanup'
+    {tag: '', pid: '', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []} | to json --raw | save --raw ($dir | path join 'workflow-cleanup.json')
+    rm ($dir | path join 'audit.json')
+    let missing_audit = (^nu $finalize --work $work --audit $audit | complete)
+    require ($missing_audit.exit_code != 0) 'finalizer accepted missing audit after runner exit 0'
+    $good.stdout | save --raw ($dir | path join 'audit.json')
+    rm $report_path
+    let missing_report = (^nu $finalize --work $work --audit $audit | complete)
+    require ($missing_report.exit_code != 0) 'finalizer accepted missing report after runner exit 0'
+    $original_report | save --raw $report_path
     'panic-control' | save --raw ($dir | path join 'current-tag')
     let unresolved = (^nu $finalize --work $work --audit $audit | complete)
     require ($unresolved.exit_code != 0) 'finalizer accepted unresolved current owner'

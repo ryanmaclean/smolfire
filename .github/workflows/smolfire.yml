@@ -97,6 +97,8 @@ jobs:
           cd "$WORK"
           curl -fsSL -o fc.tgz \
             "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-x86_64.tgz"
+          # Firecracker's release checksum asset for v1.12.0/x86_64.
+          printf '%s  %s\n' '392b5f7e4bf12871d1e8377a60ed3b384a46bc2f7d3771caf202aa7a63e32676' fc.tgz | sha256sum --check --status
           tar xzf fc.tgz
           FC=$(find . -name "firecracker-${FC_VER}-x86_64" -type f | head -1)
           test -n "$FC" || { echo "ERROR: firecracker binary not in tgz"; find . -maxdepth 3; exit 1; }

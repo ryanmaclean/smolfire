@@ -709,6 +709,7 @@ jobs:
             /mnt/smolfire-ci/vm-workflow-cleanup.json
             /mnt/smolfire-ci/vm-workflow-cleanup.stdout
             /mnt/smolfire-ci/vm-workflow-cleanup.stderr
+            /mnt/smolfire-ci/vm-shutdown-attempt.json
 
       - name: Finalize Firecracker A/B after teardown
         id: firecracker_boot_mute_final

@@ -68,6 +68,7 @@ if (($service.ports.0 | into string) != '8080:80') or $service.volumes.0 != '/mn
 if not ($ordinary.run | str contains '"$WORK/www/token.txt"') or not ($ordinary.run | str contains '[ "$HTTP_TOKEN" = "$TOK" ]') or not ($ordinary.run | str contains 'http://172.16.0.1:8080/token.txt') { error make {msg: 'ordinary gate does not prove TAP token content from mount'} }
 if not ($qemu.run | str contains 'http://10.0.2.2:8080/token.txt') { error make {msg: 'QEMU SLIRP fetch URL does not map to hosted service port'} }
 if $hosted_qemu_upload.if != 'always()' or not ($hosted_qemu_upload.with.path | str contains 'vm-workflow-cleanup.json') { error make {msg: 'QEMU late cleanup receipt not uploaded'} }
+if not ($hosted_qemu_upload.with.path | str contains 'vm-shutdown-attempt.json') { error make {msg: 'SSH shutdown exit/stderr evidence not uploaded after teardown'} }
 if not ($enforce.run | str contains 'steps.hosted_qemu_teardown_upload.outcome') { error make {msg: 'QEMU late receipt upload outcome not enforced'} }
 if (do $index 'Teardown VM') >= (do $index 'Upload hosted QEMU teardown receipts') { error make {msg: 'QEMU late receipt upload precedes teardown'} }
 if (do $index 'Upload Firecracker A/B teardown receipt') >= (do $index 'Finalize Firecracker A/B after teardown') { error make {msg: 'final verdict precedes late upload'} }

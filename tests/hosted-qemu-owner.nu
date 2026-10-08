@@ -51,6 +51,10 @@ export def ssh_target_decision [owner: record, port: string, known: string, publ
     if ($known | str trim) != $expected or not ($nic in $owner.argv) { return 'HOLD' }
     'MATCH'
 }
+export def ssh_known_hosts_option [path: string] {
+    require ($path | str starts-with '/') 'pinned known_hosts path must be absolute'
+    $"UserKnownHostsFile=($path)"
+}
 def exact_live_snapshot [observed: record, owner: record] {
     require ((owner_identity_decision $observed $owner) in ['MATCH' 'EXITED']) 'QEMU PID generation, executable, or exact argv changed during wait'
 }
@@ -124,8 +128,10 @@ def cleanup [work: string, mode: string] {
             require ($key_check.exit_code == 0 and ((($key_check.stdout | str trim | split row ' ' | first 2) | str join ' ') == (($public | str trim | split row ' ' | first 2) | str join ' '))) 'pinned SSH public key does not match job private key'
             # A second exact observation narrows the interval before dialing.
             require ((owner_identity_decision (snapshot $pid) $owner) == 'MATCH') 'build VM changed identity before SSH shutdown'
-            let command = (^ssh -i ($work | path join 'ci_key') -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_path -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 -o BatchMode=yes -p $port root@127.0.0.1 'shutdown -p now' | complete)
+            let known_option = (ssh_known_hosts_option $known_path)
+            let command = (^ssh -i ($work | path join 'ci_key') -o StrictHostKeyChecking=yes -o $known_option -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 -o BatchMode=yes -p $port root@127.0.0.1 'shutdown -p now' | complete)
             $shutdown_rc = $command.exit_code
+            {exit_code: $shutdown_rc, stderr: $command.stderr} | to json --raw | save --raw --force ($work | path join 'vm-shutdown-attempt.json')
             require ($shutdown_rc == 0) 'pinned build VM shutdown command failed'
         }
         for tick in 1..50 {

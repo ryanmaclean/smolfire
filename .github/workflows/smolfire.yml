@@ -244,6 +244,12 @@ jobs:
           # virtio_mmio.device= entries so vtnet0 attaches).
           printf '{\n "boot-source": { "kernel_image_path": "%s/smolfire-kernel", "boot_args": "hint.acpi.0.disabled=0 machdep.disable_tsc_calibration=0 smolfire.ip=172.16.0.2/30 smolfire.gw=172.16.0.1 smolfire.fetch=http://172.16.0.1:8080/token.txt" },\n "drives": [],\n "network-interfaces": [ { "iface_id": "eth0", "guest_mac": "06:00:AC:10:00:02", "host_dev_name": "tap0" } ],\n "machine-config": { "vcpu_count": 1, "mem_size_mib": 512 }\n}\n' "$WORK" > fc.json
           cat fc.json
+          # The branch-only A/B runner uses this TAP/token/baseline setup, but
+          # must not run the ordinary gate's numeric-PID cleanup first.
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
+            echo "FIRECRACKER_AB_PREP=pass (ordinary boot trace skipped)"
+            exit 0
+          fi
           # The typed command is FIRE_$((6*7)) (braced send = no Tcl subst),
           # so terminal echo can never match FIRE_42 — only real sh output can.
           # Gate order: rc emits the net marker BEFORE SMOLFIRE_READY; the
@@ -307,7 +313,7 @@ jobs:
 
       - name: Firecracker network gate
         id: firecracker_network
-        if: ${{ always() }}
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -319,7 +325,7 @@ jobs:
 
       - name: Firecracker boot-time gate
         id: firecracker_boot_time
-        if: ${{ always() }}
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -337,7 +343,7 @@ jobs:
 
       - name: Firecracker shell gate
         id: firecracker_shell
-        if: ${{ always() }}
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -350,7 +356,7 @@ jobs:
         id: qemu_microvm
         # Runs even when the Firecracker gates fail — that is exactly when
         # the cross-check is most diagnostic (a VMM-specific vs kernel bug).
-        if: ${{ always() && !cancelled() }}
+        if: ${{ always() && !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -419,7 +425,7 @@ jobs:
         # (a failing gate is exactly when phase data is most useful).
         # Firecracker only (the VMM §1 of the roadmap describes); same
         # boot_args and TAP net path as the gate so rc does the same work.
-        if: ${{ !cancelled() && inputs.tslog }}
+        if: ${{ !cancelled() && inputs.tslog && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
         continue-on-error: true
         run: |
           cd "$WORK"
@@ -525,10 +531,12 @@ jobs:
           FAIL=0
           {
             echo 'microvm_size=${{ steps.microvm_size.outcome }}'
-            echo 'firecracker_network=${{ steps.firecracker_network.outcome }}'
-            echo 'firecracker_boot_time=${{ steps.firecracker_boot_time.outcome }}'
-            echo 'firecracker_shell=${{ steps.firecracker_shell.outcome }}'
-            echo 'qemu_microvm=${{ steps.qemu_microvm.outcome }}'
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
+              echo 'firecracker_network=${{ steps.firecracker_network.outcome }}'
+              echo 'firecracker_boot_time=${{ steps.firecracker_boot_time.outcome }}'
+              echo 'firecracker_shell=${{ steps.firecracker_shell.outcome }}'
+              echo 'qemu_microvm=${{ steps.qemu_microvm.outcome }}'
+            fi
             if [ "${{ inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-') && 'true' || 'false' }}" = true ]; then
               echo 'cpuid_control=${{ steps.cpuid_control.outcome }}'
             fi
@@ -575,7 +583,9 @@ jobs:
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
             [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
           fi
-          [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
+            [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true
+          fi
           [ -f "$WORK/vm.pid" ] && sudo kill "$(cat "$WORK/vm.pid")" 2>/dev/null || true
           [ -f "$WORK/httpd.pid" ] && kill "$(cat "$WORK/httpd.pid")" 2>/dev/null || true
           sudo ip link del tap0 2>/dev/null || true

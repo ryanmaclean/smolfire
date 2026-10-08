@@ -13,11 +13,27 @@ let finalizer = ($steps | where {|x| ($x.name? | default '') == 'Finalize Firecr
 let final_upload = ($steps | where {|x| ($x.name? | default '') == 'Upload Firecracker A/B final verdict'} | first)
 let teardown = ($steps | where {|x| ($x.name? | default '') == 'Teardown VM'} | first)
 let enforce = ($steps | where {|x| ($x.name? | default '') == 'Enforce microVM gates'} | first)
+let ordinary = ($steps | where {|x| ($x.name? | default '') == 'Firecracker boot trace'} | first)
+let network = ($steps | where {|x| ($x.name? | default '') == 'Firecracker network gate'} | first)
+let boot_time = ($steps | where {|x| ($x.name? | default '') == 'Firecracker boot-time gate'} | first)
+let shell_gate = ($steps | where {|x| ($x.name? | default '') == 'Firecracker shell gate'} | first)
+let qemu = ($steps | where {|x| ($x.name? | default '') == 'QEMU microvm gate'} | first)
+let tslog = ($steps | where {|x| ($x.name? | default '') | str starts-with 'TSLOG capture'} | first)
+let record = ($steps | where {|x| ($x.name? | default '') == 'Record microVM gate results'} | first)
 for selected in [$install $diagnostic $teardown_upload $finalizer $final_upload] {
     if not ($selected.if | str contains $selector) { error make {msg: $"selector missing on ($selected.name)"} }
 }
 if not ($teardown.run | str contains $selector) { error make {msg: 'teardown selector missing'} }
 if not ($enforce.run | str contains $selector) { error make {msg: 'enforcement selector missing'} }
+let prep_skip = ($ordinary.run | str index-of 'FIRECRACKER_AB_PREP=pass')
+let ordinary_trap = ($ordinary.run | str index-of 'trap cleanup_fc EXIT')
+if $prep_skip < 0 or $ordinary_trap <= $prep_skip { error make {msg: 'ordinary numeric-PID cleanup precedes A/B prep-only exit'} }
+if not ($ordinary.run | str contains $selector) { error make {msg: 'ordinary Firecracker gate lacks A/B prep-only selector'} }
+for skipped in [$network $boot_time $shell_gate $qemu $tslog] {
+    if not ($skipped.if | str contains $selector) or not ($skipped.if | str contains '!(') { error make {msg: $"ordinary gate ($skipped.name) still runs for A/B diagnostic"} }
+}
+if not ($record.run | str contains $selector) or not ($record.run | str contains 'if [') or not ($record.run | str contains 'firecracker_boot_mute_control=') { error make {msg: 'A/B gate results may admit skipped ordinary gates'} }
+if not ($teardown.run | str contains $selector) or not ($teardown.run | str contains 'qemu-microvm.pid') { error make {msg: 'A/B teardown may signal ordinary QEMU PID'} }
 if not ($finalizer.if | str contains "steps.teardown_vm.outcome == 'success'") or not ($finalizer.if | str contains "steps.firecracker_boot_mute_teardown_upload.outcome == 'success'") { error make {msg: 'finalizer can run before successful teardown/upload'} }
 if not ($enforce.run | str contains 'steps.firecracker_boot_mute_final.outcome') { error make {msg: 'finalizer outcome not enforced'} }
 let names = ($steps | each {|x| $x.name? | default ''})

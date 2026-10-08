@@ -19,7 +19,7 @@ let network = ($steps | where {|x| ($x.name? | default '') == 'Firecracker netwo
 let boot_time = ($steps | where {|x| ($x.name? | default '') == 'Firecracker boot-time gate'} | first)
 let shell_gate = ($steps | where {|x| ($x.name? | default '') == 'Firecracker shell gate'} | first)
 let qemu = ($steps | where {|x| ($x.name? | default '') == 'QEMU microvm gate'} | first)
-let tslog = ($steps | where {|x| ($x.name? | default '') | str starts-with 'TSLOG capture'} | first)
+let tslog = ($steps | where {|x| ($x.name? | default '') | str starts-with 'TSLOG scoped-run preflight'} | first)
 let record = ($steps | where {|x| ($x.name? | default '') == 'Record microVM gate results'} | first)
 for selected in [$diagnostic $teardown_upload $finalizer $final_upload] {
     if not ($selected.if | str contains $selector) { error make {msg: $"selector missing on ($selected.name)"} }
@@ -34,9 +34,10 @@ if not ($ordinary.run | str contains $selector) { error make {msg: 'ordinary Fir
 if ($ordinary.run | str contains 'trap cleanup_fc') or ($ordinary.run | str contains 'kill "$(cat "$WORK/firecracker.pid")"') or ($ordinary.run | str contains 'timeout 60 expect') { error make {msg: 'ordinary Firecracker gate retained a numeric or wrapper signal path'} }
 if not ($ordinary.run | str contains 'firecracker-ordinary-cleanup.nu') { error make {msg: 'ordinary gate lacks no-signal cleanup'} }
 if not ($ordinary.run | str contains 'firecracker-owner.json') or not ($ordinary.run | str contains 'generation') { error make {msg: 'ordinary gate lacks spawn-time generation record'} }
-for skipped in [$network $boot_time $shell_gate $qemu $tslog] {
+for skipped in [$network $boot_time $shell_gate $qemu] {
     if not ($skipped.if | str contains $selector) or not ($skipped.if | str contains '!(') { error make {msg: $"ordinary gate ($skipped.name) still runs for A/B diagnostic"} }
 }
+if not ($tslog.if | str contains '!inputs.boot_mute_control') or not ($tslog.if | str contains "startsWith(github.ref, 'refs/heads/exp/cpuid-freq-')") { error make {msg: 'TSLOG step can overlap A/B selector'} }
 if not ($record.run | str contains $selector) or not ($record.run | str contains 'if [') or not ($record.run | str contains 'firecracker_boot_mute_control=') { error make {msg: 'A/B gate results may admit skipped ordinary gates'} }
 if not ($teardown.run | str contains $selector) or not ($teardown.run | str contains 'selector-skipped') { error make {msg: 'A/B teardown may enter ordinary QEMU path'} }
 if ($teardown.run | str contains 'kill "$(cat "$WORK/firecracker.pid")"') or not ($teardown.run | str contains 'firecracker-ordinary-cleanup.nu') { error make {msg: 'ordinary always teardown retained numeric PID kill or lost no-signal cleanup'} }

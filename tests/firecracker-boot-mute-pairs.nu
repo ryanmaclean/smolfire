@@ -41,6 +41,16 @@ def owner_decision [same_generation: bool, state: string, readable: bool] {
     if not ($state =~ '^[A-Za-z]$') { return 'HOLD' }
     'WAIT_ABSENT'
 }
+def owner_identity_decision [observed: record, owner: record] {
+    if $observed.generation != $owner.generation { return 'HOLD' }
+    if $observed.state in ['Z' 'X' 'x'] { return 'WAIT_ABSENT' }
+    if $observed.exe != $owner.exe or $observed.argv != $owner.argv { return 'HOLD' }
+    'WAIT_ABSENT'
+}
+def global_firecracker_clear [] {
+    let processes = (^pgrep -x firecracker | complete)
+    require ($processes.exit_code == 1) 'Firecracker remains or process enumeration failed; refuse TAP reuse'
+}
 def validate_owner_record [owner: record, intent: record] {
     require ($owner.pid =~ '^[0-9]+$') 'owner PID is malformed'
     require (($owner.generation | str length) > 0) 'owner generation is absent'
@@ -52,12 +62,12 @@ def no_matching_config [config: string] {
     require (($matches | length) == 0) 'a Firecracker still uses the attempted config; refuse resolved cleanup'
     $matches
 }
-def wait_absent [pid: string, generation: string] {
+def wait_absent [pid: string, owner: record] {
     let proc = $"/proc/($pid)"
     for _ in 1..20 {
         if not ($proc | path exists) { return true }
         let observed = (proc_snapshot $pid)
-        require ($observed.generation == $generation) 'owner PID generation changed while waiting for exit'
+        require ((owner_identity_decision $observed $owner) == 'WAIT_ABSENT') 'owner identity changed while waiting for exit'
         sleep 200ms
     }
     not ($proc | path exists)
@@ -85,6 +95,7 @@ def stop_current [work: string] {
             $receipt | to json --raw | save --raw --force ($dir | path join 'workflow-cleanup.json')
             error make {msg: 'unreported Firecracker still uses one of the tagged configs; refuse unverified signal'}
         }
+        global_firecracker_clear
         return {tag: '', pid: '', forced: false, state: 'no-owner', scanned_configs: $configs, matching_config_pids: []}
     }
     let tag = (open --raw $current | str trim)
@@ -106,6 +117,7 @@ def stop_current [work: string] {
     if not ($proc | path exists) {
         try {
             let matches = (no_matching_config $intent.config)
+            global_firecracker_clear
             let receipt = {tag: $tag, pid: $pid, forced: false, state: 'already-exited', generation: $owner.generation, scanned_config: $intent.config, matching_config_pids: $matches}
             $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
             rm $current
@@ -119,10 +131,12 @@ def stop_current [work: string] {
     try {
         let first = (proc_snapshot $pid)
         require ((owner_decision ($first.generation == $owner.generation) $first.state true) == 'WAIT_ABSENT') 'owner PID generation or state changed; refuse reconciliation'
+        require ((owner_identity_decision $first $owner) == 'WAIT_ABSENT') 'owner executable or argv changed; refuse reconciliation'
         let observation_path = ($dir | path join $"($tag)-owner-observation.json")
         $first | to json --raw | save --raw --force $observation_path
-        require (wait_absent $pid $owner.generation) 'owner did not exit naturally within bounded wait'
+        require (wait_absent $pid $owner) 'owner did not exit naturally within bounded wait'
         let matches = (no_matching_config $intent.config)
+        global_firecracker_clear
         let receipt = {tag: $tag, pid: $pid, forced: false, state: 'naturally-exited', generation: $owner.generation, observation_path: $observation_path, observation_sha256: (digest $observation_path), scanned_config: $intent.config, matching_config_pids: $matches}
         $receipt | to json --raw | save --raw --force ($dir | path join $"($tag)-cleanup.json")
         rm $current
@@ -243,9 +257,10 @@ def one_boot [work: string, tag: string, variant: string, mode: string, release:
 def main [--execute, --cleanup-only, --work: string = '/mnt/smolfire-ci', --audit: string = 'tests/firecracker-boot-mute-audit.nu'] {
     if $cleanup_only {
         require (($env.GITHUB_ACTIONS? | default '') == 'true' and ($env.RUNNER_OS? | default '') == 'Linux') 'cleanup requires hosted Linux'
-        let result = (stop_current $work)
-        print ($result | to json --raw)
-        require (not $result.forced) 'forced cleanup is a failed diagnostic'
+        let outcome = (try { {ok: true, value: (stop_current $work)} } catch {|err| {ok: false, value: {tag: '', pid: '', forced: false, state: 'hold-unresolved', reason: $err.msg}} })
+        print ($outcome.value | to json --raw)
+        if not $outcome.ok { error make {msg: $outcome.value.reason} }
+        require (not $outcome.value.forced) 'forced cleanup is a failed diagnostic'
         return
     }
     if not $execute { print 'SOURCE ONLY: no Firecracker launched'; return }

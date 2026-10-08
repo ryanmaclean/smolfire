@@ -36,6 +36,7 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/firecracker-boot-mute-*.nu'
+      - 'tests/firecracker-exit-*.nu'
       - 'tests/firecracker-ordinary-cleanup*.nu'
       - 'tests/firecracker-owner-scan.nu'
       - 'tests/hosted-qemu-owner*.nu'
@@ -51,17 +52,22 @@ on:
       - 'tests/microvm-primary-test.nu'
       - 'tests/smolfire-rootfs-test.nu'
       - 'tests/firecracker-boot-mute-*.nu'
+      - 'tests/firecracker-exit-*.nu'
       - 'tests/firecracker-ordinary-cleanup*.nu'
       - 'tests/firecracker-owner-scan.nu'
       - 'tests/hosted-qemu-owner*.nu'
   workflow_dispatch:
     inputs:
       tslog:
-        description: "Also build SMOLFIRE-TSLOG and capture 3 TSLOG boots + 3 release wall-clock boots (docs/BOOT-TIME-ROADMAP.md §3)"
+        description: "Build SMOLFIRE-TSLOG; capture remains HOLD until FreeBSD Firecracker exit is proven"
         type: boolean
         default: false
       boot_mute_control:
         description: "Branch-only Firecracker same-ELF boot_mute A/B diagnostic (strict <=100ms release goal)"
+        type: boolean
+        default: false
+      exit_probe:
+        description: "One-boot isolated FreeBSD guest reboot to witness exact Firecracker VMM exit; no timing-goal verdict"
         type: boolean
         default: false
 
@@ -284,8 +290,9 @@ jobs:
           cat fc.json
           # The branch-only A/B runner uses this TAP/token/baseline setup, but
           # must not run the ordinary gate's numeric-PID cleanup first.
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
-            echo "FIRECRACKER_AB_PREP=pass (ordinary boot trace skipped)"
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ] || \
+             [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ]; then
+            echo "FIRECRACKER_PREP=pass (ordinary boot trace skipped for isolated manual diagnostic)"
             exit 0
           fi
           # The typed command is FIRE_$((6*7)) (braced send = no Tcl subst),
@@ -359,7 +366,7 @@ jobs:
 
       - name: Firecracker network gate
         id: firecracker_network
-        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) && !(github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -371,7 +378,7 @@ jobs:
 
       - name: Firecracker boot-time gate
         id: firecracker_boot_time
-        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) && !(github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -389,7 +396,7 @@ jobs:
 
       - name: Firecracker shell gate
         id: firecracker_shell
-        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) && !(github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -402,7 +409,7 @@ jobs:
         id: qemu_microvm
         # Runs even when the Firecracker gates fail — that is exactly when
         # the cross-check is most diagnostic (a VMM-specific vs kernel bug).
-        if: ${{ always() && !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
+        if: ${{ always() && !cancelled() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) && !(github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-')) }}
         continue-on-error: true
         run: |
           set -e
@@ -478,6 +485,15 @@ jobs:
             > "$WORK/firecracker-boot-mute/workflow-audit.json"
           nu -c 'let a = (open ($env.WORK | path join "firecracker-boot-mute" "workflow-audit.json")); if not $a.mechanism_pairs_complete or not $a.panic_visibility or $a.firecracker_release_goal != "PENDING_TEARDOWN" { exit 1 }'
 
+      - name: Firecracker FreeBSD reboot exit witness (one boot only)
+        id: exit_probe
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && !inputs.boot_mute_control && !inputs.tslog }}
+        continue-on-error: true
+        run: |
+          set -eu
+          nu tests/firecracker-exit-witness.nu --execute --work "$WORK"
+          test -s "$WORK/firecracker-exit-witness/early-result.json"
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -515,6 +531,7 @@ jobs:
             /mnt/smolfire-ci/serial.log
             /mnt/smolfire-ci/cpuid-control/**
             /mnt/smolfire-ci/firecracker-boot-mute/**
+            /mnt/smolfire-ci/firecracker-exit-witness/**
 
       - name: Record microVM gate results
         if: ${{ always() }}
@@ -522,7 +539,8 @@ jobs:
           FAIL=0
           {
             echo 'microvm_size=${{ steps.microvm_size.outcome }}'
-            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ] && \
+               [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" != true ]; then
               echo 'firecracker_trace=${{ steps.firecracker_trace.outcome }}'
               echo 'firecracker_network=${{ steps.firecracker_network.outcome }}'
               echo 'firecracker_boot_time=${{ steps.firecracker_boot_time.outcome }}'
@@ -535,6 +553,9 @@ jobs:
             fi
             if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
               echo 'firecracker_boot_mute_control=${{ steps.firecracker_boot_mute_control.outcome }}'
+            fi
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ]; then
+              echo 'exit_probe=${{ steps.exit_probe.outcome }}'
             fi
           } > "$WORK/gate-results.env"
           while IFS='=' read -r gate outcome; do
@@ -550,11 +571,13 @@ jobs:
           CPUID_CLEANUP_FAIL=0
           TSLOG_CLEANUP_FAIL=0
           FC_AB_CLEANUP_FAIL=0
+          EXIT_PROBE_CLEANUP_FAIL=0
           ORDINARY_CLEANUP_FAIL=0
           QEMU_CLEANUP_FAIL=0
           BUILD_VM_CLEANUP_FAIL=0
           mkdir -p "$WORK"
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ] && [ -e "$WORK/fc.json" ]; then
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ] && \
+             [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" != true ] && [ -e "$WORK/fc.json" ]; then
             if command -v nu >/dev/null 2>&1; then
               nu tests/firecracker-ordinary-cleanup.nu --work "$WORK" \
                 --receipt "$WORK/firecracker-ordinary-workflow-cleanup.json" \
@@ -575,6 +598,17 @@ jobs:
               printf '%s\n' '{"tag":"","pid":"","forced":false,"state":"hold-nu-missing"}' > "$WORK/firecracker-boot-mute/workflow-cleanup.json"
               printf '%s\n' 'Nushell installer failed before diagnostic ownership could be verified' > "$WORK/firecracker-boot-mute/workflow-cleanup.stderr"
               FC_AB_CLEANUP_FAIL=1
+            fi
+          fi
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ]; then
+            mkdir -p "$WORK/firecracker-exit-witness"
+            if command -v nu >/dev/null 2>&1; then
+              nu tests/firecracker-exit-witness.nu --cleanup-only --work "$WORK" \
+                > "$WORK/firecracker-exit-witness/workflow-cleanup.stdout" \
+                2> "$WORK/firecracker-exit-witness/workflow-cleanup.stderr" || EXIT_PROBE_CLEANUP_FAIL=1
+            else
+              printf '%s\n' '{"state":"hold-nu-missing","forced":false}' > "$WORK/firecracker-exit-witness/workflow-cleanup.json"
+              EXIT_PROBE_CLEANUP_FAIL=1
             fi
           fi
           if [ -e "$WORK/cpuid-control/current-qemu.pid" ]; then
@@ -599,7 +633,8 @@ jobs:
           fi
           # Natural guest exit plus exact-owner/config reconciliation only.
           # An ambiguous owner is a failed hosted gate; no numeric PID signal.
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ]; then
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" != true ] && \
+             [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" != true ]; then
             nu tests/hosted-qemu-owner.nu --mode microvm --cleanup --work "$WORK" \
               --receipt "$WORK/qemu-microvm-workflow-cleanup.json" \
               > "$WORK/qemu-microvm-workflow-cleanup.stdout" \
@@ -615,6 +650,7 @@ jobs:
           test "$CPUID_CLEANUP_FAIL" = 0
           test "$TSLOG_CLEANUP_FAIL" = 0
           test "$FC_AB_CLEANUP_FAIL" = 0
+          test "$EXIT_PROBE_CLEANUP_FAIL" = 0
           test "$ORDINARY_CLEANUP_FAIL" = 0
           test "$QEMU_CLEANUP_FAIL" = 0
           test "$BUILD_VM_CLEANUP_FAIL" = 0
@@ -652,9 +688,21 @@ jobs:
             /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.json
             /mnt/smolfire-ci/firecracker-boot-mute/workflow-cleanup.stderr
 
+      - name: Upload Firecracker exit witness teardown receipt
+        id: exit_probe_teardown_upload
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-firecracker-exit-witness-teardown
+          if-no-files-found: error
+          path: |
+            /mnt/smolfire-ci/firecracker-exit-witness/workflow-cleanup.json
+            /mnt/smolfire-ci/firecracker-exit-witness/workflow-cleanup.stdout
+            /mnt/smolfire-ci/firecracker-exit-witness/workflow-cleanup.stderr
+
       - name: Upload ordinary Firecracker teardown receipt
         id: ordinary_firecracker_teardown_upload
-        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) }}
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-')) && !(github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-')) }}
         uses: actions/upload-artifact@v4
         with:
           name: smolfire-ordinary-firecracker-teardown
@@ -700,6 +748,16 @@ jobs:
       - name: Enforce microVM gates
         if: ${{ always() }}
         run: |
+          EXIT_FINALIZE_FAIL=0
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ]; then
+            mkdir -p "$WORK/firecracker-exit-witness"
+            if command -v nu >/dev/null 2>&1; then
+              nu tests/firecracker-exit-witness-finalize.nu --work "$WORK" || EXIT_FINALIZE_FAIL=1
+            else
+              printf '%s\n' '{"kind":"firecracker-freebsd-exit-final-v1","verdict":"HOLD","release_goal":"UNPROVEN","reason":"Nushell unavailable for late finalization"}' > "$WORK/firecracker-exit-witness/final-verdict.json"
+              EXIT_FINALIZE_FAIL=1
+            fi
+          fi
           . "$WORK/gate-results.env"
           test "$gate_fail" = 0
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.boot_mute_control && startsWith(github.ref, 'refs/heads/exp/boot-mute-') && 'true' || 'false' }}" = true ]; then
@@ -708,6 +766,12 @@ jobs:
             test '${{ steps.firecracker_boot_mute_teardown_upload.outcome }}' = success
             test '${{ steps.firecracker_boot_mute_final.outcome }}' = success
             test -s "$WORK/firecracker-boot-mute/final-verdict.json"
+          elif [ "${{ github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') && 'true' || 'false' }}" = true ]; then
+            test "$EXIT_FINALIZE_FAIL" = 0
+            test '${{ steps.teardown_vm.outcome }}' = success
+            test '${{ steps.hosted_qemu_teardown_upload.outcome }}' = success
+            test '${{ steps.exit_probe.outcome }}' = success
+            test '${{ steps.exit_probe_teardown_upload.outcome }}' = success
           else
             test '${{ steps.teardown_vm.outcome }}' = success
             test '${{ steps.hosted_qemu_teardown_upload.outcome }}' = success
@@ -718,3 +782,11 @@ jobs:
             test '${{ steps.tslog_guard_teardown_upload.outcome }}' = success
             test -s "$WORK/tslog-control/workflow-cleanup.json"
           fi
+
+      - name: Upload Firecracker exit witness final verdict
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.exit_probe && startsWith(github.ref, 'refs/heads/exp/fc-exit-') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-firecracker-exit-witness-final
+          if-no-files-found: error
+          path: /mnt/smolfire-ci/firecracker-exit-witness/final-verdict.json

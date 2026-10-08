@@ -27,7 +27,7 @@ for selected in [$diagnostic $teardown_upload $finalizer $final_upload] {
 if $install.if != '${{ !cancelled() }}' { error make {msg: 'Nushell not installed for ordinary gate cleanup'} }
 if not ($teardown.run | str contains $selector) { error make {msg: 'teardown selector missing'} }
 if not ($enforce.run | str contains $selector) { error make {msg: 'enforcement selector missing'} }
-let prep_skip = ($ordinary.run | str index-of 'FIRECRACKER_AB_PREP=pass')
+let prep_skip = ($ordinary.run | str index-of 'FIRECRACKER_PREP=pass')
 let ordinary_spawn = ($ordinary.run | str index-of 'spawn ')
 if $prep_skip < 0 or $ordinary_spawn <= $prep_skip { error make {msg: 'ordinary Firecracker spawn precedes A/B prep-only exit'} }
 if not ($ordinary.run | str contains $selector) { error make {msg: 'ordinary Firecracker gate lacks A/B prep-only selector'} }

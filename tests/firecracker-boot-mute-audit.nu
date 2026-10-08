@@ -48,7 +48,7 @@ def check_boot [s: record, r: record, baseline: record, panic: bool] {
     require (not $cleanup.forced and ($cleanup.state in ['term-exited' 'already-exited'])) 'cleanup was forced, mismatched or unresolved'
     let raw = (open --raw $s.raw_path)
     require ($s.nonce =~ '^fc-ab-[0-9a-f-]+$') 'nonce format invalid'
-    let nonce_rows = ($raw | parse -r 'SMOLFIRE_NET_OK (?<observed>fc-ab-[0-9a-f-]+)\r?\n')
+    let nonce_rows = ($raw | parse -r 'SMOLFIRE_NET_OK (?<observed>fc-ab-[0-9a-f-]+)\r*\n')
     require (($nonce_rows | length) == 1 and $nonce_rows.0.observed == $s.nonce) 'raw network nonce missing, extended or ambiguous'
     require (ordered $raw $"SMOLFIRE_NET_OK ($s.nonce)" 'SMOLFIRE_READY') 'network nonce after READY'
     require ($raw | str contains 'NET_GATE=pass') 'network gate marker absent'

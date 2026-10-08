@@ -83,6 +83,14 @@ def main [] {
     require ($good.exit_code == 0) $"positive synthetic fixture failed: ($good.stderr)"
     let verdict = ($good.stdout | from json)
     require ($verdict.firecracker_release_goal == 'PENDING_TEARDOWN' and $verdict.all_muted_within_100ms) 'audit emitted premature PASS or wrong timing result'
+    let doubled_cr = ($original_first_raw | str replace $"SMOLFIRE_NET_OK ($samples.0.nonce)\n" $"SMOLFIRE_NET_OK ($samples.0.nonce)\r\r\n")
+    $doubled_cr | save --raw --force $samples.0.raw_path
+    let cr_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
+    $cr_report | to json --raw | save --raw --force $report_path
+    let cr_good = (run_audit $audit $report_path)
+    require ($cr_good.exit_code == 0) $"CR CR LF positive raw marker rejected: ($cr_good.stderr)"
+    $original_first_raw | save --raw --force $samples.0.raw_path
+    $original_report | save --raw --force $report_path
     $good.stdout | save --raw ($dir | path join 'audit.json')
     $good.stdout | save --raw ($dir | path join 'workflow-audit.json')
     let configs = ($samples | get config_path | append $panic.config_path | sort)
@@ -134,7 +142,7 @@ def main [] {
     let host_only_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
     $host_only_report | to json --raw | save --raw --force $report_path
     reject $audit $report_path 'host-only token without guest raw marker'
-    let extended = $"SMOLFIRE_NET_OK ($samples.0.nonce)abcdef\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=180ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n"
+    let extended = $"SMOLFIRE_NET_OK ($samples.0.nonce)abcdef\r\r\nNET_GATE=pass\nSMOLFIRE_READY\nTIME_TO_READY=180ms\nFIRE_42\nSHELL_GATE=pass\nHOST_PING=pass\n"
     $extended | save --raw --force $samples.0.raw_path
     let extended_report = ($report | upsert samples ($samples | update 0 ($samples.0 | upsert raw_sha256 (sha $samples.0.raw_path))))
     $extended_report | to json --raw | save --raw --force $report_path

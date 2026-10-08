@@ -147,7 +147,7 @@ if {[catch {
   exit 9
 }
 expect {
-  -re "SMOLFIRE_NET_OK $env(FC_AB_NONCE)(\\r?\\n)" { puts "NET_GATE=pass" }
+  -re "SMOLFIRE_NET_OK $env(FC_AB_NONCE)(\\r*\\n)" { puts "NET_GATE=pass" }
   "SMOLFIRE_NET_FAIL" { puts "NET_GATE=fail"; set rc 3 }
   -re {panic:} { puts "VERDICT=fail panic before network"; set rc 2 }
   timeout { puts "VERDICT=fail no network nonce"; set rc 3 }

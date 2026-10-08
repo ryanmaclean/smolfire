@@ -122,7 +122,9 @@ def stop_prior_gate_qemu [work: string, release: string, tslog: string] {
 
 def qmp_accepts [variant: string] {
     let request = "{\"execute\":\"qmp_capabilities\"}\n{\"execute\":\"quit\"}\n"
-    let result = ($request | ^timeout 10s qemu-system-x86_64 -M none -accel kvm -cpu $"host,+invtsc,vmware-cpuid-freq=($variant)" -nodefaults -display none -monitor none -serial none -qmp stdio | complete)
+    # Use the same machine class as the guest boots. -M none with a KVM host
+    # CPU failed before option validation (apic-id was not initialized).
+    let result = ($request | ^timeout 10s qemu-system-x86_64 -M microvm -accel kvm -cpu $"host,+invtsc,vmware-cpuid-freq=($variant)" -S -nodefaults -display none -monitor none -serial none -qmp stdio | complete)
     require ($result.exit_code == 0) $"QEMU rejected vmware-cpuid-freq=($variant): ($result.stderr)"
 }
 

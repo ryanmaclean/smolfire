@@ -518,6 +518,10 @@ jobs:
             nu tests/cpuid-pair.nu --cleanup-only --work "$WORK" \
               > "$WORK/cpuid-control/workflow-cleanup.json" \
               2> "$WORK/cpuid-control/workflow-cleanup.stderr" || CPUID_CLEANUP_FAIL=1
+          elif [ -d "$WORK" ] && [ "${{ inputs.tslog && startsWith(github.ref, 'refs/heads/exp/cpuid-freq-') && 'true' || 'false' }}" = true ]; then
+            mkdir -p "$WORK/cpuid-control"
+            printf '%s\n' '{"pid":"","forced":false,"state":"no-pidfile"}' > "$WORK/cpuid-control/workflow-cleanup.json"
+            : > "$WORK/cpuid-control/workflow-cleanup.stderr"
           fi
           [ -f "$WORK/firecracker.pid" ] && kill "$(cat "$WORK/firecracker.pid")" 2>/dev/null || true
           [ -f "$WORK/qemu-microvm.pid" ] && kill "$(cat "$WORK/qemu-microvm.pid")" 2>/dev/null || true

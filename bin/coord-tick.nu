@@ -35,14 +35,14 @@ const STATE_VERSION = "1"
 
 # Task executors. `vm` (default) keeps today's dispatch path unchanged;
 # `jail` (experimental, FreeBSD hosts only) runs the request's commands in an
-# ephemeral jail via bin/jail-execute.nu. `fleet` (opt-in, only when
+# ephemeral jail via bin/coord-jail-dispatch.nu and agent-jail. `fleet` (opt-in, only when
 # SMOLFIRE_FLEET_ENABLE=1) runs them on a remote fleet worker via
 # bin/coord-fleet-dispatch.nu. Selected per request by a TOML
 # `executor = "vm"|"jail"|"fleet"` field, else SMOLFIRE_EXECUTOR, else the
 # recipient role (`fleet-*` → fleet when enabled), else "vm".
 const EXECUTORS = ["vm", "jail"]
 const DEFAULT_EXECUTOR = "vm"
-const JAIL_EXECUTOR_SCRIPT = path self jail-execute.nu
+const JAIL_EXECUTOR_SCRIPT = path self coord-jail-dispatch.nu
 const FLEET_EXECUTOR_SCRIPT = path self coord-fleet-dispatch.nu
 
 # Max-inflight caps (gastown parity; Jev 0.88 decision: in-flight work is
@@ -1006,7 +1006,7 @@ def sweep-dead-workers [state: record, spool: string] {
     set-workers $next_state $next_table
 }
 
-# Launch bin/jail-execute.nu detached for a dispatched task (executor = jail).
+# Launch smolfire's thin agent-jail dispatch adapter for a jail task.
 # Values reach the child as positional argv, never interpolated into the sh
 # script, so task ids / Message-IDs cannot inject shell.
 def spawn-jail-executor [task_id: string, dispatch_id: string, request_id: string, spool_path: string, root: string] {

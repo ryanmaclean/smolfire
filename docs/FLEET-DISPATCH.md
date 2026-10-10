@@ -4,7 +4,7 @@ Status: **prototype, opt-in, off by default.** Branch `feat/coord-fleet-dispatch
 
 | File | Role |
 |---|---|
-| `bin/coord-fleet-dispatch.nu` | Executor. Sibling of `bin/vm-execute.nu` / `bin/jail-execute.nu` with the same contract |
+| `bin/coord-fleet-dispatch.nu` | Executor. Shares the result shape with `bin/vm-execute.nu` and the agent-jail executor; smolfire's jail path is `bin/coord-jail-dispatch.nu` |
 | `bin/coord-dispatch.nu` | Minimal hook: `fleet-*` roles route to `dispatch-fleet`, gated by `SMOLFIRE_FLEET_ENABLE=1` |
 | `tests/coord-fleet-dispatch-test.nu` | 26 stub-ssh tests (no live hosts) + 1 guarded live test |
 

@@ -461,9 +461,11 @@ surface, and spool ergonomics against a SMOLFIRE-per-task dispatch.
 Re-evaluate at the FreeBSD 15.1/16 rebase (rootless Podman progress is the
 trigger to revisit).
 
-**Status:** the experiment's tool has landed as an opt-in executor —
-`bin/jail-execute.nu`, selected with `SMOLFIRE_EXECUTOR=jail` (default stays
-`vm`). Scope, security boundaries and the real-host verification checklist:
+**Status:** the existing opt-in jail path is being transferred to the
+agent-jail owner in a paired draft migration. smolfire's intended endpoint is
+`bin/coord-jail-dispatch.nu`, selected with `SMOLFIRE_EXECUTOR=jail` (default
+stays `vm`), and it fails closed until an agent-jail installation is pinned.
+Scope, security boundaries and the real-host verification checklist:
 `docs/JAIL-EXECUTOR.md`.
 
 ## Sources

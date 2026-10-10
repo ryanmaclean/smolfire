@@ -224,26 +224,28 @@ unexpressible and the continue-on-reject rule untestable.
 
 **BURST-RSP frame, FPGA → host, `13 + N` bytes (max 77):**
 `[0x44][0x55][RSP=0x85][COUNT=N]`
-+ N result bytes `R0..R{N-1}`: `bit0` COMMITTED (1 = entry committed,
-durable advanced) | `bit1` REJECT (`= ~COMMITTED`) | `bits[4:2]` CODE
++ N result bytes `R0..R{N-1}`: `bit0` COMMITTED (legacy wire name;
+1 = entry accepted and completed by the local FSM, with no media claim)
+| `bit1` REJECT (`= ~COMMITTED`) | `bits[4:2]` CODE
 (`0` none, `1` CRC_ERR, `2` DUP_SEQ, `3` GAP_SEQ, `4` MALFORMED,
 `5` OVERFLOW, `6..7` reserved) | `bits[7:5]` reserved 0
-+ `DURABLE_LO` (4 B LE) + `DURABLE_HI` (4 B LE, final watermark =
-committed count added to the pre-burst watermark)
++ `DURABLE_LO` (4 B LE) + `DURABLE_HI` (4 B LE, local ordering count
+after the burst; the register names are legacy and do not imply persistence)
 + `[CHK]`, `CHK = (RSP + COUNT + R0..R{N-1} + 8 watermark bytes) mod 256`.
 
 **Execution semantics (bridge-internal, fabric cycles):** the whole frame
-is buffered and checksum-validated BEFORE dispatch (a CHK failure commits
-nothing — no partial commit). Then, per entry: write
+is buffered and checksum-validated BEFORE dispatch (a CHK failure dispatches
+no entries). Then, per entry: write
 `EPOCH` (pinned to the frame-start value for all N) / `DESC0` / `DESC1` /
 `REQ_LO` / `REQ_HI=0` / `DESC_CRC` / `CTRL.SUBMIT`, settle past the commit
-pipeline, sample `ERROR`. Each entry is validated against the live durable
-count at feed time, so a mid-burst reject does NOT cascade: the code
+pipeline, sample `ERROR`. Each entry is validated against the live local
+ordering count at feed time, so a mid-burst reject does NOT cascade: the code
 is recorded, that entry's sticky `ERROR` bits are rw1c-cleared (required
 for per-entry isolation — otherwise entry i+1 would inherit entry i's
 bits), and the rest CONTINUE, never stall. Pre-existing sticky `ERROR`
 bits (set before the burst) are never cleared — only the entry's new bits
-are. The host derives every per-submit outcome from the result bytes.
+are. The host derives each local FSM outcome from the result bytes; none is
+a durable media receipt.
 
 **Resync rule:** `COUNT` 0 or >64 is a malformed frame (silent drop, no
 RSP). The DUT cannot know an invalid frame's length, so the rejected

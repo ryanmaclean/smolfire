@@ -1,0 +1,2 @@
+# smolfire NetBSD microVM: no getty; the console carries the marker protocol.
+console	"/usr/libexec/getty std.9600"	vt100	off secure

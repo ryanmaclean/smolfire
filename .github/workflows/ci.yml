@@ -192,6 +192,7 @@ jobs:
       # `openssl base64 -A` per the verifier's own contract). Wired into
       # CI on both matrix OSes so the portability fix stays enforced.
       - name: tpm-attest-verify tests (RSA/ECC fixture paths)
+        timeout-minutes: 5
         run: nu tests/tpm-attest-verify-test.nu
 
       # aarch64 boot-probe verdict classifier (PROBE_QEMU/AAVMF_DIR test
@@ -211,6 +212,57 @@ jobs:
         run: |
           nu bin/durable-tid-model.nu
           nu tests/durable-tid-model-test.nu
+
+      # PR124's C/RTL gate is diagnostic only. Icarus is an external CI test
+      # tool under the diagnostic-tool license exception; no binary is shipped.
+      # Earlier generic checks use GitHub's PR merge tree; this source/model
+      # gate deliberately checks the submitted PR head instead.
+      - name: Check out exact source head for PR124 gate (Linux)
+        if: runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Icarus Verilog for PR124 source/model gate (Linux)
+        if: runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        timeout-minutes: 3
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends iverilog
+
+      - name: PR124 off-board C/RTL source/model gate (Linux)
+        if: runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          mapfile -t ivl_targets < <(dpkg -L iverilog | sed -n '/\/ivl\/vvp\.tgt$/p')
+          test "${#ivl_targets[@]}" -eq 1
+          ivl_base="${ivl_targets[0]%/vvp.tgt}"
+          test -d "$ivl_base"
+          out_dir="$RUNNER_TEMP/pr124-offboard"
+          test ! -e "$out_dir"
+          flock -n "$RUNNER_TEMP/pr124-offboard.lock" \
+            nu tests/pr124-offboard-gate.nu "$out_dir" \
+              --cc "$(command -v cc)" \
+              --iverilog "$(command -v iverilog)" \
+              --vvp "$(command -v vvp)" \
+              --ivl-base "$ivl_base" \
+              --timeout-tool "$(command -v timeout)"
+
+      - name: Upload PR124 source/model raw evidence (Linux)
+        if: always() && runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr124-offboard-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/pr124-offboard/*.json
+            ${{ runner.temp }}/pr124-offboard/*.stdout
+            ${{ runner.temp }}/pr124-offboard/*.stderr
+            ${{ runner.temp }}/pr124-offboard/*.txt
+          if-no-files-found: warn
+          retention-days: 7
 
   # ── Shell script linting ─────────────────────────────────────────────────────
   shellcheck:

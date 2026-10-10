@@ -1,0 +1,39 @@
+// dut_hdmi.cst -- Gowin constraints for dut_hdmi_top (GW5AST-LV138PG484A).
+// Applies ON THE BUILD HOST (as dut.cst); this repo copy documents intent.
+// Single-clock top: hdmi_clk (V10) is the ONLY clock. V22 (50 MHz board
+// osc) is UNUSED (dut_top_uart keeps it). The 64-bit durable observation
+// bus is NOT pinned out (shown on the display + readable via UART;
+// pinning it scatters placement and worsens pix-clock skew -- measured
+// -3.5 ns with it). 1-bit busy/trusted probes reuse A1/F1 from the proven
+// dut-uart recipe. IO_PORT lines follow nestang
+// src/boards/console.cst for the TMDS pairs (LVCMOS33D, PULL NONE) and the
+// rtl/dut_top_uart.v header snippet for UART/clocks.
+//
+// UNCONFIRMED: V10 = MS5351 CLK2 on the Tang Console carrier (single-source
+// prior live recon; see rtl/README.md). TMDS pins CONFIRMED via console.cst.
+IO_LOC "hdmi_clk" V10;
+IO_PORT "hdmi_clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
+IO_LOC "uart_rxd" V14;
+IO_PORT "uart_rxd" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "uart_txd" U15;
+IO_PORT "uart_txd" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC "reset_n" E3;
+IO_PORT "reset_n" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC "busy_o" A1;
+IO_LOC "trusted_complete_o" F1;
+IO_LOC "tmds_clk_p" G15;
+IO_PORT "tmds_clk_p" PULL_MODE=NONE IO_TYPE=LVCMOS33D;
+IO_LOC "tmds_clk_n" G16;
+IO_PORT "tmds_clk_n" PULL_MODE=NONE IO_TYPE=LVCMOS33D;
+IO_LOC "tmds_d_p[0]" J14;
+IO_PORT "tmds_d_p[0]" PULL_MODE=NONE IO_TYPE=LVCMOS33D;
+IO_LOC "tmds_d_n[0]" H14;
+IO_PORT "tmds_d_n[0]" PULL_MODE=NONE IO_TYPE=LVCMOS33D;
+IO_LOC "tmds_d_p[1]" J15;
+IO_PORT "tmds_d_p[1]" PULL_MODE=NONE IO_TYPE=LVCMOS33D;
+IO_LOC "tmds_d_n[1]" H15;
+IO_PORT "tmds_d_n[1]" PULL_MODE=NONE IO_TYPE=LVCMOS33D;
+IO_LOC "tmds_d_p[2]" K17;
+IO_PORT "tmds_d_p[2]" PULL_MODE=NONE IO_TYPE=LVCMOS33D;
+IO_LOC "tmds_d_n[2]" J17;
+IO_PORT "tmds_d_n[2]" PULL_MODE=NONE IO_TYPE=LVCMOS33D;

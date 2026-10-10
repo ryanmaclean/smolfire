@@ -359,3 +359,203 @@ Wrap in a Qsys/Platform-Designer system exposing the peripheral on
 #   ./harness smoke 1000                 # NOT run
 #   ./harness fault duplicate            # NOT run
 ```
+
+## HDMI text-status display (`exp/dut-hdmi`, branch `feat/dut-hdmi-status`)
+
+640x480 DVI-mode status display for the DUT over Tang HDMI, sourced from the
+MS5351 (no PLL anywhere): host comms (UART) + display run simultaneously off
+one fabric clock. `durable_tid_v0.v` is UNTOUCHED; `dut_top_uart.v` is UNTOUCHED
+(the new ports on `dut_uart.v` below are left unconnected there);
+`dut_hdmi_top.v` reuses the same two modules (UART divisor re-targeted, see
+`avr_busy_o` + exact-rate notes).
+
+### Files
+
+| File | What it is |
+|------|------------|
+| `rtl/dut_hdmi_top.v` | New single-clock top: `dut_uart` + `durable_tid_v0` (dut_top_uart wiring pattern, PIX_HZ=25175000) + display poller (same clock: NO CDC) + HDMI pipe. V22 unused; 64-bit durable bus NOT pinned (display + UART carry it; pinning scattered placement and worsened pix skew). |
+| `rtl/hdmi_tmds_encode.v` | Verilog-2001 TMDS encoder (1 ch, DVI mode). Original implementation of the HDMI 1.4a §5.4.4.1 / DVI 1.0 §3.2 procedure; algorithmic reference `hdl-util/hdmi` (Sameer Puri, MIT OR Apache-2.0) -- nothing copied from nestang (GPLv3). |
+| `rtl/hdmi_timing_640x480.v` | 640x480@60 VESA timing (800x525, syncs active-low). |
+| `rtl/dut_status_text.v` | Text renderer + hand-authored 8x8 font (space, 0-9, A-Z; no blobs). Rows: title / DURABLE hi+lo / VISIBLE hi+lo / ERROR / VERSION / BUSY+TC. |
+| `rtl/hdmi_gowin_out.v` | Fabric /5 (registered, glitch-free) + per-channel 10-bit shift (2 bits/serial cycle) + ODDR x4 (3 data + 50 %-duty TMDS clock) + ELVDS_OBUF x4. No CLKDIV/OSER/rPLL/BUFG instances. ODDR Q0 = D0@rise/D1@fall and TX=1 enabled are load-wave assumptions (LiteX convention). |
+| `rtl/dut_hdmi_tb.sv` | Self-checking TB (25 checks) + icarus-only models of ODDR/ELVDS_OBUF (OSS port spellings; never in the synth list). |
+| `rtl/dut_hdmi.cst` | Gowin constraints (build host merges as `dut.cst`). |
+| `rtl/dut_hdmi.sdc` | `create_clock` hdmi_clk 7.94453 ns (pix is tool-promoted; report Fmax). |
+
+### `avr_busy_o` + exact-rate: the two `dut_uart.v` changes
+
+Both behavior-preserving at the legacy 50 MHz operating point (all three
+pre-existing suites re-pass unmodified: 119 + 43 + 42):
+
+1. `avr_busy_o`, a purely observational output, `= 1` whenever
+the protocol engine may stage or assert a bus cycle (non-idle protocol
+state, collected frame byte, RX in progress, TX in progress). No existing
+path reads it; `dut_top_uart.v` leaves it unconnected.
+
+It exists because the display poller shares the DUT's single Avalon slave,
+and naive sharing corrupts host reads: the UART bridge stages its address a
+cycle *before* asserting read/write, and the DUT's read stage-1 samples the
+bus address *every* cycle, so the bridge needs ITS address on the bus from
+the staging cycle through CAP -- not just while its read/write is high.
+Borrowing on "UART idle" alone corrupts same-address consecutive bridge
+reads (e.g. STATUS polling: the stage parks no visible address change, the
+poller's address is sampled instead, the bridge reads the wrong word --
+observed live as failed WRITE-ACK-era checks with commits succeeding:
+durable advanced and trusted pulsed while `submit_one` timed out and ERROR
+planted). The poller therefore borrows only under
+`grant = 4-cycle-quiet && address-parked && !avr_busy_o`, routes the
+bridge's address whenever the grant drops (the staging itself revokes the
+grant from the staging edge), and captures only windows where the grant
+never dropped. Hammered in the TB (U1..U5) under back-to-back polling.
+
+2. Bresenham TX bit clock + RX 16x ticks (exact average CLK_HZ/BAUD,
+replacing the flat integer dividers). Required: at the 25.175 MHz pixel
+clock the flat 218/13 truncation drifts 36 % of a bit across a byte; the
+accumulators stay exact at any CLK_HZ while ticking within a fraction of a
+cycle of the old dividers at 50 MHz.
+
+### Clocking (single global + promoted fabric)
+
+- `hdmi_clk` (V10, 125.875 MHz MS5351 CLK2, `LVCMOS33`, `PULL_MODE=NONE`
+  -- AC-coupled): the flow's single global buffer carries it to the DDR
+  shift registers + ODDR.CLK.
+- `pix_clk` (25.175 MHz = hdmi_clk/5): fabric /5 counter inside
+  `hdmi_gowin_out`, promoted by PnR onto the clock network. Carries ALL
+  logic: DUT + UART + poller + timing + text + encoders, and the ODDR-pair
+  word load. No CDC anywhere on the status path.
+- UART divisor at 25.175 MHz is EXACT on average (Bresenham accumulators;
+  flat 218/13 truncation would drift 36 % of a bit across a byte -- see
+  `dut_uart.v`). V22 (50 MHz osc) is unused by this top.
+
+### Why this shape: OSS clocking wall (all verified 2026-10-10, logs kept)
+
+The first generation (dual-clock: V22 50 MHz + V10 125.875 MHz, fabric
+CLKDIV /5, OSER10) synthesizes and sim-passes 23/23 but CANNOT place+route
+in himbaechel-gowin GW5AST-138C. Experiment log (`~/build/clkexp/`):
+T1 two plain pin clocks need 2 BUFGs, DB has 1 BEL (200 % overuse) --
+budget is ONE global clock; T5 CLKDIV unplaceable ("no BELs", HCLK placer
+puts 0); T6 DCE unplaceable; T13 rPLL unplaceable (same); T10+E2 OSER
+FCLK/PCLK unreachable from general-pin clocks ("Failed to route ... to
+FCLKA using dedicated routing", then a router crash) -- HCLK-only pins fed
+by unplaceable HCLK cells. What DOES work: E1 fabric /5 places+routes with
+414 MHz achieved; T15 ODDR+ELVDS packs/routes with 766 MHz on the serial
+domain at 1/1 BUFG. So: MS5351 rate in (exact, no PLL), one global, fabric
+/5, shift+ODDR serialization. The Sept 2026 "fabric clocks fail hold"
+lesson belonged to the old apicula/nextpnr-gowin flow and does not
+reproduce here (E1).
+
+### Load-wave steps (NOT done here -- no hardware touches on this branch)
+
+1. Program the MS5351 on the BL616 console (do NOT commit this to the
+   bitstream): `pll_clk O2=125875K` (integer-K form; 125.875 MHz =
+   5 x 25.175 MHz). Then `pll_clk -s` to persist per board policy.
+2. Build on `7950x4090pop` (`studio@7950x4090pop.local`,
+   `/home/studio/tools/oss-cad-suite/bin`, NEW dir `~/build/dut-hdmi/`):
+   yosys `synth_gowin -family gw5a -top dut_hdmi_top`, then
+   `nextpnr-himbaechel --device GW5AST-LV138PG484AC1 --vopt
+   family=GW5AST-138C --vopt cst=dut.cst --sdc dut.sdc`, then `gowin_pack`.
+   PASS = 0 setup/hold errors + achieved Fmax >= 125.875 (serial), >= 25.175
+   (pixel), with margin.
+3. Load + scope-probe V10 for the 125.875 MHz tone BEFORE trusting the
+   display (V10 routing is UNCONFIRMED -- see below), then check UART
+   PING and the monitor picture. If a TMDS pair is dead/swapped: ODDR
+   Q0-order/TX-polarity assumption (one-line fix in `hdmi_gowin_out.v`).
+
+### UNCONFIRMED / risks for the load wave
+
+- V10 = MS5351 CLK2 on the Tang Console carrier: SINGLE-SOURCE prior live
+  recon. Supporting (not confirming): Sipeed `SET_5351.md`
+  (TangMega-138KPro-example): one MS5351 on 138K/60K boards, CLK2
+  single-ended `pll_clk O2=xxx` form, and "NEO Dock >= 31005 USR_CLK_IN is
+  V10". Console-carrier CLK2->V10 is NOT in the fetched sources. Symptom
+  if wrong: no HDMI output, UART dead too (single clock now -- PING is the
+  canary).
+- TMDS pins CONFIRMED via nestang `src/boards/console.cst`
+  (G15/G16, J14/H14, J15/H15, K17/J17, LVCMOS33D, PULL NONE).
+- License: `hdl-util/hdmi` upstream is MIT OR Apache-2.0 (verified
+  2026-10-10; reuse-with-attribution permitted, and this repo's encoder is
+  an original implementation anyway). nestang is GPLv3 -- used ONLY as
+  board/pinout evidence and a wiring-precedent citation; no nestang code
+  in this repo.
+- ODDR Q0 = D0@rise/D1@fall, TX=1 enabled: assumed (LiteX convention).
+  Font glyphs are hand-drawn;
+  legibility gets its first human review at the load wave.
+
+### TB status: PASS (verified 2026-10-10, icarus 13.0)
+
+```sh
+cd rtl
+iverilog -g2012 -o sim_hdmi dut_hdmi_top.v dut_uart.v durable_tid_v0.v \
+  hdmi_tmds_encode.v hdmi_timing_640x480.v dut_status_text.v \
+  hdmi_gowin_out.v dut_hdmi_tb.sv && ./sim_hdmi
+# checks passed: 25  failed: 0  +  PASS
+iverilog -g2012 -Wall ...   # lint-clean, no warnings
+```
+
+H0 pixel clock = hdmi/5; H1..H5 frame structure + sync timing (line
+800 px, hsync 96, frame 525 lines, vsync 2, de-count 307200); T1..T5
+text-row spot checks with forced DUT state (`DURABLE=0x1234ABCD_5678EF90`:
+title glyph amber-on/off, `0`/`F`
+hex digits white-on, background, BUSY digit); T6 ODDR stream LSB-first
+x10 (phase-free, asymmetric control word) + diff-pair polarity; T7 control
+code `{vsync,hsync}={1,0}`; T8 encoder disparity bounded over active video;
+U1..U5 UART through this top under back-to-back polls at the 25.175 MHz
+operating point (PING, 3 submits ->
+durable==3 with trusted pulses, polled snapshots converge, ERROR clean) +
+T6c TMDS-clock 50 %-duty (5/10 ones) +
+always-on TRUSTED=>PERSISTENT + monotonicity monitors. Pre-existing suites
+still green unmodified: 119 + 43 + 42.
+
+### Synth/PnR status (OSS flow, `~/build/dut-hdmi/` on 7950x4090pop)
+
+- yosys `synth_gowin -family gw5a -top dut_hdmi_top`: PASS, ~11.9k LUT4
+  (~8.6 % of 138240), all primitives accepted (ODDR, ELVDS_OBUF; no
+  CLKDIV/OSER/rPLL/BUFG instances). Note: `-family gw5a` is REQUIRED
+  (default is gw1n).
+- nextpnr-himbaechel `--device GW5AST-LV138PG484AC1 --vopt
+  family=GW5AST-138C --vopt cst=dut.cst --sdc dut.sdc`: runs end-to-end
+  (SDC binds: "constraining clock net 'hdmi_clk' to 125.87 MHz").
+- First PnR (async serializer regs): 10 hold errors on a reset-derived
+  pseudo-clock (fabric CLEAR skew) -- fixed by giving the hdmi block sync
+  release (re-sim green).
+- Second PnR (current RTL): 10 hold errors on pix_clk itself, all with
+  launch txbuf[*].Q through shared read-mux/write-demux LUTs into
+  txbuf[*].D. Root cause: the pix fabric clock is NOT on a true global
+  ("Routing globals" routes only hdmi_clk), so at 12k-LUT spread its skew
+  reaches -2..-5.2 ns while the txbuf paths are ~1.5 ns fast. Setup closes
+  (pix achieved Fmax ~53 MHz vs 25.175 needed; serial ~664-680 MHz vs
+  125.875). `--tmg-ripup`, dropping the 64-bit observation bus, and
+  `--placer-heap-timingweight 30` do not move the 10.
+- Safety case for the 10 (why they cannot fire in silicon): no RTL path
+  writes txbuf from txbuf or tx_cur (writes come only from consts /
+  p_data / avr_readdata / chk_b / burst_res / dur watermarks -- verified by
+  inspection of every `txbuf[] <=` site; tx_cur's only sinks are the TX
+  shift-out and itself, a dead end). The traced paths cross shared packed
+  cells whose steering selects (p_state/tx_idx/burst_i/di_tmp, all
+  regs/consts) are stable-deselecting in every state that writes txbuf
+  (E_WR_END, E_BST_TX), and no state writes+reads txbuf in the same cycle
+  (write->next-read >= 1 pix cycle = 39.7 ns >> ~1 ns window). The flow's
+  set_false_path is parsed-but-no-op ("does not do anything(yet)"), and it
+  needs single-entity -to, so the waivers cannot even be expressed --
+  recorded here instead of applied.
+- T22 decisive experiment (DUT+UART+poller on the V22 pin global, no
+  video): PACK+ROUTE CLEAN, 0 hold errors, Fmax 50.62 MHz. Same logic,
+  same txbuf paths -- clean on a true global. Verdict: the fabric pix
+  clock (not design size) is 100 % causal; a HAS_BURST=0 strip would NOT
+  help (same clock). Side finding: the DUT+UART barely closes 50 MHz
+  (50.62 achieved) -- single-clock-125 is impossible (pix Fmax 52.9).
+- `--placer sa`: SEGFAULTS during initial placement (6500/33876 cells) --
+  another himbaechel-gowin immaturity data point, not a design bug.
+- VERDICT: PnR is BLOCKED on the 1-BUFG flow (fabric pix skew vs fast
+  txbuf paths; waivers inexpressible; SA crashes). The branch lands
+  sim-green (25/25) + synth-green with this documented gate + a load-wave
+  canary plan (below). Revisit with: vendor Gowin IDE, a future OSS flow
+  with fabric globals / working false_path / more BUFGs, or a board rev
+  routing MS5351 to an HCLK-capable pin (then CLKDIV+OSER work natively).
+- Load-wave canary (if this bitstream is ever loaded despite the gate):
+  PING first (UART proves pix logic alive), then N single submits with
+  READ-back of every RSP byte -- any skew-hold misbehavior shows as RSP
+  framing/checksum failures immediately. DO NOT TRUST the picture alone.
+- gowin_pack: NOT RUN (task conditions pack on 0-error PnR; a bitstream
+  was deliberately not produced from a timing-dirty netlist).
+

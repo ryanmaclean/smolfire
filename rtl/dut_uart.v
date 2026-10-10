@@ -16,9 +16,15 @@
 //     with top.v port directions `input uart_rx, output uart_tx`.)
 //   - Onboard clock is 50 MHz on pin V22 (hdmi.cst `IO_LOC "clk" V22;` +
 //     gowin_pll.mod `fclkin 50` + uart_top.v `CLK_FRE 50`), hence the
-//     CLK_HZ=50000000 default below. Baud divisor error at 115200:
-//     50000000/115200 = 434.03 -> 434 cycles/bit (0.006 %); RX 16x tick
-//     truncates 434/16 = 27.125 -> 27, i.e. 115740 baud (+0.47 %, < 2 % OK).
+//     CLK_HZ=50000000 default below. Baud rate is EXACT on average
+//     (Bresenham phase accumulators for the TX bit clock and the RX 16x
+//     ticks -- see the Baud timing note at the RX section): at 50 MHz /
+//     115200 the TX emits 434/435-cycle bits (avg 434.0278) and the RX
+//     ticks every ~27.13 cycles, i.e. within a fraction of a cycle of the
+//     old flat 434/27 dividers. A non-divisible CLK_HZ such as the
+//     25.175 MHz HDMI pixel clock (avg 218.53, RX tick ~13.66 -- where the
+//     flat 218/13 truncation would drift 36 % of a bit across a byte)
+//     stays exact the same way.
 //   Divided-clock note (2026-09-25): dut_top_uart ran the fabric at
 //   25 MHz for a while (toggle-FF divider, then BUFG); that experiment
 //   is REVERTED -- the fabric is the 50 MHz board clock again, so the
@@ -98,7 +104,17 @@ module dut_uart #(
   output        avr_read,
   output        avr_write,
   output [3:0]  avr_byteenable,
-  output        avr_reset_o    // 1-cycle soft-reset pulse -> DUT fsm_reset_i
+  output        avr_reset_o,    // 1-cycle soft-reset pulse -> DUT fsm_reset_i
+  // Display-poller share hint (added 2026-10-10 for dut_hdmi_top; purely
+  // observational, behavior-preserving -- no existing path reads it):
+  // 1 whenever the protocol engine may stage or assert a bus cycle, i.e.
+  // the bus is NOT safely borrowable: any non-idle protocol state, any
+  // collected frame byte, any RX in progress (a byte completing mid-borrow
+  // would stage + assert on the next cycles), or any TX in progress.
+  // A sharing poller must borrow only while this is 0 (plus its own
+  // address-stability check), so same-address consecutive bridge reads --
+  // which stage with no visible address change -- can never collide.
+  output        avr_busy_o
 );
 
   // Protocol constants.
@@ -120,12 +136,25 @@ module dut_uart #(
   localparam [7:0] A_RSTCNT   = 8'h20; // RESET_CNT byte offset (response data)
   localparam [31:0] VERSION_VAL = 32'h00000001; // matches DUT A_VERSION
 
-  // Baud timing (integer division; see header note for 115200 error).
-  localparam integer BIT_DIV = CLK_HZ / BAUD; // clk cycles per serial bit
-  // RX 16x-oversample tick; floor at 1 (exact when BIT_DIV is a multiple
-  // of 16; at the 50 MHz / 115200 operating point BIT_DIV is 434
-  // and the tick truncates to 27 -- see header note).
-  localparam integer OV_DIV  = ((BIT_DIV / 16) == 0) ? 1 : (BIT_DIV / 16);
+  // Baud timing: phase accumulators give the EXACT average bit rate
+  // (Bresenham): TX advances BAUD per cycle and emits a bit-time tick each
+  // crossing of CLK_HZ (average exactly CLK_HZ/BAUD cycles/bit); RX advances
+  // 16*BAUD per cycle for the 16x oversample ticks. At the legacy 50 MHz /
+  // 115200 operating point this ticks 434/435 (TX) and ~27.13 (RX) cycles --
+  // within a fraction of a cycle of the old flat dividers, so all existing
+  // behavior and suites are preserved -- while a non-divisible operating
+  // point such as the 25.175 MHz HDMI pixel clock (avg 218.53, where the
+  // flat 218/13 truncation would drift 36 % of a bit across a byte) stays
+  // exact. TB drivers use flat nominal bit times; margins are enormous.
+  // (Regs + tick wires up here: icarus requires declare-before-use.)
+  reg [31:0] rx_phase;         // 16x-tick accumulator (exact avg rate)
+  reg [31:0] tx_phase;         // bit-time accumulator (exact avg rate)
+  wire [31:0] tx_phase_next = tx_phase + BAUD;
+  wire        tx_tick = (tx_phase_next >= CLK_HZ);
+  wire [31:0] rx_phase_next = rx_phase + 16 * BAUD;
+  wire        rx_tick = (rx_phase_next >= CLK_HZ);
+
+  // Protocol (all multi-byte values little-endian, byte0 = bits[7:0]):
 
   // ---------------------------------------------------------------- RX ---
   // 16x oversampling receiver: IDLE -> HALF (confirm start mid-bit) ->
@@ -138,7 +167,7 @@ module dut_uart #(
   reg        rxd_a, rxd_b;      // 2-FF synchronizer
   wire       rxd_s = rxd_b;
   reg [1:0]  rx_state;
-  reg [15:0] rx_ov;             // oversample counter
+  reg [15:0] rx_tickn;            // oversample TICKS within the bit (0..15)
   reg [2:0]  rx_bit;
   reg [7:0]  rx_sh;
   reg [7:0]  rx_byte;
@@ -150,7 +179,8 @@ module dut_uart #(
       rxd_a    <= 1'b1;
       rxd_b    <= 1'b1;
       rx_state <= R_IDLE;
-      rx_ov    <= 16'd0;
+      rx_phase <= 32'd0;
+      rx_tickn <= 16'd0;
       rx_bit   <= 3'd0;
       rx_sh    <= 8'h00;
       rx_byte  <= 8'h00;
@@ -163,47 +193,58 @@ module dut_uart #(
       rx_ferr  <= 1'b0;
       case (rx_state)
         R_IDLE: begin
-          rx_ov  <= 16'd0;
-          rx_bit <= 3'd0;
+          rx_phase <= 32'd0;
+          rx_tickn <= 16'd0;
+          rx_bit   <= 3'd0;
           if (!rxd_s)
             rx_state <= R_HALF; // possible start bit
         end
         R_HALF: begin
-          // Wait half a bit (8/16 of the oversample ticks), then confirm.
-          if (rx_ov == (8 * OV_DIV - 1)) begin
-            rx_ov <= 16'd0;
-            if (!rxd_s)
-              rx_state <= R_DATA; // genuine start, sample mid-bit onwards
-            else
-              rx_state <= R_IDLE; // glitch, false start
-          end else begin
-            rx_ov <= rx_ov + 16'd1;
+          // 8 oversample ticks ~= half a bit, then confirm the start.
+          rx_phase <= rx_tick ? rx_phase_next - CLK_HZ : rx_phase_next;
+          if (rx_tick) begin
+            if (rx_tickn == 16'd7) begin
+              rx_tickn <= 16'd0;
+              if (!rxd_s)
+                rx_state <= R_DATA; // genuine start, sample mid-bit onwards
+              else
+                rx_state <= R_IDLE; // glitch, false start
+            end else begin
+              rx_tickn <= rx_tickn + 16'd1;
+            end
           end
         end
         R_DATA: begin
-          if (rx_ov == (16 * OV_DIV - 1)) begin
-            rx_ov        <= 16'd0;
-            rx_sh[rx_bit] <= rxd_s; // middle sample of this bit
-            if (rx_bit == 3'd7)
-              rx_state <= R_STOP;
-            else
-              rx_bit <= rx_bit + 3'd1;
-          end else begin
-            rx_ov <= rx_ov + 16'd1;
+          // 16 oversample ticks per bit, middle-sampled.
+          rx_phase <= rx_tick ? rx_phase_next - CLK_HZ : rx_phase_next;
+          if (rx_tick) begin
+            if (rx_tickn == 16'd15) begin
+              rx_tickn       <= 16'd0;
+              rx_sh[rx_bit] <= rxd_s; // middle sample of this bit
+              if (rx_bit == 3'd7)
+                rx_state <= R_STOP;
+              else
+                rx_bit <= rx_bit + 3'd1;
+            end else begin
+              rx_tickn <= rx_tickn + 16'd1;
+            end
           end
         end
         R_STOP: begin
-          if (rx_ov == (16 * OV_DIV - 1)) begin
-            rx_ov    <= 16'd0;
-            rx_state <= R_IDLE;
-            if (rxd_s) begin
-              rx_byte  <= rx_sh; // valid byte (stop bit OK)
-              rx_valid <= 1'b1;
+          rx_phase <= rx_tick ? rx_phase_next - CLK_HZ : rx_phase_next;
+          if (rx_tick) begin
+            if (rx_tickn == 16'd15) begin
+              rx_tickn <= 16'd0;
+              rx_state <= R_IDLE;
+              if (rxd_s) begin
+                rx_byte  <= rx_sh; // valid byte (stop bit OK)
+                rx_valid <= 1'b1;
+              end else begin
+                rx_ferr <= 1'b1;   // framing error: drop, resync on next start
+              end
             end else begin
-              rx_ferr <= 1'b1;   // framing error: drop, resync on next start
+              rx_tickn <= rx_tickn + 16'd1;
             end
-          end else begin
-            rx_ov <= rx_ov + 16'd1;
           end
         end
         default: rx_state <= R_IDLE;
@@ -237,7 +278,6 @@ module dut_uart #(
   reg [6:0] tx_idx;        // byte index 0..tx_len-1
   reg [2:0] tx_bit;        // bit index 0..7
   reg [7:0] tx_cur;
-  reg [31:0] tx_cnt;       // bit-period counter (wide: BIT_DIV up to 434+)
 
   always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
@@ -248,13 +288,13 @@ module dut_uart #(
       tx_idx     <= 7'd0;
       tx_bit     <= 3'd0;
       tx_cur     <= 8'h00;
-      tx_cnt     <= 32'd0;
+      tx_phase   <= 32'd0;
     end else begin
       tx_done <= 1'b0;
       case (tx_state)
         T_IDLE: begin
           uart_txd_r <= 1'b1;
-          tx_cnt     <= 32'd0;
+          tx_phase   <= 32'd0;
           if (tx_start) begin
             tx_idx   <= 7'd0;
             tx_cur   <= txbuf[0];
@@ -263,34 +303,28 @@ module dut_uart #(
         end
         T_START: begin
           uart_txd_r <= 1'b0; // start bit
-          if (tx_cnt == BIT_DIV - 1) begin
-            tx_cnt   <= 32'd0;
+          tx_phase <= tx_tick ? tx_phase_next - CLK_HZ : tx_phase_next;
+          if (tx_tick) begin
             tx_bit   <= 3'd0;
             tx_state <= T_DATA;
-          end else begin
-            tx_cnt <= tx_cnt + 32'd1;
           end
         end
         T_DATA: begin
           uart_txd_r <= tx_cur[0];
-          if (tx_cnt == BIT_DIV - 1) begin
-            tx_cnt <= 32'd0;
+          tx_phase <= tx_tick ? tx_phase_next - CLK_HZ : tx_phase_next;
+          if (tx_tick) begin
             tx_cur <= {1'b0, tx_cur[7:1]};
             if (tx_bit == 3'd7)
               tx_state <= T_STOP;
             else
               tx_bit <= tx_bit + 3'd1;
-          end else begin
-            tx_cnt <= tx_cnt + 32'd1;
           end
         end
         T_STOP: begin
           uart_txd_r <= 1'b1; // stop bit
-          if (tx_cnt == BIT_DIV - 1) begin
-            tx_cnt   <= 32'd0;
+          tx_phase <= tx_tick ? tx_phase_next - CLK_HZ : tx_phase_next;
+          if (tx_tick) begin
             tx_state <= T_NEXT;
-          end else begin
-            tx_cnt <= tx_cnt + 32'd1;
           end
         end
         T_NEXT: begin
@@ -397,6 +431,9 @@ module dut_uart #(
   reg [7:0]  sum_tmp;            // BURST-RSP checksum accumulate
   reg [6:0]  di_tmp;             // txbuf index of DURABLE_LO byte 0
 
+  // Baud timing: phase accumulators give the EXACT average bit rate
+  // (Regs + tick wires live near the top: icarus needs declare-before-use.)
+
   reg [11:0] avr_address_r;
   reg [31:0] avr_writedata_r;
   reg        avr_read_r;
@@ -409,6 +446,9 @@ module dut_uart #(
   assign avr_write      = avr_write_r;
   assign avr_byteenable = 4'hF; // full-word accesses only
   assign avr_reset_o    = avr_reset_r;
+  assign avr_busy_o     = (p_state != E_RX) || (fidx != 4'd0)
+                       || (rx_state != R_IDLE) || rx_valid || rx_ferr
+                       || (tx_state != T_IDLE) || tx_start;
 
   // Blocking-validated frame checksum temp (module scope, Verilog-2001).
   reg [11:0] chk_tmp;

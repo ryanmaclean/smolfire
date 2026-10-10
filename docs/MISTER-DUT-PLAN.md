@@ -74,7 +74,11 @@ HPS view (offsets relative to OUR peripheral base — concrete since 2026-09-25)
   +0x20  RESET_CNT        (ro)  HPS-driven reset counter
 ```
 
-All addresses concrete in `rtl/README.md` (23-register live map incl. MAGIC/VERSION/CRC_CALC/TID, verified against silicon). `0xFF200000` (bridge control) is NEVER mapped, NEVER written.
+The legacy addresses are concrete in `rtl/README.md` (23-register map incl. MAGIC/VERSION/CRC_CALC/TID); the new read-only `ID_PROBE`/`ID_CAPS` offsets have only off-board source/simulation evidence, not same-board readback. `0xFF200000` (bridge control) is NEVER mapped, NEVER written.
+
+## 4b. Current admission status: FPGA order is not persistence
+
+The `DURABLE_SEQ` register and burst-RSP watermark report only a volatile FPGA ordering count. A reset can erase that count. The experimental host log syncs `FRAME2`/`DATA2` records before writing and syncing a `SEAL2` marker; recovery credits only validated, contiguous sealed frames and refuses unsealed or legacy records. It also refuses every nonempty recovered log, even when its count matches the FPGA, because the fabric cannot prove payload or epoch identity. An ACK can still precede every surviving log byte, leaving a reset count of zero indistinguishable from a fresh start. The harness has no request-bound media identity receipt, payload replay, or demonstrated no-double-apply recovery. Its five submitting modes refuse durable admission, including when hypothetical capability bits are set; raw diagnostic register writes and resets are outside that admission claim. The RTL exposes `ID_PROBE=SSP1` and `ID_CAPS=0` as read-only diagnostics, not as media proof. The legacy `DURABLE` register name is retained for wire compatibility and should be read as “ordered,” not crash-safe. See `rtl/README.md` for the corresponding status.
 
 ## 5. Fault-injection hook point (#88)
 

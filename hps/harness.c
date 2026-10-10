@@ -36,6 +36,12 @@
  *
  * Single-submit frames stay byte-identical (0x05 is the next free CMD;
  * RSP keeps the CMD|0x80 convention).
+ *
+ * Durability v2 (FPGA orders, host persists): [-l logpath] (default
+ * ./durable.log) appends sealed frame receipts. Each frame syncs its
+ * payload before writing a seal; recovery credits only complete validated
+ * seals. A recovered nonempty log refuses restart even when counts match:
+ * the fabric does not expose payload or durable epoch identity.
  */
 
 #include <errno.h>
@@ -47,7 +53,11 @@
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/file.h>
+#include <limits.h>
 #include <sys/time.h>
+#include <time.h>
 
 /* ---- transport ---- */
 #define UART_PATH "/dev/ttyUSB1" /* BL616 debugger UART on the Tang Console */
@@ -59,12 +69,14 @@
 
 #define CMD_WRITE 0x01u
 #define CMD_READ  0x02u
+#define CMD_READ_BOUND 0x06u
 #define CMD_RESET 0x03u
 #define CMD_PING  0x04u
 #define CMD_BURST 0x05u
 
 #define RSP_WRITE 0x81u
 #define RSP_READ  0x82u
+#define RSP_READ_BOUND 0x86u
 #define RSP_RESET 0x83u
 #define RSP_PING  0x84u
 #define RSP_BURST 0x85u
@@ -90,6 +102,15 @@
 #define R_VIS_HI   0x4Cu
 #define R_MAGIC    0x54u
 #define R_VERSION  0x58u
+#define R_ID_PROBE 0x5Cu
+#define R_ID_CAPS  0x60u
+#define ID_PROBE_SSP1 0x53535031u
+#define CAP_PAYLOAD_IDENTITY       (1u << 0)
+#define CAP_FENCED_WG              (1u << 1)
+#define CAP_DURABLE_MEDIA_VERIFIED (1u << 2)
+#define CAP_RECOVERY_READY         (1u << 3)
+#define CAP_DURABLE_REQUIRED (CAP_PAYLOAD_IDENTITY | CAP_FENCED_WG | \
+                              CAP_DURABLE_MEDIA_VERIFIED | CAP_RECOVERY_READY)
 #define PROTOCOL_VERSION 1u /* caller-supplied TID ABI; reject old hardware */
 
 #define CTRL_SUBMIT 0x00000001u
@@ -109,6 +130,314 @@
 #define SILENCE_MS 400u
 
 static int g_fd = -1;
+/* Diagnostics only: unique until exhaustion within this process. A
+ * cross-restart, nonrollback allocator is still required before this can
+ * authorize durable media. Durable modes remain unconditionally closed. */
+static uint64_t g_bound_nonce_next = 1;
+
+/* ---- host-anchored durability v2: sealed frame receipts ----
+ *
+ * A frame's DATA2 lines are fsynced before SEAL2 is written. Seeing a
+ * complete, validated SEAL2 after restart therefore proves that the data
+ * fsync returned, even if the marker's own fsync was interrupted. An
+ * unsealed tail never advances host_persisted. This is a single-writer log;
+ * flock prevents two harness processes from interleaving frame records.
+ *
+ * The DUT exposes only a count, not a persistent payload/epoch identity.
+ * A recovered nonempty log therefore refuses resume even when the counts
+ * match; an unsealed tail refuses log open. Empty-log/nonzero-fabric also
+ * refuses new submissions. An ACK then crash before any log byte survives,
+ * followed by fabric reset to zero, is indistinguishable from fresh state.
+ * The CLI durable modes remain closed without a verified backend and a
+ * request-bound identity receipt readback.
+ */
+static const char *g_logpath = "./durable.log";
+static int g_logfd = -1;
+static uint64_t g_fpga_ordered = 0; /* fabric claim: NEVER durable */
+static uint64_t g_host_persisted = 0; /* sealed host frame watermark */
+static unsigned long g_log_receipts = 0;
+static int g_recovered_history = 0; /* payload identity unavailable */
+
+struct durable_receipt {
+    uint32_t req, d0, d1;
+};
+
+static uint32_t durable_hash_line(uint32_t h, const char *line)
+{
+    const unsigned char *p = (const unsigned char *)line;
+    while (*p) {
+        h ^= *p++;
+        h *= 16777619u; /* FNV-1a: torn-record detector, not authentication */
+    }
+    return h;
+}
+
+static int durable_log_write(const char *line)
+{
+    size_t len = strlen(line), off = 0;
+    while (off < len) {
+        ssize_t n = write(g_logfd, line + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            fprintf(stderr, "harness: durable log write %s: %s\n",
+                    g_logpath, strerror(errno));
+            return -1;
+        }
+        if (n == 0)
+            return -1;
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+/* The recovered watermark advances only at a canonical SEAL2. Any
+ * unsealed tail is retained as evidence and refuses recovery, including
+ * before the first seal. Memory use is constant for any log length. */
+static int durable_log_open(void)
+{
+    int rfd = -1, in_frame = 0, bad = 0;
+    FILE *rf = NULL;
+    char line[192], canonical[192];
+    unsigned frame_count = 0, seen = 0, frame_epoch = 0;
+    uint64_t frame_start = 0, frame_end = 0;
+    uint32_t frame_hash = 2166136261u;
+
+    if (g_logfd >= 0)
+        return 0;
+    g_logfd = open(g_logpath, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (g_logfd < 0) {
+        fprintf(stderr, "harness: open durable log %s: %s\n",
+                g_logpath, strerror(errno));
+        return -1;
+    }
+    if (flock(g_logfd, LOCK_EX | LOCK_NB) != 0) {
+        fprintf(stderr, "harness: durable log %s already in use\n",
+                g_logpath);
+        goto fail;
+    }
+    rfd = dup(g_logfd);
+    if (rfd < 0 || lseek(rfd, 0, SEEK_SET) < 0 ||
+        (rf = fdopen(rfd, "r")) == NULL) {
+        fprintf(stderr, "harness: durable log read open %s: %s\n",
+                g_logpath, strerror(errno));
+        if (rfd >= 0)
+            close(rfd);
+        goto fail;
+    }
+    while (fgets(line, sizeof line, rf) != NULL) {
+        size_t len = strlen(line);
+        int n;
+        if (len == 0 || line[len - 1] != '\n') {
+            bad = 1; /* truncated/overlong line: never silently credit it */
+            break;
+        }
+        if (!in_frame) {
+            unsigned long long start, end;
+            if (sscanf(line, "FRAME2 start=%llu end=%llu count=%u epoch=%u",
+                       &start, &end, &frame_count, &frame_epoch) != 4) {
+                bad = 1; /* includes unsealed legacy COMMIT logs */
+                break;
+            }
+            n = snprintf(canonical, sizeof canonical,
+                         "FRAME2 start=%llu end=%llu count=%u epoch=%u\n",
+                         start, end, frame_count, frame_epoch);
+            if (n < 0 || (size_t)n >= sizeof canonical ||
+                strcmp(line, canonical) != 0 ||
+                start != g_host_persisted || frame_count == 0 ||
+                frame_count > BURST_MAX_N || end < start ||
+                end - start != frame_count || end > UINT32_MAX) {
+                bad = 1;
+                break;
+            }
+            frame_start = (uint64_t)start;
+            frame_end = (uint64_t)end;
+            frame_hash = 2166136261u;
+            seen = 0;
+            in_frame = 1;
+        } else if (seen < frame_count) {
+            unsigned req, d0, d1, epoch;
+            if (sscanf(line,
+                       "DATA2 req=%u d0=0x%x d1=0x%x epoch=%u",
+                       &req, &d0, &d1, &epoch) != 4) {
+                bad = 1;
+                break;
+            }
+            n = snprintf(canonical, sizeof canonical,
+                         "DATA2 req=%u d0=0x%08x d1=0x%08x epoch=%u\n",
+                         req, d0, d1, epoch);
+            if (n < 0 || (size_t)n >= sizeof canonical ||
+                strcmp(line, canonical) != 0 ||
+                (uint64_t)req != frame_start + seen ||
+                epoch != frame_epoch) {
+                bad = 1;
+                break;
+            }
+            frame_hash = durable_hash_line(frame_hash, line);
+            seen++;
+        } else {
+            unsigned long long end;
+            unsigned count, hash;
+            if (sscanf(line, "SEAL2 end=%llu count=%u hash=%x",
+                       &end, &count, &hash) != 3) {
+                bad = 1;
+                break;
+            }
+            n = snprintf(canonical, sizeof canonical,
+                         "SEAL2 end=%llu count=%u hash=%08x\n",
+                         end, count, hash);
+            if (n < 0 || (size_t)n >= sizeof canonical ||
+                strcmp(line, canonical) != 0 ||
+                end != frame_end || count != frame_count ||
+                hash != frame_hash ||
+                g_log_receipts > ULONG_MAX - frame_count) {
+                bad = 1;
+                break;
+            }
+            g_host_persisted = frame_end;
+            g_log_receipts += frame_count;
+            in_frame = 0;
+        }
+    }
+    if (ferror(rf))
+        bad = 1;
+    if (fclose(rf) != 0)
+        bad = 1;
+    if (bad) {
+        fprintf(stderr, "harness: durable log %s invalid; refusing recovery\n",
+                g_logpath);
+        goto fail;
+    }
+    if (in_frame) {
+        fprintf(stderr,
+                "harness: unsealed durable log frame in %s;"
+                " refusing recovery until externally reconciled\n",
+                g_logpath);
+        goto fail;
+    }
+    g_recovered_history = g_log_receipts != 0;
+    printf("harness: durable log %s: recovered host_persisted=%llu"
+           " receipts=%lu\n",
+           g_logpath, (unsigned long long)g_host_persisted,
+           g_log_receipts);
+    return 0;
+
+fail:
+    if (g_logfd >= 0) {
+        close(g_logfd);
+        g_logfd = -1;
+    }
+    g_fpga_ordered = 0;
+    g_host_persisted = 0;
+    g_log_receipts = 0;
+    g_recovered_history = 0;
+    return -1;
+}
+
+/* For a frame, first sync all payload records, then append and sync the
+ * seal. A visible seal can never precede the successful data fsync. */
+static int durable_persist_receipts(const struct durable_receipt *receipts,
+                                    unsigned count, uint32_t epoch,
+                                    uint64_t fpga_ordered)
+{
+    char line[192];
+    uint32_t hash = 2166136261u;
+    unsigned i;
+    int n;
+    g_fpga_ordered = fpga_ordered;
+    if (g_logfd < 0 || count > BURST_MAX_N ||
+        fpga_ordered != g_host_persisted + count ||
+        fpga_ordered > UINT32_MAX ||
+        g_log_receipts > ULONG_MAX - count)
+        return -1;
+    if (count == 0)
+        return 0;
+    n = snprintf(line, sizeof line,
+                 "FRAME2 start=%llu end=%llu count=%u epoch=%u\n",
+                 (unsigned long long)g_host_persisted,
+                 (unsigned long long)fpga_ordered, count, epoch);
+    if (n < 0 || (size_t)n >= sizeof line || durable_log_write(line) != 0)
+        return -1;
+    for (i = 0; i < count; i++) {
+        if ((uint64_t)receipts[i].req != g_host_persisted + i)
+            return -1;
+        n = snprintf(line, sizeof line,
+                     "DATA2 req=%u d0=0x%08x d1=0x%08x epoch=%u\n",
+                     receipts[i].req, receipts[i].d0, receipts[i].d1,
+                     epoch);
+        if (n < 0 || (size_t)n >= sizeof line)
+            return -1;
+        hash = durable_hash_line(hash, line);
+        if (durable_log_write(line) != 0)
+            return -1;
+    }
+    if (fsync(g_logfd) != 0) {
+        fprintf(stderr, "harness: durable data fsync %s: %s\n",
+                g_logpath, strerror(errno));
+        return -1;
+    }
+    n = snprintf(line, sizeof line,
+                 "SEAL2 end=%llu count=%u hash=%08x\n",
+                 (unsigned long long)fpga_ordered, count, hash);
+    if (n < 0 || (size_t)n >= sizeof line || durable_log_write(line) != 0)
+        return -1;
+    if (fsync(g_logfd) != 0) {
+        fprintf(stderr, "harness: durable seal fsync %s: %s\n",
+                g_logpath, strerror(errno));
+        return -1;
+    }
+    g_host_persisted = fpga_ordered;
+    g_log_receipts += count;
+    return 0;
+}
+
+static int durable_persist_one(uint32_t req, uint32_t d0, uint32_t d1,
+                               uint32_t epoch, uint64_t fpga_ordered)
+{
+    struct durable_receipt receipt = { req, d0, d1 };
+    return durable_persist_receipts(&receipt, 1, epoch, fpga_ordered);
+}
+
+/* A count alone cannot verify payload or epoch identity after restart.
+ * Even equal counts may describe divergent hardware histories, so any
+ * recovered nonempty log refuses resume. An apparently empty log alone
+ * cannot prove that no earlier ACK occurred; durable_backend_ready()
+ * therefore gates every submitting CLI mode before this point. */
+static int durable_run_start(uint64_t fpga_base)
+{
+    g_fpga_ordered = fpga_base;
+    printf("harness: watermarks fpga_ordered=%llu host_persisted=%llu"
+           " (durable=host_persisted)\n",
+           (unsigned long long)g_fpga_ordered,
+           (unsigned long long)g_host_persisted);
+    if (g_logfd < 0) {
+        fprintf(stderr, "harness: durable log unavailable; refusing work\n");
+        return -1;
+    }
+    if (g_recovered_history) {
+        fprintf(stderr,
+                "harness: recovered log has no fabric payload/epoch identity;"
+                " refusing resume even when counts match\n");
+        return -1;
+    }
+    if (fpga_base != g_host_persisted) {
+        fprintf(stderr,
+                "harness: durability mismatch: fabric=%llu host=%llu;"
+                " payload reconciliation required; refusing new work\n",
+                (unsigned long long)fpga_base,
+                (unsigned long long)g_host_persisted);
+        return -1;
+    }
+    return 0;
+}
+
+static void durable_run_done(const char *what)
+{
+    printf("harness: durability %s fpga_ordered=%llu host_persisted=%llu"
+           " durable=host_persisted log=%s\n",
+           what, (unsigned long long)g_fpga_ordered,
+           (unsigned long long)g_host_persisted, g_logpath);
+}
 
 /* ---- CRC-32/IEEE (independent software implementation: the oracle
  * cross-checks DUT CRC behavior against THIS, not against RTL) ---- */
@@ -250,6 +579,61 @@ static int rsp_frame(uint8_t want, uint32_t *data, unsigned timeout_ms)
     return 0;
 }
 
+/* Bound diagnostics must use elapsed time: gettimeofday can move backward
+ * and indefinitely extend a wall-clock deadline during a silent reply. */
+static int bound_monotonic_ms(uint64_t *ms)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0 || ts.tv_sec < 0)
+        return -1;
+    *ms = (uint64_t)ts.tv_sec * 1000u +
+          (uint64_t)ts.tv_nsec / 1000000u;
+    return 0;
+}
+
+/* READ_BOUND has its own fixed 13-byte response. Never interpret a legacy
+ * RSP_READ as a bound reply, and expose no value until every field matches. */
+static int rsp_bound_frame(uint8_t addr, uint32_t challenge, uint32_t *data,
+                           unsigned timeout_ms)
+{
+    uint8_t f[13];
+    uint8_t sum = 0;
+    size_t got = 0, i;
+    uint32_t echoed;
+    uint64_t now, deadline;
+    if (bound_monotonic_ms(&now) != 0 || now > UINT64_MAX - timeout_ms)
+        return -1;
+    deadline = now + timeout_ms;
+    while (got < sizeof f) {
+        if (bound_monotonic_ms(&now) != 0 || now >= deadline)
+            return -1;
+        ssize_t n = read(g_fd, f + got, sizeof f - got);
+        if (n > 0) {
+            got += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno != EINTR && errno != EAGAIN)
+            return -1;
+        usleep(1000);
+    }
+    if (bound_monotonic_ms(&now) != 0 || now >= deadline)
+        return -1;
+    if (f[0] != M_MAGIC0 || f[1] != M_MAGIC1 ||
+        f[2] != RSP_READ_BOUND || f[3] != addr)
+        return -1;
+    for (i = 2; i < 12; i++)
+        sum = (uint8_t)(sum + f[i]);
+    if (sum != f[12])
+        return -1;
+    echoed = (uint32_t)f[4] | ((uint32_t)f[5] << 8) |
+             ((uint32_t)f[6] << 16) | ((uint32_t)f[7] << 24);
+    if (echoed != challenge)
+        return -1;
+    *data = (uint32_t)f[8] | ((uint32_t)f[9] << 8) |
+            ((uint32_t)f[10] << 16) | ((uint32_t)f[11] << 24);
+    return 0;
+}
+
 /* ---- commands PING/WRITE/READ/RESET ---- */
 static int u_write(uint8_t addr, uint32_t val)
 {
@@ -268,13 +652,45 @@ static int u_read(uint8_t addr, uint32_t *val)
     return rsp_frame(RSP_READ, val, RSP_TIMEOUT_MS);
 }
 
+static int u_read_bound(uint8_t addr, uint32_t *val)
+{
+    uint32_t challenge;
+    if (g_bound_nonce_next > UINT32_MAX)
+        return -1; /* no wrap or same-process reuse */
+    challenge = (uint32_t)g_bound_nonce_next++;
+    if (cmd_frame(CMD_READ_BOUND, addr, challenge) != 0)
+        return -1;
+    return rsp_bound_frame(addr, challenge, val, RSP_TIMEOUT_MS);
+}
+
+/* Bound diagnostic reads prevent a stale ID response from satisfying a
+ * different request. They do not bind a media receipt to the sealed log;
+ * the local challenge counter is not proven unique across restarts. */
+static int durable_backend_ready(void)
+{
+    uint32_t probe = 0, caps = 0;
+    if (u_read_bound(R_ID_PROBE, &probe) != 0 ||
+        u_read_bound(R_ID_CAPS, &caps) != 0 ||
+        probe != ID_PROBE_SSP1 ||
+        (caps & CAP_DURABLE_REQUIRED) != CAP_DURABLE_REQUIRED) {
+        fprintf(stderr,
+                "harness: durable backend lacks verified identity/media/"
+                "fencing/recovery capability; refusing durable mode\n");
+        return -1;
+    }
+    fprintf(stderr,
+            "harness: request-bound media receipt and cross-restart"
+            " challenge authority are not implemented; refusing durable mode\n");
+    return -1;
+}
+
 static int u_ping(uint32_t *ver)
 {
     if (cmd_frame(CMD_PING, 0, 0) != 0)
         return -1;
     if (rsp_frame(RSP_PING, ver, RSP_TIMEOUT_MS) != 0)
         return -1;
-    return (*ver == 0) ? 0 : -1;
+    return 0; /* caller reports a specific PONG VERSION mismatch */
 }
 
 static int u_reset(uint32_t *rcnt)
@@ -439,6 +855,8 @@ static int sanity(void)
         return -1;
     }
     printf("harness: magic DUR0 + version v1 ok\n");
+    if (durable_backend_ready() != 0)
+        return -1;
     /* UART-level malformed frame (bad checksum) must get NO response;
      * then the link must still be alive (TB U6 analogue). */
     bad[0] = M_MAGIC0;
@@ -494,6 +912,10 @@ static int vec_good(uint64_t *next, unsigned opno)
     if (oracle_compare(*next, d, *next, v) != 0) {
         tr_log("op %u GOOD req=%u: oracle vs d=%llu v=%llu", opno, req,
                (unsigned long long)d, (unsigned long long)v);
+        return -1;
+    }
+    if (durable_persist_one(req, d0, d1, g_epoch, d) != 0) {
+        tr_log("op %u GOOD req=%u: durable log persist failed", opno, req);
         return -1;
     }
     tr_log("op %u GOOD req=%u d=%llu", opno, req,
@@ -825,6 +1247,27 @@ static const char *bkind_name(int k)
     }
 }
 
+/* Persist exactly the COMMITTED entries in one validated burst frame. */
+static int durable_persist_frame(const struct b_entry *ents,
+                                 const uint8_t *res, uint8_t n,
+                                 uint32_t epoch, uint64_t fpga_ordered)
+{
+    struct durable_receipt receipts[BURST_MAX_N];
+    unsigned count = 0;
+    uint8_t i;
+    if (n > BURST_MAX_N)
+        return -1;
+    for (i = 0; i < n; i++) {
+        if (res[i] == 0x01u) {
+            receipts[count].req = ents[i].req;
+            receipts[count].d0 = ents[i].d0;
+            receipts[count].d1 = ents[i].d1;
+            count++;
+        }
+    }
+    return durable_persist_receipts(receipts, count, epoch, fpga_ordered);
+}
+
 /* ---- burst differential: N total submits in randomized 1..64 frames ---- */
 static int run_burst_diff(unsigned long total, uint32_t seed)
 {
@@ -843,6 +1286,10 @@ static int run_burst_diff(unsigned long total, uint32_t seed)
         fprintf(stderr, "harness: burst diff setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    if (durable_run_start(base) != 0)
+        return 1;
     sw_next = base;
     printf("harness: burst diff base d=%llu v=%llu epoch=%u seed=%u\n",
            (unsigned long long)base, (unsigned long long)v, epoch,
@@ -979,6 +1426,12 @@ static int run_burst_diff(unsigned long total, uint32_t seed)
             tr_dump();
             return 1;
         }
+        if (durable_persist_frame(ents, res, n, epoch, oline) != 0) {
+            fprintf(stderr, "harness: burst %lu: durable log persist"
+                    " failed\n",
+                    nb);
+            return 1;
+        }
         sw_next = oline;
         {
             unsigned long prev = done;
@@ -1001,6 +1454,7 @@ static int run_burst_diff(unsigned long total, uint32_t seed)
            done, nb, seed, c_commit, c_code[1], c_code[2], c_code[3],
            (unsigned long long)d, (unsigned long long)v,
            (1000.0 * (double)done) / (double)(t1 - t0 + 1));
+    durable_run_done("burst-diff");
     return (oracle_compare(sw_next, d, sw_next, v) == 0) ? 0 : 1;
 }
 
@@ -1019,6 +1473,10 @@ static int run_burst_max(void)
         fprintf(stderr, "harness: burstmax setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    if (durable_run_start(base) != 0)
+        return 1;
     for (i = 0; i < BURST_MAX_N; i++) {
         uint32_t req = (uint32_t)(base + i);
         ents[i].req = req;
@@ -1060,9 +1518,15 @@ static int run_burst_max(void)
                 (unsigned long long)(base + BURST_MAX_N));
         return 1;
     }
+    if (durable_persist_frame(ents, res, BURST_MAX_N, epoch,
+                              base + BURST_MAX_N) != 0) {
+        fprintf(stderr, "harness: burstmax: durable log persist failed\n");
+        return 1;
+    }
     printf("harness: burstmax OK n=64 base=%llu d=%llu v=%llu\n",
            (unsigned long long)base, (unsigned long long)d,
            (unsigned long long)v);
+    durable_run_done("burstmax");
     return 0;
 }
 
@@ -1127,6 +1591,10 @@ static int run_smoke(unsigned long n)
         fprintf(stderr, "harness: smoke setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    if (durable_run_start(next) != 0)
+        return 1;
     printf("harness: smoke base durable=%llu\n",
            (unsigned long long)next);
     t0 = now_ms();
@@ -1144,8 +1612,10 @@ static int run_smoke(unsigned long n)
     if (read_durable(&d) != 0 || read_visible(&v) != 0)
         return 1;
     printf("harness: smoke OK n=%lu durable=%llu visible=%llu %.1f ops/s\n",
-           n, (unsigned long long)d, (unsigned long long)v,
+           n, (unsigned long long)g_host_persisted,
+           (unsigned long long)v,
            (1000.0 * (double)n) / (double)(t1 - t0 + 1));
+    durable_run_done("smoke");
     return (oracle_compare(next, d, next, v) == 0) ? 0 : 1;
 }
 
@@ -1163,6 +1633,10 @@ static int run_diff(unsigned long n, uint32_t seed)
         fprintf(stderr, "harness: diff setup failed\n");
         return 1;
     }
+    if (durable_log_open() != 0)
+        return 1;
+    if (durable_run_start(base) != 0)
+        return 1;
     next = base;
     /* RESET sanity inside the run: idle reset preserves history. */
     if (u_read(R_RSTCNT, &rc0) != 0 || u_reset(&rc1) != 0 ||
@@ -1229,16 +1703,18 @@ static int run_diff(unsigned long n, uint32_t seed)
     printf("harness: diff OK n=%lu seed=%u good=%lu dup=%lu gap=%lu"
            " malf=%lu read=%lu d=%llu v=%llu %.1f ops/s\n",
            n, seed, c_good, c_dup, c_gap, c_malf, c_read,
-           (unsigned long long)d, (unsigned long long)v,
+           (unsigned long long)g_host_persisted,
+           (unsigned long long)v,
            (1000.0 * (double)n) / (double)(t1 - t0 + 1));
+    durable_run_done("diff");
     return (oracle_compare(next, d, next, v) == 0) ? 0 : 1;
 }
 
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [-t tty] <ping|magic|read|write|reset|smoke|diff|"
-            "burst|burstmax|burstdrop>"
+            "usage: %s [-t tty] [-l log] <ping|magic|read|write|reset|smoke|"
+            "diff|burst|burstmax|burstdrop>"
             " [args...]\n"
             "  ping                  PING round trip (PONG + VERSION 1)\n"
             "  magic                 read MAGIC + VERSION\n"
@@ -1254,7 +1730,10 @@ static void usage(const char *argv0)
             "  burstmax              one COUNT=64 all-good max frame\n"
             "  burstdrop             one bad-checksum burst: silent drop,\n"
             "                        watermark held, link alive\n"
-            "  default tty: " UART_PATH " @115200-8-N-1\n",
+            "  default tty: " UART_PATH " @115200-8-N-1\n"
+            "  default log: ./durable.log (sealed frame receipts;\n"
+            "                        durable=host_persisted, fabric count is\n"
+            "                        ordered-only)\n",
             argv0);
 }
 
@@ -1264,9 +1743,16 @@ int main(int argc, char **argv)
     const char *cmd;
     int ai = 1;
     uint32_t val = 0;
-    if (argc >= 4 && strcmp(argv[1], "-t") == 0) {
-        tty = argv[2];
-        ai = 3;
+    while (ai + 1 < argc) {
+        if (strcmp(argv[ai], "-t") == 0) {
+            tty = argv[ai + 1];
+            ai += 2;
+        } else if (strcmp(argv[ai], "-l") == 0) {
+            g_logpath = argv[ai + 1];
+            ai += 2;
+        } else {
+            break;
+        }
     }
     if (ai >= argc) {
         usage(argv[0]);

@@ -57,6 +57,18 @@ do {
     assert equal (mbox-append-prefix "body\n") "\n"
     let envelope = reply-envelope "t" "<coord.1.r1@smolfire.local>" (result-record "fail" 0 [] "failure") --now "20260101000000"
     assert equal (parse-mbox $envelope | length) 1
+    let same_second_a = reply-envelope "t" "<coord.1.r1@smolfire.local>" (result-record "pass" 0 []) --now "20260101000000" --nonce "fixed-for-dispatch-comparison"
+    let same_second_b = reply-envelope "t" "<coord.2.r2@smolfire.local>" (result-record "pass" 0 []) --now "20260101000000" --nonce "fixed-for-dispatch-comparison"
+    let same_dispatch_retry = reply-envelope "t" "<coord.1.r1@smolfire.local>" (result-record "pass" 0 []) --now "20260101000000" --nonce "another-invocation"
+    let id_a = ((parse-mbox $same_second_a | first).headers | get "Message-ID")
+    let id_b = ((parse-mbox $same_second_b | first).headers | get "Message-ID")
+    let id_retry = ((parse-mbox $same_dispatch_retry | first).headers | get "Message-ID")
+    assert ($id_a != $id_b) "same-task same-second distinct dispatches need distinct Message-IDs"
+    assert ($id_a != $id_retry) "same dispatch repeated invocation needs distinct Message-IDs"
+    assert equal ((parse-mbox $same_second_b | first).headers | get "In-Reply-To") "<coord.2.r2@smolfire.local>"
+    let generated_a = reply-envelope "t" "<coord.1.r1@smolfire.local>" (result-record "pass" 0 []) --now "20260101000000"
+    let generated_b = reply-envelope "t" "<coord.1.r1@smolfire.local>" (result-record "pass" 0 []) --now "20260101000000"
+    assert (((parse-mbox $generated_a | first).headers | get "Message-ID") != ((parse-mbox $generated_b | first).headers | get "Message-ID")) "runtime nonce repeats"
 }
 
 let temp = (^mktemp -d | str trim)

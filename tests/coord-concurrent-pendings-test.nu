@@ -54,6 +54,13 @@ def make-msg [
     ($header_lines | str join "\n") + "\n\n" + $body + "\n"
 }
 
+# An accepted reply must be tied to an actual coordinator-authored dispatch.
+# Keep these fixture IDs outside the generated <coord. namespace so existing
+# count-coord-dispatches assertions still measure new sends during a tick.
+def issued-dispatch-msg [task_id: string, dispatch_id: string, to_addr: string, executor: string] {
+    make-msg "coordinator@smolfire.local" $to_addr $dispatch_id $"task_id = \"($task_id)\"\naction = \"dispatch\"\nexecutor = \"($executor)\""
+}
+
 def strip-agent-bins [path: list<string>] {
     let agent_bins = [claude codex opencode ollama]
     $path | where {|dir| $agent_bins | all {|bin| not ($dir | path join $bin | path exists) } }
@@ -260,12 +267,17 @@ do {
     let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
     mkdir ([$tmp, "var", "mail"] | path join)
 
-    let fail_a = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<fail.cp4.a@host>" "task_id = \"t-ha\"\nverdict = \"fail\""
-    let pass_b = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<pass.cp4.b@host>" "task_id = \"t-hb\"\nverdict = \"pass\""
-    write-spool $spool_abs ($fail_a + $pass_b)
+    let dispatch_a = "<issued.cp4.a@host>"
+    let dispatch_b = "<issued.cp4.b@host>"
+    let fail_a = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<fail.cp4.a@host>" "task_id = \"t-ha\"\nverdict = \"fail\"" --in-reply-to $dispatch_a
+    let pass_b = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<pass.cp4.b@host>" "task_id = \"t-hb\"\nverdict = \"pass\"" --in-reply-to $dispatch_b
+    let issued_a = issued-dispatch-msg "t-ha" $dispatch_a "builder@smolfire.local" "vm"
+    let issued_b = issued-dispatch-msg "t-hb" $dispatch_b "builder@smolfire.local" "fleet"
+    write-spool $spool_abs ($issued_a + $issued_b + $fail_a + $pass_b)
     write-state $state_abs ((base-state)
+        | update seen_ids [$dispatch_a $dispatch_b]
         | update attempt_counts {"t-ha": 3}
-        | update task_executors {"t-ha": {executor: "vm", network: false, request_id: "<req.cp4.a@host>"}, "t-hb": {executor: "fleet", network: false, request_id: "<req.cp4.b@host>"}}
+        | update task_executors {"t-ha": {executor: "vm", network: false, request_id: "<req.cp4.a@host>", current_dispatch_id: $dispatch_a}, "t-hb": {executor: "fleet", network: false, request_id: "<req.cp4.b@host>", current_dispatch_id: $dispatch_b}}
         | update inflight {"t-ha": {executor: "vm", since_tick: 10}, "t-hb": {executor: "fleet", since_tick: 10}})
 
     let r = run-tick $tmp $stub_dir --fleet
@@ -337,10 +349,14 @@ do {
     let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
     mkdir ([$tmp, "var", "mail"] | path join)
 
-    write-spool $spool_abs (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<fail.cp6@host>" "verdict = \"fail\"\ntask_id = \"t-e\"")
+    let dispatch_id = "<issued.cp6@host>"
+    let issued = issued-dispatch-msg "t-e" $dispatch_id "agent@smolfire.local" "vm"
+    let reply = make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<fail.cp6@host>" "verdict = \"fail\"\ntask_id = \"t-e\"" --in-reply-to $dispatch_id
+    write-spool $spool_abs ($issued + $reply)
     write-state $state_abs ((base-state)
+        | update seen_ids [$dispatch_id]
         | update attempt_counts {"t-e": 3}
-        | update task_executors {"t-e": {executor: "vm", network: false, request_id: "<req.cp6@host>"}}
+        | update task_executors {"t-e": {executor: "vm", network: false, request_id: "<req.cp6@host>", current_dispatch_id: $dispatch_id}}
         | update inflight {"t-e": {executor: "vm", since_tick: 10}})
 
     let r = run-tick $tmp $stub_dir
@@ -364,12 +380,15 @@ do {
     let spool_abs = [$tmp, "var", "mail", "spool"] | path join
     let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
 
-    # t-flt is a slot-less inflight orphan on the dead fleet worker (e.g.
-    # pre-slot accounting); t-vm is slotted to the live vm worker.
-    write-spool $spool_abs ""
+    # t-flt is slot-less but has an issued dispatch on the dead fleet worker;
+    # t-vm is slotted to the live vm worker. Reap must synthesize only the
+    # correlated fleet failure, without quarantining this known attempt.
+    let fleet_dispatch = "<issued.cp7.flt@host>"
+    write-spool $spool_abs (issued-dispatch-msg "t-flt" $fleet_dispatch "fleet-agent@smolfire.local" "fleet")
     write-state $state_abs ((base-state)
         | update tick_count 100
-        | update task_executors {"t-flt": {executor: "fleet", network: false, request_id: "<req.cp7.flt@host>"}, "t-vm": {executor: "vm", network: false, request_id: "<req.cp7.vm@host>"}}
+        | update seen_ids [$fleet_dispatch]
+        | update task_executors {"t-flt": {executor: "fleet", network: false, request_id: "<req.cp7.flt@host>", current_dispatch_id: $fleet_dispatch}, "t-vm": {executor: "vm", network: false, request_id: "<req.cp7.vm@host>"}}
         | update inflight {"t-flt": {executor: "fleet", since_tick: 99}, "t-vm": {executor: "vm", since_tick: 99}}
         | update workers {"fleet": {last_seen_tick: 70, consecutive_failures: 0, dead: false}, "vm": {last_seen_tick: 100, consecutive_failures: 0, dead: false}})
 
@@ -406,9 +425,13 @@ do {
     let spool_abs = [$tmp, "var", "mail", "spool"] | path join
     let state_abs = [$tmp, "var", "run", "coord-state.toml"] | path join
 
-    write-spool $spool_abs (make-msg "fleet-agent@smolfire.local" "coordinator@smolfire.local" "<reply.cp8@host>" "task_id = \"t-fr\"\nverdict = \"pass\"")
+    let dispatch_id = "<issued.cp8@host>"
+    let issued = issued-dispatch-msg "t-fr" $dispatch_id "fleet-agent@smolfire.local" "fleet"
+    let reply = make-msg "fleet-agent@smolfire.local" "coordinator@smolfire.local" "<reply.cp8@host>" "task_id = \"t-fr\"\nverdict = \"pass\"" --in-reply-to $dispatch_id
+    write-spool $spool_abs ($issued + $reply)
     write-state $state_abs ((base-state)
-        | update task_executors {"t-fr": {executor: "fleet", network: false, request_id: "<req.cp8@host>"}}
+        | update seen_ids [$dispatch_id]
+        | update task_executors {"t-fr": {executor: "fleet", network: false, request_id: "<req.cp8@host>", current_dispatch_id: $dispatch_id}}
         | update workers {"fleet": {last_seen_tick: 2, consecutive_failures: 4, dead: true}})
 
     let r = run-tick $tmp $stub_dir --fleet
@@ -456,10 +479,13 @@ do {
     assert equal (slot-of $st1 "vm" | get request_id) "<disp.cp9@host>" "same dispatch id, no re-dispatch"
     assert equal (count-coord-dispatches $spool_abs) 0 "migration appends nothing"
 
-    # The resumed dispatch drains normally: a pass reply harvests to idle.
+    # Restore the historical issued envelope only after testing that the
+    # legacy scalar slot itself migrates without a spool or new dispatch.
     mkdir ([$tmp, "var", "mail"] | path join)
+    let issued = issued-dispatch-msg "t-legacy" "<disp.cp9@host>" "builder@smolfire.local" "vm"
     let reply = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<reply.cp9@host>" "task_id = \"t-legacy\"\nverdict = \"pass\"" --in-reply-to "<disp.cp9@host>"
-    $reply | save --append $spool_abs
+    ($issued + $reply) | save --append $spool_abs
+    write-state $state_abs ($st1 | update seen_ids ($st1.seen_ids | append "<disp.cp9@host>"))
     let r2 = run-tick $tmp $stub_dir
     assert equal $r2.exit_code 0 "tick2 exits 0"
     let st2 = read-state $state_abs
@@ -694,10 +720,13 @@ do {
     assert equal (slot-of $st1 "fleet" 1 | get task_id) "" "padded slot stays empty"
     assert equal (count-coord-dispatches $spool_abs) 0 "migration appends nothing"
 
-    # The resumed dispatch drains normally: a pass reply harvests to idle.
+    # Restore the historical issued envelope after the record-to-list
+    # migration check, retaining the original no-new-dispatch assertion.
     mkdir ([$tmp, "var", "mail"] | path join)
+    let issued = issued-dispatch-msg "t-mig" "<disp.cp16@host>" "fleet-builder-9@smolfire.local" "fleet"
     let reply = make-msg "fleet-agent@smolfire.local" "coordinator@smolfire.local" "<reply.cp16@host>" "task_id = \"t-mig\"\nverdict = \"pass\"" --in-reply-to "<disp.cp16@host>"
-    $reply | save --append $spool_abs
+    ($issued + $reply) | save --append $spool_abs
+    write-state $state_abs ($st1 | update seen_ids ($st1.seen_ids | append "<disp.cp16@host>"))
     let r2 = run-tick $tmp $stub_dir --fleet
     assert equal $r2.exit_code 0 "tick2 exits 0"
     let st2 = read-state $state_abs

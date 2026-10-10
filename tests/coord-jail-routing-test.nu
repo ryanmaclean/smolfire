@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Coordinator routing only. The fake claude command prevents billed spawn.
+# Coordinator routing and mailbox-attempt fixtures. The fake claude command prevents billed spawn.
+use coord-mailbox-attempt-test.nu run-mailbox-attempt-tests
 
 def "assert equal" [left: any, right: any, what: string = ""] {
     if $left != $right { error make {msg: $"assert equal failed ($what)"} }
@@ -64,6 +65,8 @@ do {
         ^rm -rf $tmp
     }
 }
+
+run-mailbox-attempt-tests
 
 print "routing: Network capability is checked before dispatch"
 do {

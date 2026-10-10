@@ -67,6 +67,10 @@ def make-msg [
     ($header_lines | str join "\n") + "\n\n" + $body + "\n"
 }
 
+def issued-dispatch-msg [task_id: string, dispatch_id: string] {
+    make-msg "coordinator@smolfire.local" "builder@smolfire.local" $dispatch_id $"task_id = \"($task_id)\"\naction = \"dispatch\"\nexecutor = \"vm\""
+}
+
 def strip-agent-bins [path: list<string>] {
     let agent_bins = [claude codex opencode ollama]
     $path | where {|dir| $agent_bins | all {|bin| not ($dir | path join $bin | path exists) } }
@@ -167,15 +171,27 @@ do {
     let spool_rel = "var/mail/spool"
     let spool_abs = [$tmp, $spool_rel] | path join
 
-    write-spool $spool_abs (make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<r3@host>" 'task_id = "t3"
-verdict = "pass"')
+    write-spool $spool_abs (make-msg "user@smolfire.local" "builder@smolfire.local" "<req.t3@host>" 'task_id = "t3"
+executor = "vm"')
 
-    let r = run-tick-captured $tmp $state_rel $spool_rel
+    let first = run-tick-captured $tmp $state_rel $spool_rel
+    assert ($first.exit_code == 0) $"fresh init must exit 0 \(exit=($first.exit_code)\)"
+    let initialized = read-state $state_abs
+    assert equal $initialized.fsm_state "waiting"
+    let dispatch_id = $initialized.pending_request_id
+    assert ($dispatch_id != "") "fresh init must persist its issued dispatch ID"
+    assert ("t3" in ($initialized.task_executors | columns)) "request must be active before reply"
 
-    assert ($r.exit_code == 0) $"fresh init must exit 0 \(exit=($r.exit_code)\)"
+    let reply = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<r3@host>" 'task_id = "t3"
+verdict = "pass"' --in-reply-to $dispatch_id
+    $reply | save --append $spool_abs
+    let second = run-tick-captured $tmp $state_rel $spool_rel
+    assert ($second.exit_code == 0) $"correlated reply tick must exit 0 \(exit=($second.exit_code)\)"
     let state = read-state $state_abs
     assert equal $state.fsm_state "idle"
     assert ("<r3@host>" in $state.seen_ids)
+    assert (not ("t3" in ($state.task_executors | columns))) "accepted task identity must be cleared"
+    assert ($second.stdout | str contains 'reason = "accepted"') "reply must emit accepted verdict"
 
     ^rm -rf $tmp
     print "  ok"
@@ -214,9 +230,17 @@ do {
     let spool_rel = "var/mail/spool"
     let spool_abs = [$tmp, $spool_rel] | path join
 
-    write-state $state_abs (full-state | update halted_tasks [] | update attempt_counts {})
-    write-spool $spool_abs (make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<r5@host>" 'task_id = "t5"
-verdict = "pass"')
+    let dispatch_id = "<issued.r5@host>"
+    write-state $state_abs (full-state
+        | update halted_tasks []
+        | update attempt_counts {}
+        | update seen_ids ["<old.reply@host>" $dispatch_id]
+        | update task_executors {"t5": {executor: "vm", network: false, request_id: "<req.t5@host>", current_dispatch_id: $dispatch_id}}
+        | upsert inflight {"t5": {executor: "vm", since_tick: 7}})
+    let issued = issued-dispatch-msg "t5" $dispatch_id
+    let reply = make-msg "builder@smolfire.local" "coordinator@smolfire.local" "<r5@host>" 'task_id = "t5"
+verdict = "pass"' --in-reply-to $dispatch_id
+    write-spool $spool_abs ($issued + $reply)
     # Leftover of a writer killed between temp-write and rename.
     "tick_count = 9999\nFSM_STATE = GARBAGE" | save --force $"($state_abs).tmp.99999"
 
@@ -224,6 +248,8 @@ verdict = "pass"')
     assert ($r.exit_code == 0) $"tick must proceed on intact state \(exit=($r.exit_code)\)"
     let state = read-state $state_abs
     assert ("<r5@host>" in $state.seen_ids) "intact state file must be the one ticked from"
+    assert (not ("t5" in ($state.task_executors | columns))) "correlated reply must finish t5"
+    assert ($r.stdout | str contains 'reason = "accepted"') "recovered state must accept its current reply"
     assert (($state.tick_count | default 9999) != 9999) "stale tmp must never be loaded as state"
     assert ((glob $"($state_abs).tmp.*" | length) == 0) "stale tmp must be cleaned"
 

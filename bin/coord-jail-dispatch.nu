@@ -37,9 +37,12 @@ export def mbox-append-prefix [existing: string] {
 }
 
 # Preserve the existing jail reply envelope and coordinator's claim shape.
-export def reply-envelope [task_id: string, dispatch_id: string, result: record, --now: string = ""] {
+export def reply-envelope [task_id: string, dispatch_id: string, result: record, --now: string = "", --nonce: string = ""] {
     let stamp  = if $now == "" { date now | format date "%Y%m%d%H%M%S" } else { $now }
     let dstamp = date now | format date "%a %b %e %H:%M:%S %Y"
+    let task_key = $task_id | hash sha256
+    let dispatch_key = $dispatch_id | hash sha256
+    let unique_key = (if $nonce == "" { random uuid } else { $nonce }) | hash sha256
     let outputs_toml = $result.outputs | each {|o|
         $"  {cmd = ($o.cmd | to json), stdout = ($o.stdout | to json), stderr = ($o.stderr | to json), exit_code = ($o.exit_code)}"
     } | str join ",\n"
@@ -51,7 +54,7 @@ export def reply-envelope [task_id: string, dispatch_id: string, result: record,
 From: jail-agent@smolfire.local
 To: coordinator@smolfire.local
 Subject: Re: [($task_id)] jail execution result
-Message-ID: <($task_id).jail-agent.($stamp)@smolfire.local>
+Message-ID: <jail.($task_key).($dispatch_key).($stamp).($unique_key)@smolfire.local>
 In-Reply-To: ($dispatch_id)
 X-Project: smolfire
 X-Executor: jail

@@ -91,6 +91,10 @@ def make-msg [
     ($header_lines | str join "\n") + "\n\n" + $body + "\n"
 }
 
+def issued-dispatch [task: string, dispatch_id: string, --to: string = "agent@smolfire.local", --executor: string = "vm"] {
+    make-msg "coordinator@smolfire.local" $to $dispatch_id $"task_id = \"($task)\"\naction = \"dispatch\"\nexecutor = \"($executor)\""
+}
+
 def base-state [] {
     {
         version:            "1"
@@ -156,8 +160,9 @@ do {
     let spool_rel = "var/mail/spool"
     let spool_abs = [$tmp, $spool_rel] | path join
 
-    write-spool $spool_abs (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<reply.hb2@host>" "task_id = \"t-hb2\"\nverdict = \"pass\"")
-    write-state $state_abs ((base-state) | update task_executors {"t-hb2": {executor: "jail", network: false, request_id: "<req.hb2@host>"}})
+    let dispatch_id = "<dispatch.hb2@host>"
+    write-spool $spool_abs ((issued-dispatch "t-hb2" $dispatch_id --executor "jail") + (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<reply.hb2@host>" "task_id = \"t-hb2\"\nverdict = \"pass\"" --in-reply-to $dispatch_id))
+    write-state $state_abs ((base-state) | update seen_ids [$dispatch_id] | update task_executors {"t-hb2": {executor: "jail", network: false, request_id: "<req.hb2@host>", current_dispatch_id: $dispatch_id}})
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -175,9 +180,11 @@ do {
     let spool_rel = "var/mail/spool"
     let spool_abs = [$tmp, $spool_rel] | path join
 
-    write-spool $spool_abs (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<fail.hb3@host>" "verdict = \"fail\"\ntask_id = \"t-hb3\"")
+    let dispatch_id = "<dispatch.hb3@host>"
+    write-spool $spool_abs ((issued-dispatch "t-hb3" $dispatch_id) + (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<fail.hb3@host>" "verdict = \"fail\"\ntask_id = \"t-hb3\"" --in-reply-to $dispatch_id))
     write-state $state_abs ((base-state)
-        | update task_executors {"t-hb3": {executor: "vm", network: false, request_id: "<req.hb3@host>"}}
+        | update seen_ids [$dispatch_id]
+        | update task_executors {"t-hb3": {executor: "vm", network: false, request_id: "<req.hb3@host>", current_dispatch_id: $dispatch_id}}
         | update workers {"vm": {last_seen_tick: 10, consecutive_failures: 0, dead: false}})
 
     run-tick $tmp $state_rel $spool_rel
@@ -201,10 +208,12 @@ do {
 
     # Seeded waiting on an unrelated task: the FSM stays in waiting, so the
     # reap mechanics below are isolated from harvest-redispatch in this tick.
-    write-spool $spool_abs (make-msg "user@smolfire.local" "builder@smolfire.local" "<other.hb4@host>" 'task_id = "other"' --in-reply-to "<seed@host>")
+    let dispatch_id = "<dispatch.hb4.d1@host>"
+    write-spool $spool_abs ((issued-dispatch "t-d1" $dispatch_id) + (make-msg "user@smolfire.local" "builder@smolfire.local" "<other.hb4@host>" 'task_id = "other"' --in-reply-to "<seed@host>"))
     write-state $state_abs ((base-state)
         | update tick_count 100
         | update fsm_state "waiting"
+        | update seen_ids [$dispatch_id]
         | update pending_request_id "<req.hb4.pending@host>"
         | update pending_task_id "t-other"
         | update pending_to_addr "builder@smolfire.local"
@@ -212,6 +221,7 @@ do {
             "t-d1": {executor: "vm", since_tick: 95}
             "t-other": {executor: "vm", since_tick: 99}
           }
+        | update task_executors {"t-d1": {executor: "vm", network: false, request_id: "<req.hb4.d1@host>", current_dispatch_id: $dispatch_id}}
         | update workers {"vm": {last_seen_tick: 70, consecutive_failures: 2, dead: false}})
 
     let out = with-env {SMOLFIRE_WORKER_DEAD_TICKS: "10"} {
@@ -246,10 +256,12 @@ do {
 
     # Idle tick: entry sweep reaps, then the same tick's FSM harvests the
     # synthetic fail and redispatches through the D2 table.
-    write-spool $spool_abs ""
+    let dispatch_id = "<dispatch.hb5.r@host>"
+    write-spool $spool_abs (issued-dispatch "t-r" $dispatch_id)
     write-state $state_abs ((base-state)
         | update tick_count 100
-        | update task_executors {"t-r": {executor: "vm", network: false, request_id: "<req.r@host>"}}
+        | update seen_ids [$dispatch_id]
+        | update task_executors {"t-r": {executor: "vm", network: false, request_id: "<req.r@host>", current_dispatch_id: $dispatch_id}}
         | update inflight {"t-r": {executor: "vm", since_tick: 90}}
         | update workers {"vm": {last_seen_tick: 70, consecutive_failures: 0, dead: false}})
 
@@ -277,11 +289,13 @@ do {
     let spool_rel = "var/mail/spool"
     let spool_abs = [$tmp, $spool_rel] | path join
 
-    write-spool $spool_abs ""
+    let dispatch_id = "<dispatch.hb6.e@host>"
+    write-spool $spool_abs (issued-dispatch "t-e" $dispatch_id)
     write-state $state_abs ((base-state)
         | update tick_count 100
+        | update seen_ids [$dispatch_id]
         | update attempt_counts {"t-e": 2}
-        | update task_executors {"t-e": {executor: "vm", network: false, request_id: "<req.e@host>"}}
+        | update task_executors {"t-e": {executor: "vm", network: false, request_id: "<req.e@host>", current_dispatch_id: $dispatch_id}}
         | update inflight {"t-e": {executor: "vm", since_tick: 90}}
         | update workers {"vm": {last_seen_tick: 70, consecutive_failures: 0, dead: false}})
 
@@ -305,9 +319,11 @@ do {
     let spool_rel = "var/mail/spool"
     let spool_abs = [$tmp, $spool_rel] | path join
 
-    write-spool $spool_abs (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<reply.hb7@host>" "task_id = \"t-hb7\"\nverdict = \"pass\"")
+    let dispatch_id = "<dispatch.hb7@host>"
+    write-spool $spool_abs ((issued-dispatch "t-hb7" $dispatch_id) + (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<reply.hb7@host>" "task_id = \"t-hb7\"\nverdict = \"pass\"" --in-reply-to $dispatch_id))
     write-state $state_abs ((base-state)
-        | update task_executors {"t-hb7": {executor: "vm", network: false, request_id: "<req.hb7@host>"}}
+        | update seen_ids [$dispatch_id]
+        | update task_executors {"t-hb7": {executor: "vm", network: false, request_id: "<req.hb7@host>", current_dispatch_id: $dispatch_id}}
         | update workers {"vm": {last_seen_tick: 2, consecutive_failures: 4, dead: true}})
 
     let out = tick-raw $tmp $state_rel $spool_rel
@@ -364,10 +380,12 @@ do {
     let spool_rel = "var/mail/spool"
     let spool_abs = [$tmp, $spool_rel] | path join
 
-    write-spool $spool_abs ""
+    let dispatch_id = "<dispatch.hb9.x@host>"
+    write-spool $spool_abs (issued-dispatch "t-x" $dispatch_id)
     write-state $state_abs ((base-state)
         | update tick_count 100
-        | update task_executors {"t-x": {executor: "vm", network: false, request_id: "<req.x@host>"}}
+        | update seen_ids [$dispatch_id]
+        | update task_executors {"t-x": {executor: "vm", network: false, request_id: "<req.x@host>", current_dispatch_id: $dispatch_id}}
         | update inflight {"t-x": {executor: "vm", since_tick: 99}}
         | update workers {"vm": {last_seen_tick: 50, consecutive_failures: 0, dead: true}})
 

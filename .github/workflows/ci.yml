@@ -163,6 +163,11 @@ jobs:
       - name: NetBSD microvm prototype tests
         run: nu tests/netbsd-microvm-prototype-test.nu
 
+      # netbsd-microvm-rootfs-test.nu: SHA512 refusal + state-disk secret
+      # hygiene for the NetBSD 11 rootfs builder (skips without makefs).
+      - name: NetBSD microvm rootfs builder tests
+        run: nu tests/netbsd-microvm-rootfs-test.nu
+
       # no-new-python-test.nu: fails the build if any tracked *.py file
       # exists outside the explicit allow-list in the test itself. See
       # AGENTS.md and .github/copilot-instructions.md — new scripts must be

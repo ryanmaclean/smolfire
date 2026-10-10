@@ -1,0 +1,125 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# /etc/rc for the smolfire NetBSD 11 MICROVM guest (installed by
+# bin/netbsd-microvm-rootfs.nu). It replaces rc.d entirely:
+#   - the root file system stays read-only (immutable rootfs image)
+#   - scratch directories are tmpfs
+#   - QEMU user-mode networking (SLIRP) is configured statically
+#   - one writable FFS (WAPBL) state disk is mounted at /state
+#   - the serial marker protocol of bin/netbsd-microvm-prototype.nu is
+#     printed on the console:
+#       SMOLFIRE_NETBSD_READY
+#       SMOLFIRE_NETBSD_STATE_OK dev=<dev> mount=/state fs=ffs-wapbl mode=rw
+#       SMOLFIRE_NETBSD_WORKLOAD verdict=pass|fail key=value ...
+#       SMOLFIRE_NETBSD_STATS t=<s> pid=<pid> rss_kb=<n> vsz_kb=<n> cpu_pct=<f> cputime=<m:s>
+#
+# Workload: if /state/agent.env exists, /opt/datadog/bin/dd-agent-rs is run
+# with that environment (DD_API_KEY and friends live only on the state disk,
+# never in the rootfs image). Otherwise a small filesystem probe runs.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+umask 022
+
+say() { echo "$*" > /dev/console; }
+
+# --- scratch -------------------------------------------------------------
+mount -t tmpfs -o -s64m tmpfs /tmp
+for d in /var/run /var/log /var/db /var/tmp; do
+	mount -t tmpfs -o -s16m tmpfs "$d"
+done
+mount -t kernfs kernfs /kern
+mount -t procfs procfs /proc
+mkdir -p /dev/pts && mount -t ptyfs ptyfs /dev/pts
+touch /var/run/utmpx /var/log/wtmpx /var/log/lastlogx
+
+hostname "$(cat /etc/myname 2>/dev/null || echo smolfire-netbsd)"
+
+# --- network: QEMU SLIRP defaults (guest 10.0.2.15, gw .2, dns .3) --------
+ifconfig lo0 inet 127.0.0.1 netmask 255.0.0.0 up
+ifconfig vioif0 inet 10.0.2.15 netmask 255.255.255.0 up 2>/dev/null &&
+	route -q add default 10.0.2.2
+echo "nameserver 10.0.2.3" > /var/run/resolv.conf
+
+say "SMOLFIRE_NETBSD_READY kernel=$(uname -r) host=$(hostname)"
+
+# --- state disk ----------------------------------------------------------
+state_dev=""
+for dev in ld1a ld1d; do
+	[ -b /dev/$dev ] || continue
+	if mount -o log /dev/$dev /state 2>/dev/null; then
+		state_dev=$dev
+		break
+	fi
+	fsck_ffs -y /dev/r$dev > /dev/null 2>&1
+	if mount -o log /dev/$dev /state 2>/dev/null; then
+		state_dev=$dev
+		break
+	fi
+done
+mode=ro
+if [ -n "$state_dev" ] && touch /state/.rw-probe 2>/dev/null; then
+	rm -f /state/.rw-probe
+	mode=rw
+fi
+if [ -n "$state_dev" ]; then
+	say "SMOLFIRE_NETBSD_STATE_OK dev=$state_dev mount=/state fs=ffs-wapbl mode=$mode"
+else
+	say "SMOLFIRE_NETBSD_STATE_FAIL reason=no-state-disk"
+fi
+
+# --- sshd (host keys persist on the state disk) ---------------------------
+if [ "$mode" = rw ] && [ -x /usr/sbin/sshd ] && [ -s /root/.ssh/authorized_keys ]; then
+	mkdir -p /state/ssh
+	[ -s /state/ssh/ssh_host_ed25519_key ] ||
+		ssh-keygen -q -t ed25519 -N "" -f /state/ssh/ssh_host_ed25519_key
+	/usr/sbin/sshd -h /state/ssh/ssh_host_ed25519_key \
+		-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
+		-o PermitRootLogin=prohibit-password -o PidFile=/var/run/sshd.pid
+fi
+
+# --- workload ------------------------------------------------------------
+agent=/opt/datadog/bin/dd-agent-rs
+if [ "$mode" = rw ] && [ -r /state/agent.env ] && [ -x "$agent" ]; then
+	mkdir -p /state/run /state/log
+	(
+		set -a
+		. /state/agent.env
+		set +a
+		DD_RUN_PATH=${DD_RUN_PATH:-/state/run}
+		DD_STATUS_FILE=${DD_STATUS_FILE:-/state/run/status.json}
+		export DD_RUN_PATH DD_STATUS_FILE
+		exec "$agent" run > /state/log/dd-agent-rs.log 2>&1
+	) &
+	pid=$!
+	echo "$pid" > /var/run/dd-agent-rs.pid
+	sleep 2
+	if kill -0 "$pid" 2>/dev/null; then v=pass; else v=fail; fi
+	bin_bytes=$(stat -f %z "$agent")
+	say "SMOLFIRE_NETBSD_WORKLOAD verdict=$v workload=dd-agent-rs pid=$pid binary_bytes=$bin_bytes"
+	(
+		t=0
+		while kill -0 "$pid" 2>/dev/null; do
+			set -- $(ps -o rss,vsz,%cpu,time -p "$pid" | tail -n 1)
+			say "SMOLFIRE_NETBSD_STATS t=$t pid=$pid rss_kb=$1 vsz_kb=$2 cpu_pct=$3 cputime=$4"
+			sleep 30
+			t=$((t + 30))
+		done
+		say "SMOLFIRE_NETBSD_STATS t=$t pid=$pid exited=true"
+	) &
+elif [ "$mode" = rw ]; then
+	i=0
+	while [ $i -lt 64 ]; do
+		dd if=/dev/zero of=/state/probe.$i bs=4k count=4 2>/dev/null || break
+		i=$((i + 1))
+	done
+	sync
+	rm -f /state/probe.*
+	if [ $i -eq 64 ]; then v=pass; else v=fail; fi
+	say "SMOLFIRE_NETBSD_WORKLOAD verdict=$v workload=fs-probe fs=ffs-wapbl files=$i"
+else
+	say "SMOLFIRE_NETBSD_WORKLOAD verdict=fail workload=none reason=state-$mode"
+fi
+
+exit 0

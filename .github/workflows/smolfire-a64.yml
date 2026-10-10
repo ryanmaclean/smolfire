@@ -1,0 +1,204 @@
+# SPDX-License-Identifier: Apache-2.0
+# smolfire-a64.yml — EXPERIMENTAL aarch64 SMOLFIRE one-file microVM:
+# arm64 Image (kernel + embedded static /rescue MFS root), booted with
+# `qemu-system-aarch64 -machine virt -kernel` — no loader, no EFI, no disk.
+# Design, evidence and open risks: docs/SMOLFIRE-A64-FEASIBILITY.md.
+#
+# DISABLED BY DEFAULT: workflow_dispatch only (no push / pull_request
+# triggers) and both jobs are gated on the `enable` input, which defaults to
+# false. Nothing runs until someone dispatches with enable=true.
+#
+# Build: same nested FreeBSD-VM pattern as smolfire.yml (amd64 build VM under
+# KVM on the hosted runner) but CROSS-building arm64 via
+# `bin/build-smolfire.sh --arch aarch64` (kernel-toolchain + buildkernel,
+# TARGET=arm64 TARGET_ARCH=aarch64). The aarch64 /rescue/rescue comes from the
+# pinned 15.0-RELEASE arm64 base.txz (sha256 checked against MANIFEST).
+# Gate: same-ISA TCG on an arm64 hosted runner via bin/ci/aarch64-boot-probe.sh
+# (PROBE_KERNEL=1), pass = SMOLFIRE_READY on the serial console.
+
+name: SMOLFIRE aarch64 microVM (experimental)
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable:
+        description: "Actually run (default false = no-op; experimental, see docs/SMOLFIRE-A64-FEASIBILITY.md)"
+        type: boolean
+        default: false
+
+env:
+  WORK: /mnt/smolfire-a64-ci
+  SSH_PORT: "2254"
+  SRC_BRANCH: releng/15.0
+  BASE_URL: https://download.freebsd.org/releases/VM-IMAGES/15.0-RELEASE/amd64/Latest
+  BASE_IMG: FreeBSD-15.0-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2
+  A64_DIST_URL: https://download.freebsd.org/releases/arm64/aarch64/15.0-RELEASE
+
+jobs:
+  build:
+    name: Cross-build aarch64 Image
+    if: ${{ inputs.enable }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — KVM and packages
+        run: |
+          set -e
+          test -c /dev/kvm || { echo "ERROR: no /dev/kvm"; exit 1; }
+          sudo chmod 666 /dev/kvm
+          sudo mkdir -p "$WORK" && sudo chown "$(id -u)" "$WORK"
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils xz-utils genisoimage openssh-client
+
+      - name: Fetch aarch64 /rescue/rescue (15.0-RELEASE arm64 base.txz, sha256-pinned)
+        run: |
+          set -e
+          cd "$WORK"
+          curl -fsSL -o MANIFEST "$A64_DIST_URL/MANIFEST"
+          curl -fsSL -o base.txz "$A64_DIST_URL/base.txz"
+          want=$(awk '$1 == "base.txz" { print $2 }' MANIFEST)
+          got=$(sha256sum base.txz | cut -d' ' -f1)
+          test -n "$want" && test "$want" = "$got" \
+            || { echo "ERROR: base.txz sha256 mismatch (want=$want got=$got)"; exit 1; }
+          # Extract the whole ./rescue dir: rescue/rescue is a hard link whose
+          # first archive member is another name, so it cannot be named alone.
+          tar -xJf base.txz ./rescue 2>/dev/null
+          test -x rescue/rescue
+          # e_machine (offset 18, LE) must be EM_AARCH64 = 0xb7
+          test "$(od -An -tx1 -j18 -N2 rescue/rescue | tr -d ' \n')" = b700
+          ls -l rescue/rescue
+
+      - name: Fetch FreeBSD 15.0 amd64 base image (build VM)
+        run: |
+          set -e
+          cd "$WORK"
+          curl -fsSL -o base.qcow2.xz "$BASE_URL/$BASE_IMG.xz"
+          unxz base.qcow2.xz
+          qemu-img resize base.qcow2 40G
+
+      - name: Create cloud-init NoCloud seed (root SSH key)
+        run: |
+          set -e
+          cd "$WORK"
+          ssh-keygen -t ed25519 -N '' -f ci_key -q
+          printf 'instance-id: smolfire-a64-ci\nlocal-hostname: smolfire-a64-build\n' > meta-data
+          {
+            echo '#cloud-config'
+            echo 'users:'
+            echo '  - name: root'
+            echo '    ssh_authorized_keys:'
+            echo "      - $(cat ci_key.pub)"
+            echo 'runcmd:'
+            echo "  - echo 'PermitRootLogin prohibit-password' >> /etc/ssh/sshd_config"
+            echo '  - service sshd restart || true'
+          } > user-data
+          genisoimage -output seed.iso -volid cidata -joliet -rock user-data meta-data
+
+      - name: Boot FreeBSD build VM (KVM)
+        run: |
+          set -e
+          cd "$WORK"
+          qemu-system-x86_64 \
+            -M q35 -accel kvm -cpu host \
+            -smp "$(nproc)" -m 8G \
+            -drive file=base.qcow2,format=qcow2,if=virtio \
+            -cdrom seed.iso \
+            -nic "user,model=virtio-net-pci,hostfwd=tcp::${SSH_PORT}-:22" \
+            -display none -daemonize \
+            -serial "file:${WORK}/serial.log" \
+            -pidfile "${WORK}/vm.pid"
+          echo "Waiting for SSH ..."
+          for i in $(seq 1 120); do
+            if ssh -i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                   -o ConnectTimeout=3 -o BatchMode=yes -p "$SSH_PORT" \
+                   root@127.0.0.1 'echo VM_UP && uname -rm'; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "ERROR: SSH never came up. Serial tail:"; tail -50 serial.log; exit 1
+
+      - name: Cross-build SMOLFIRE aarch64 Image inside VM
+        run: |
+          set -e
+          cd "$WORK"
+          SSHO="-i ci_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+          SSH="ssh $SSHO -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@127.0.0.1"
+          $SSH 'env ASSUME_ALWAYS_YES=yes pkg update -q && env ASSUME_ALWAYS_YES=yes pkg install -y git'
+          $SSH "git clone --depth 1 -b $SRC_BRANCH https://git.freebsd.org/src.git /usr/src"
+          tar -C "$GITHUB_WORKSPACE" -cf - . | $SSH 'mkdir -p /root/smolfire && tar -C /root/smolfire -xf -'
+          # SMOLFIRE does `include SMOLFIRE-VM`, so copy the whole family.
+          $SSH 'cp /root/smolfire/sys/arm64/conf/SMOLFIRE* /usr/src/sys/arm64/conf/'
+          scp $SSHO -P "$SSH_PORT" rescue/rescue root@127.0.0.1:/root/rescue-aarch64
+          BUILD_RC=0
+          $SSH "env RESCUE_SRC=/root/rescue-aarch64 sh /root/smolfire/bin/build-smolfire.sh --arch aarch64" 2>&1 | tee build.log || BUILD_RC=$?
+          scp $SSHO -P "$SSH_PORT" root@127.0.0.1:/var/tmp/smolfire-build.log \
+              "$WORK/smolfire-build-vm.log" || true
+          if [ "$BUILD_RC" -ne 0 ]; then
+            echo "ERROR: build rc=$BUILD_RC"; tail -100 "$WORK/smolfire-build-vm.log" || true; exit 1
+          fi
+          scp $SSHO -P "$SSH_PORT" root@127.0.0.1:/root/smolfire-kernel-aarch64 "$WORK/smolfire-kernel-aarch64"
+          scp $SSHO -P "$SSH_PORT" root@127.0.0.1:/root/smolfire-kernel-aarch64.elf "$WORK/smolfire-kernel-aarch64.elf"
+          ls -lh "$WORK/smolfire-kernel-aarch64" "$WORK/smolfire-kernel-aarch64.elf"
+          # arm64 Image magic ("ARM\x64" at offset 56) — the gate would catch this too, fail early.
+          test "$(od -An -tx1 -j56 -N4 "$WORK/smolfire-kernel-aarch64" | tr -d ' \n')" = 41524d64
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-aarch64
+          path: |
+            ${{ env.WORK }}/smolfire-kernel-aarch64
+            ${{ env.WORK }}/smolfire-kernel-aarch64.elf
+            ${{ env.WORK }}/smolfire-build-vm.log
+            ${{ env.WORK }}/build.log
+
+  gate:
+    name: TCG boot gate (same-ISA)
+    needs: build
+    if: ${{ inputs.enable }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: smolfire-aarch64
+          path: img
+
+      - name: Install qemu + expect
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends qemu-system-arm expect
+
+      - name: Boot Image under QEMU virt TCG (pass = SMOLFIRE_READY)
+        run: |
+          set -e
+          # NIC present so rc's vtnet0 branch is exercised; no fetch URL (no net gate yet).
+          PROBE_KERNEL=1 \
+          PROBE_APPEND="FreeBSD: smolfire.ip=10.0.2.15/24 smolfire.gw=10.0.2.2" \
+          PROBE_PASS="SMOLFIRE_READY" \
+          PROBE_QEMU_EXTRA="-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=" \
+          SERIAL_LOG="$PWD/serial.log" \
+            sh bin/ci/aarch64-boot-probe.sh img/smolfire-kernel-aarch64 600 max,pauth-impdef=on
+
+      - name: Upload serial transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolfire-aarch64-serial
+          path: serial.log
+          if-no-files-found: ignore

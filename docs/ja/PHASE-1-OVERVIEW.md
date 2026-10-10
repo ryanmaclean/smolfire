@@ -264,7 +264,7 @@ expect スクリプト配線が完了次第行います。
 
 <aarch64-builder> 上でクロスコンパイル（`TARGET=amd64 TARGET_ARCH=amd64`）によって
 amd64 イメージが生成されており、以下に配置されています：
-`smolbsd-buildworld @ 108.61.206.203:/root/genoa/out/smolbsd-linode-amd64-v0.1.0.raw`
+`smolbsd-buildworld @ <vultr-build-host>:/root/genoa/out/smolbsd-linode-amd64-v0.1.0.raw`
 （2.0 GiB、GPT：128 MiB ESP に `BOOTX64.EFI` + 1.9 GiB UFS ルート、
 GENERIC カーネル）。`SMOLBSD` カーネルコンフィグを用いた最小ビルドは未完了です。
 

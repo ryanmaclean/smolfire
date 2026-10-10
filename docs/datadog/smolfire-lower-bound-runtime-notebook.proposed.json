@@ -1,0 +1,23 @@
+{
+  "data": {
+    "type": "notebooks",
+    "attributes": {
+      "name": "smolFire — Lower-bound Runtime, Temporal Storage & Lineage",
+      "status": "published",
+      "time": {
+        "live_span": "1w"
+      },
+      "cells": [
+        {
+          "type": "notebook_cells",
+          "attributes": {
+            "definition": {
+              "type": "markdown",
+              "text": "# smolFire: lower-bound runtime, temporal storage, and lineage\n\nCanonical source (ryanmaclean/smolfire, renamed from smolbsd): `docs/LOWER-BOUND-RUNTIME-2026-09-23.md`\n\n## Objective\n\nFind the smallest/fastest permissively licensed runtime that can run agent work while avoiding duplicated state logic across filesystem, queue, database, tracing, lineage, and orchestration.\n\n## Current execution candidates\n\n- FreeBSD smolFire one-ELF PVH microVM: measured reference. ~37 MiB ELF; 511 ms to shell under Firecracker (569 ms QEMU microvm) in the 2026-07-29 validation run 30409991192; on the same hosted runner the release wall-clock median was 476 ms before and 240 ms after the guest-side TSC-from-pvclock patch (2026-09-24, run 35956015747; n=3, AMD EPYC 9V74; part of the drop is a faster host: 2.446 -> 2.596 GHz, and console dropped 126 -> 78 ms with no code change, so the delta overstates the patch's own saving). Remaining: console output, phantom UARTs, lapic clockcalib (docs/BOOT-TIME-ROADMAP.md).\n- NetBSD 11 MICROVM: smallest complete NetBSD candidate. Host-side prototype runner exists (bin/netbsd-microvm-prototype.nu, docs/NETBSD-MICROVM-PROTOTYPE.md); the LFS workload marker in that doc is a contract example, not a measurement.\n- NetBSD rump / rumprun: software lower bound before hardware. Prototype contract and comparison checked in (docs/RUMP-RUMPRUN-LOWER-BOUND.md, docs/lower-bound-rump-rumprun.json), FFS first.\n- FPGA / SmartNIC / DPU / NVMe transaction sequencer: hardware lower bound\n\n## Storage matrix\n\n- HAMMER1: native fine-grained transaction history\n- HAMMER2: modern portable BSD filesystem candidate\n- NetBSD LFS: append/log/checkpoint semantics\n- NetBSD FFS + WAPBL + fss: mature correctness baseline\n\nCommon workload: create card → pending/running rename → append logs → write artifact → done/failed → fsync → crash → recover → reconstruct history → export lineage.\n\n## Lineage rule\n\nBOP + filesystem-native identities are canonical. OpenLineage is derived.\n\n- card/template → Job\n- execution/lease UUID → Run\n- HAMMER TID / LFS checkpoint / HAMMER2 snapshot/PFS / FFS snapshot → DatasetVersion\n- state rename → START/COMPLETE/FAIL\n\nNo second canonical lineage DB.\n\n## Jev / System One\n\nUse only as a fast decision plane:\n\n- provider selection/rotation\n- retry/fail/escalate\n- priority/routing\n- capability match\n- review/tool gates\n- choose deterministic vs expensive LLM path\n\nDo not use for code/text generation. Safety invariants remain deterministic.\n\n## Shipped release reference (0.5.0, 2026-09-24)\n\n- amd64 VM image: 62.6 MiB raw / 25.0 MiB compressed, 9 s to login on KVM\n- aarch64 VM image: 24.2 MiB compressed, 30-31 s to login under same-ISA TCG soft-gate (no hosted runner can hardware-accelerate an aarch64 guest)\n- Host-bench of shipped bytes under TCG: amd64 43 s to login; aarch64 cross-ISA 82 s\n- These are VM-image figures; the one-ELF SMOLFIRE microVM is the separate row above.\n\n## Hardware direction\n\nPrototype one transaction primitive:\n\nmutation descriptor → sequence/TID → timestamp → hash/checksum → route → DMA/NVMe append → completion.\n\nMeasure a software ring first, then FPGA/SmartNIC/DPU.\n\n## Open work\n\nsmolFire (ryanmaclean/smolfire) #60, #61, #62, #63, #64, #65, #72, #73; umbrella #78. Status as of 2026-10-03 not verified for each (issue states unreachable in the audit session except #76: closed not_planned 2026-09-24).\nBOP ryanmaclean/bop#5, #7\nGenoa ryanmaclean/genoa#1\n\nSee the canonical repo document for full rationale, measurements, constraints, and execution order.\n"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

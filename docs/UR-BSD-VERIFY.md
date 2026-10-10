@@ -715,3 +715,110 @@ the guest.
 35965919427): aarch64 = cut-included build, digest a61671aa…, 24.2
 MiB compressed, LDDCHECK's first aarch64-leg PASS, soft-gate
 calibration run 2 at 30s (run 1: 31s).
+
+## 0.6.0 integration: what is verified, what is still assumed (2026-10-06)
+
+Built by parallel agents in isolated worktrees (each adversarially reviewed,
+re-reviewed after fixes), integrated in PR #123. Evidence below is from real
+runs unless marked ASSUMPTION.
+
+### Verified on CI
+- **Kernel config:** `SMOLFIRE-VM-TSLOG` (includes `SMOLFIRE-VM`, now with
+  `nodevice atkbdc/atkbd/psm/ppi`) builds on releng/15.0: run 37140760240,
+  `buildkernel` 6m38s. First live use of the permanent dispatcher (#122): the
+  pushed request file started the build 14 s later as `github-actions[bot]`;
+  the dispatcher's watch step (15m56s) passes only because the build succeeded.
+- **Full amd64 image** (run 37366841257, branch tip 3a9622d): build step
+  23m40s; size gate PASS, raw 65,536,000 B / compressed 26,148,864 B (0.5.0:
+  65,601,536 / 26,214,400: size unchanged, as expected for non-size changes);
+  `LDDCHECK: PASS` (162-lib index); utilities survivors 9,992 KiB (unchanged);
+  **KVM boot gate `TIME_TO_LOGIN=7s`, VERDICT=pass (0.5.0: 9 s; n=1 each, 1 s
+  resolution, so direction only).**
+- PR CI (run 37140745755): Shellcheck + SHARED-TRIM sync, Nu tests on ubuntu and
+  macOS (33 `nu` steps), release-conf hook test incl. the dev/prod profile test.
+
+### Verified locally on the CI-built qcow2 (TCG, no KVM on the bench host)
+- **A/B, interleaved, identical conditions, login time:** 0.5.0 = 50.2 / 47.6 /
+  48.5 s (mean 48.7); 0.6.0 build = 39.1 / 40.7 / 40.4 s (mean 40.1). Every new
+  boot beat every old one: **-8.6 s (-17.7%) under TCG.** Do not quote TCG
+  seconds as KVM gains: fork-heavy rc steps are inflated under TCG.
+- **In-guest checks:** only keyboard line is `kbd0 at kbdmux0` (no atkbd/psm);
+  0 "devmatch does not exist" messages (0.5.0: 3); `hw.bus.devctl_nomatch_enabled=0`;
+  `devfs_load_rulesets="NO"`; sshd running; DHCP lease 10.0.2.15; the cut files
+  absent; `nologin` and `awk` present.
+
+### Findings from the work streams
+- **Boot-time (TCG A/B on the shipped 0.5.0 image):** `devfs_load_rulesets=NO`
+  (newsyslog->syslogd 8.9/9.0/6.7 -> 3.2/3.9/2.7 s; rulesets only serve jail(8),
+  which the image does not ship: re-enable if FreeBSD-jail is ever added);
+  PS/2 removal (atkbdc->psm probe was 1.4 s of a 2.7 s kernel phase); the 0.5.0
+  image has no `/etc/rc.d/devmatch` yet ships a devd nomatch rule that forks it
+  (3 wasted forks, dhclient REQUIREs devd): `hw.bus.devctl_nomatch_enabled=0`.
+  Not measured: the real KVM delta (needs >=5 KVM boots with finer-than-1 s
+  stamps); aarch64 (rc cut inferred from arch-independent rc.d/devfs only).
+- **Prod profile:** `SMOLFIRE_PROFILE=prod` = key-only root SSH (directives are
+  PREPENDED: sshd is first-value-wins), locked root hash, marker
+  `/etc/smolfire-profile` written last. UNRESOLVED from source whether the
+  release scripts honour `vm_extra_pre_umount`'s return code, so fail-closed
+  does not depend on it: post-build verification of the image + stale-qcow2
+  purge before the build. ASSUMPTION: the FreeBSD-only verify path
+  (qemu-img/mdconfig/gpart/mount) works on a real image; make exports the
+  variables to the hook.
+- **Reassemble:** from releng/15.0 release/Makefile + Makefile.vm: the image is
+  assembled by pkg-installing from `pkgbase-repo` (kernel is a package); no
+  installworld, no obj tree read. Reusable set: `release/pkgbase-repo`,
+  `pkgbase-repo-dir`, `worldstage/usr/bin/uname`. Invalidators pinned: arch,
+  kernconf (+includes), /etc/src.conf hash, overlay hash, package-affecting make
+  vars (the image profile vars are exempt, so dev->prod reassemble is allowed).
+  ASSUMPTIONS for the first real run: the `make -n` output contains
+  `mk-vmimage` or a `cw-<type>-<fs>-` token (the fail-closed guard's positive
+  marker), `make` treats an existing `pkgbase-repo` as up to date,
+  `download-artifact@v4` extracts a single `artifact-ids` entry as expected.
+- **aarch64 one-file microVM: feasibility GO.** The stock 15.0 arm64 GENERIC
+  kernel (kernel.txz sha256 0ebebac2...) wrapped as a booti Image
+  (`LINUX_BOOT_ABI` is already in std.arm64; `kernel.bin` rule already in
+  Makefile.arm64) boots under QEMU virt TCG with no loader/EFI to `mountroot>`
+  and, with a disk root, to `login:`. The ELF cannot be `-kernel`-booted
+  (p_paddr = 0xffff0000...; QEMU passes no DTB to ELF kernels). The cmdline is
+  parsed only with a `FreeBSD:` prefix. `arm_kernel_boothdr.awk` rounds
+  non-2-KiB-aligned `_start/_end` on mawk, gawk and one-true-awk (IEEE doubles at
+  ~2^64); `mk-arm64-image.sh` now rebases offsets so the header is exact on any
+  awk. NOT proven: the arm64 `SMOLFIRE` kernel builds, the embedded MFS mounts
+  as root on arm64 (one `smolfire-a64.yml` run with `enable=true`); Firecracker on
+  aarch64 is source-read only (no hosted runner has /dev/kvm on arm).
+- **Release flow:** qualifying runs must be green with `head_sha` reachable from
+  main (compare API, behind/identical); attestations are produced before any
+  release is created; the owner then removed replace-asset mode (corrections go
+  to a new versioned tag). `attest-build-provenance@4d101475...` (v4.2.2) is
+  unexercised on a runner.
+- **Gates:** aarch64 soft/hard TCG mode wired (`SOFTGATE_MODE`, `SOFTGATE_BUDGET`,
+  default soft/900); recalibration state 2 of 3 same-ISA runs (31 s, 30 s);
+  suggested hard budget max(2x p95, 120 s). riscv64 local firmware chain
+  (qemu 8.2.2 + OpenSBI + u-boot-qemu) reaches U-Boot in <1 s; the riscv64 image
+  has never been booted (its CI artifact is not downloadable through this
+  proxy: numeric-ID redirect).
+- **Coordinator bugs found on main (from the N-slots work, 40f89da), fixed here:**
+  (1) a line-leading `and` in state-dispatching recovery aborted the whole tick;
+  (2) a running sent slot was re-dispatched whenever another slot reached
+  dispatching (sent slots matched only by In-Reply-To, but their request_id is
+  the dispatch's own Message-ID); (3) `MAX_INFLIGHT_VM=1` starved retries forever
+  (retry admission counted the task's own inflight entry). The old
+  `coord-concurrent-pendings-test` failure was a test race (stub fleet reply
+  landing inside the same tick); that test, retry-backoff and the new
+  interaction test were run by NO CI step before. Retry backoff is ON by default
+  (`SMOLFIRE_RETRY_BACKOFF=0` is the only kill switch). OPEN: the S-012 resume
+  path does not bump `attempt_counts` (one extra attempt after a crash; a test
+  asserts the current behaviour: needs a decision).
+- **Test-harness hazards found:** a stub that reads stdin hangs forever when the
+  caller's stdin is an open pipe/terminal (fixed in prod-profile-test); top-level
+  `$env.X = ...` in a test file is a parse error when `run-tests.nu` imports it
+  as a module (use `export-env`); `pgrep -f` patterns can match the very shell
+  that runs them; qemu's stdio pty doubles CRs (`\r\r\n`).
+- **Datadog notebooks / pup:** pup v1.24.0 (2026-10-02) is installable and
+  checksum-verified, but unauthenticated here; OAuth login is browser-only. The
+  notebook (`docs/datadog/smolfire-lower-bound-runtime-notebook.json`) was never
+  published (#76 closed not_planned 2026-09-24); its text is stale (476 ms vs
+  ~240 ms median after the TSC-from-pvclock patch; no 0.5.0 facts).
+  `bin/dd-notebooks.nu` is read-only (allowlisted pup subcommands, redacted
+  errors) and needs `DD_API_KEY`/`DD_APP_KEY`/`DD_SITE` in the environment's
+  settings. ASSUMPTION: pup's `notebooks search/get` JSON shapes (not published).

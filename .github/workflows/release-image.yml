@@ -9,9 +9,10 @@
 # because a failed multi-asset upload can remove published files.
 #
 # Refusal rules (pure logic + tests: bin/release-plan.nu,
-# tests/release-plan-test.nu): every supplied run must have status=completed,
-# conclusion=success, and its head_sha must be an ancestor of (or equal to)
-# main. The tag target must also be on main: GITHUB_TOKEN cannot create tags
+# tests/release-plan-test.nu): every supplied source run must be completed,
+# successful, first-attempt, from an approved workflow and repository, and
+# exactly at the tag target SHA. The target itself must be on main: GITHUB_TOKEN
+# cannot create tags
 # on commits whose workflow files differ from main (docs/UR-BSD-VERIFY.md,
 # "Release publishing: the 403 is a workflows-permission check").
 #
@@ -156,60 +157,90 @@ jobs:
           fi
 
           FIRST_SHA=""
-          check_run() { # label run artifact
-            label="$1"; run="$2"; art="$3"
-            [[ "$run" =~ ^[0-9]+$ ]] || { echo "ERROR: $label run '$run' is not a numeric run ID (tag/run swapped?)"; exit 1; }
+          inspect_run() { # label run
+            label="$1"; run="$2"
+            [[ "$run" =~ ^[0-9]+$ ]] || { echo "ERROR: $label run '$run' is not numeric"; exit 1; }
             gh api "repos/$REPO/actions/runs/$run" > "plan/$label.run.json"
-            SHA=$(jq -r .head_sha "plan/$label.run.json")
+            SHA=$(jq -er .head_sha "plan/$label.run.json")
             gh api "repos/$REPO/compare/main...$SHA" > "plan/$label.compare.json"
-            gh api "repos/$REPO/actions/runs/$run/artifacts" > "plan/$label.artifacts.json"
-            nu bin/release-plan.nu validate-run --label "$label" \
-              --run "plan/$label.run.json" --compare "plan/$label.compare.json" \
-              --artifacts "plan/$label.artifacts.json" --artifact-name "$art"
+            gh api "repos/$REPO/actions/runs/$run/artifacts?per_page=100" > "plan/$label.artifacts.json"
             [ -n "$FIRST_SHA" ] || FIRST_SHA="$SHA"
           }
-          [ -z "$AMD64_RUN" ]   || check_run amd64   "$AMD64_RUN"   smolfire-amd64
-          [ -z "$AARCH64_RUN" ] || check_run aarch64 "$AARCH64_RUN" smolfire-aarch64
-          [ -z "$KERNEL_RUN" ]  || check_run kernel  "$KERNEL_RUN"  "$KERNEL_ARTIFACT"
+          [ -z "$AMD64_RUN" ]   || inspect_run amd64   "$AMD64_RUN"
+          [ -z "$AARCH64_RUN" ] || inspect_run aarch64 "$AARCH64_RUN"
+          [ -z "$KERNEL_RUN" ]  || inspect_run kernel  "$KERNEL_RUN"
 
           TARGET="${TARGET_SHA:-$FIRST_SHA}"
-          if [ "$MODE" = release ]; then
-            # The tag target must itself be reachable from main.
-            printf '{"id":0,"status":"completed","conclusion":"success","head_sha":"%s"}' "$TARGET" > plan/target.run.json
-            gh api "repos/$REPO/compare/main...$TARGET" > plan/target.compare.json
-            nu bin/release-plan.nu validate-run --label target-sha \
-              --run plan/target.run.json --compare plan/target.compare.json
+          # A tag may point to a main ancestor, but every published asset must
+          # originate at that exact target commit, never a different ancestor.
+          printf '{"id":0,"status":"completed","conclusion":"success","head_sha":"%s"}' "$TARGET" > plan/target.run.json
+          gh api "repos/$REPO/compare/main...$TARGET" > plan/target.compare.json
+          nu bin/release-plan.nu validate-run --label target-sha \
+            --run plan/target.run.json --compare plan/target.compare.json
+
+          BUILDER_ID=$(gh api "repos/$REPO/actions/workflows/build-image-hosted.yml" --jq .id)
+          KERNEL_ID=$(gh api "repos/$REPO/actions/workflows/smolfire.yml" --jq .id)
+          validate_source() { # label workflow_id workflow_path artifact_name
+            label="$1"; workflow_id="$2"; workflow_path="$3"; artifact="$4"
+            nu bin/release-plan.nu validate-run --label "$label" \
+              --run "plan/$label.run.json" --compare "plan/$label.compare.json" \
+              --artifacts "plan/$label.artifacts.json" --artifact-name "$artifact" \
+              --workflow-id "$workflow_id" --workflow-path "$workflow_path" \
+              --repository "$REPO" --target-sha "$TARGET" > "plan/$label.selected.json"
+          }
+          [ -z "$AMD64_RUN" ] || validate_source amd64 "$BUILDER_ID" .github/workflows/build-image-hosted.yml smolfire-amd64
+          if [ -n "$AARCH64_RUN" ]; then
+            validate_source aarch64 "$BUILDER_ID" .github/workflows/build-image-hosted.yml smolfire-aarch64
+            # A green soft-gate run may still have verdict=inconclusive.
+            nu bin/release-plan.nu validate-run --label aarch64-gate \
+              --run plan/aarch64.run.json --compare plan/aarch64.compare.json \
+              --artifacts plan/aarch64.artifacts.json --artifact-name aarch64-softgate-evidence \
+              --workflow-id "$BUILDER_ID" --workflow-path .github/workflows/build-image-hosted.yml \
+              --repository "$REPO" --target-sha "$TARGET" > plan/aarch64-gate.selected.json
+          fi
+          if [ -n "$KERNEL_RUN" ]; then
+            [ "$KERNEL_ARTIFACT" = smolfire-kernel ] || { echo "ERROR: kernel artifact must be smolfire-kernel"; exit 1; }
+            validate_source kernel "$KERNEL_ID" .github/workflows/smolfire.yml smolfire-kernel
           fi
           echo "TARGET=$TARGET" >> "$GITHUB_ENV"
-          echo "All supplied runs validated (success, head_sha reachable from main)."
+          echo "All source runs and artifact IDs bound to exact target $TARGET."
+
 
       - name: Fetch and check artifacts
         run: |
           set -euo pipefail
-          fetch() { # label run artifact
-            mkdir -p "dl/$1"
-            gh run download "$2" --repo "$REPO" -n "$3" -D "dl/$1"
+          command -v bsdtar >/dev/null || { echo "ERROR: BSD-licensed bsdtar is required for exact-ID artifact extraction"; exit 1; }
+          fetch() { # label archive_member_basename
+            label="$1"; basename="$2"
+            id=$(jq -er .artifact_id "plan/$label.selected.json")
+            digest=$(jq -er .artifact_digest "plan/$label.selected.json")
+            # Fetch by the validated immutable artifact ID; verify GitHub's
+            # SHA-256 of the ZIP before extracting one member to stdout.
+            gh api "repos/$REPO/actions/artifacts/$id/zip" > "plan/$label.zip"
+            nu bin/release-plan.nu verify-archive --archive "plan/$label.zip" --digest "$digest"
+            bsdtar -tf "plan/$label.zip" > "plan/$label.members"
+            member=$(nu bin/release-plan.nu select-member --list "plan/$label.members" --basename "$basename")
+            mkdir -p "dl/$label"
+            bsdtar -xOf "plan/$label.zip" -- "$member" > "dl/$label/$basename"
+            test -s "dl/$label/$basename"
           }
-          [ -z "$AMD64_RUN" ]   || fetch amd64   "$AMD64_RUN"   smolfire-amd64
-          [ -z "$AARCH64_RUN" ] || fetch aarch64 "$AARCH64_RUN" smolfire-aarch64
-          [ -z "$KERNEL_RUN" ]  || fetch kernel  "$KERNEL_RUN"  "$KERNEL_ARTIFACT"
-
-          # Locate rather than assume: upload-artifact archives relative to the
-          # least common ancestor of its paths.
           stage_qcow2() {
             arch="$1"
-            f=$(find "dl/$arch" -name "smolfire-$arch.qcow2" -type f | head -1)
-            test -n "$f" || { echo "ERROR: $arch artifact has no smolfire-$arch.qcow2"; find "dl/$arch" -type f; exit 1; }
+            fetch "$arch" "smolfire-$arch.qcow2"
             out="assets/$(nu bin/release-plan.nu names --tag "$TAG" --arch "$arch")"
-            mv "$f" "$out"
+            mv "dl/$arch/smolfire-$arch.qcow2" "$out"
             qemu-img check "$out"
             qemu-img info "$out"
           }
           [ -z "$AMD64_RUN" ]   || stage_qcow2 amd64
-          [ -z "$AARCH64_RUN" ] || stage_qcow2 aarch64
+          if [ -n "$AARCH64_RUN" ]; then
+            fetch aarch64-gate gate-verdict.txt
+            nu bin/release-plan.nu validate-gate-verdict --file dl/aarch64-gate/gate-verdict.txt
+            stage_qcow2 aarch64
+          fi
           if [ -n "$KERNEL_RUN" ]; then
-            f=$(find dl/kernel -name smolfire-kernel -type f | head -1)
-            test -n "$f" || { echo "ERROR: kernel artifact has no smolfire-kernel ELF"; find dl/kernel -type f; exit 1; }
+            fetch kernel smolfire-kernel
+            f=dl/kernel/smolfire-kernel
             [ "$(head -c4 "$f" | od -An -c | tr -d ' ')" = '177ELF' ] || { echo "ERROR: smolfire-kernel is not an ELF"; exit 1; }
             mv "$f" "assets/$(nu bin/release-plan.nu names --tag "$TAG" --kernel)"
           fi

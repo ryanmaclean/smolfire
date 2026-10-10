@@ -34,14 +34,20 @@ Dispatch **Release smolfire Image** with `mode = release`:
 | `notes` / `notes_file` | release-notes body, prepended to the generated asset table |
 | `prerelease` | default true |
 
-The workflow refuses, before downloading anything, if any supplied run has
-`status != completed`, `conclusion != success`, a missing/expired artifact,
-or a `head_sha` that is not an ancestor of (or equal to) `main`. It then:
-downloads the artifacts, runs `qemu-img check` on each qcow2 (and an ELF magic
-check on the kernel), writes `SHA256SUMS` plus per-file `.sha256`, creates the
-release with `--target <main commit>`. All staged files (`assets/*`) are
-attested **before** the release is created, so an attestation
-failure leaves nothing public and the job can simply be re-run.
+The workflow refuses, before downloading anything, if any supplied run is
+not completed and successful, is from the wrong repository/event/workflow, is
+not a first attempt (artifact metadata cannot bind a rerun attempt), or has a
+`head_sha` different from the exact release target. The target itself
+must remain on `main`. Each artifact must have exactly one live matching name,
+a stable ID, a SHA-256 archive digest, and the selected run/target association.
+The workflow downloads by artifact ID, verifies the archive digest, and extracts
+only the expected member. An aarch64 source must additionally include
+`aarch64-softgate-evidence` with `verdict=pass` and `exit_code=0`; a green
+soft-mode run with an inconclusive boot is refused. It then runs `qemu-img
+check` on each qcow2 (and an ELF magic check on the kernel), writes
+`SHA256SUMS` plus per-file `.sha256`, and creates the release with `--target
+<main commit>`. All staged files (`assets/*`) are attested **before** the
+release is created, so an attestation failure leaves nothing public.
 
 The workflow must be dispatched from `main` (it refuses any other ref and
 checks out `main`), so the validator that gates the release is main's copy.

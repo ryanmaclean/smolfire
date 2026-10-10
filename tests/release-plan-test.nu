@@ -4,7 +4,7 @@
 #
 #   nu tests/release-plan-test.nu
 
-use ../bin/release-plan.nu [tag-problems run-problems artifact-problems asset-name kernel-asset-name checksums-text digest-change notes-text notes-file-problems fetch-list missing-assets]
+use ../bin/release-plan.nu [tag-problems run-problems artifact-problems source-problems artifact-selection asset-name kernel-asset-name checksums-text digest-change notes-text notes-file-problems fetch-list missing-assets]
 
 def "assert equal" [left: any, right: any, msg?: string] {
     if $left != $right {
@@ -41,6 +41,27 @@ print "test: artifact presence"
 assert equal (artifact-problems $fx.artifacts.amd64 "smolfire-amd64" "amd64") [] "present"
 assert (not (artifact-problems $fx.artifacts.expired "smolfire-amd64" "amd64" | is-empty)) "expired refused"
 assert (not (artifact-problems $fx.artifacts.amd64 "smolfire-aarch64" "aarch64" | is-empty)) "missing refused"
+
+print "test: release source and artifact identity"
+let target_sha = $fx.runs.ok.head_sha
+let builder_path = ".github/workflows/build-image-hosted.yml"
+let repo = "ryanmaclean/smolfire"
+assert equal (source-problems $fx.runs.ok "amd64" 1001 $builder_path $repo $target_sha) [] "approved source at exact target"
+assert (not (source-problems $fx.runs.wrong_workflow "amd64" 1001 $builder_path $repo $target_sha | is-empty)) "unrelated workflow rejected"
+assert (not (source-problems $fx.runs.wrong_repo "amd64" 1001 $builder_path $repo $target_sha | is-empty)) "other head repository rejected"
+assert (not (source-problems $fx.runs.old_tree "amd64" 1001 $builder_path $repo $target_sha | is-empty)) "older main ancestor rejected"
+assert (not (source-problems $fx.runs.rerun "amd64" 1001 $builder_path $repo $target_sha | is-empty)) "rerun artifact has no attempt binding"
+assert (not (source-problems ($fx.runs.ok | merge {run_attempt: null}) "amd64" 1001 $builder_path $repo $target_sha | is-empty)) "missing attempt refused"
+assert (not (source-problems ($fx.runs.ok | merge {event: "pull_request"}) "amd64" 1001 $builder_path $repo $target_sha | is-empty)) "wrong event rejected"
+let selected = (artifact-selection $fx.artifacts.amd64 "smolfire-amd64" "amd64" $fx.runs.ok.id $target_sha)
+assert equal $selected.problems [] "one live artifact from the source run"
+assert equal $selected.artifact_id 7001 "exact artifact ID retained"
+let sel_wrong_run = (artifact-selection $fx.artifacts.wrong_run "smolfire-amd64" "amd64" $fx.runs.ok.id $target_sha)
+assert (not ($sel_wrong_run.problems | is-empty)) "other run's artifact rejected"
+let sel_missing_digest = (artifact-selection $fx.artifacts.missing_digest "smolfire-amd64" "amd64" $fx.runs.ok.id $target_sha)
+assert (not ($sel_missing_digest.problems | is-empty)) "digestless artifact rejected"
+let sel_duplicate = (artifact-selection $fx.artifacts.duplicate "smolfire-amd64" "amd64" $fx.runs.ok.id $target_sha)
+assert (not ($sel_duplicate.problems | is-empty)) "duplicate name rejected"
 
 print "test: asset names"
 assert equal (asset-name "v0.6.0" "amd64") "smolfire-amd64-v0.6.0.qcow2"
@@ -166,10 +187,31 @@ $fx.runs.ok | to json | save ($wd | path join "run.json")
 $fx.compare.ancestor | to json | save ($wd | path join "cmp.json")
 $fx.artifacts.amd64 | to json | save ($wd | path join "art.json")
 $fx.artifacts.expired | to json | save ($wd | path join "exp.json")
-let va = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "art.json") --artifact-name smolfire-amd64 } | complete)
+let va = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "art.json") --artifact-name smolfire-amd64 --workflow-id 1001 --workflow-path $builder_path --repository $repo --target-sha $target_sha } | complete)
 assert equal $va.exit_code 0 "artifacts present"
-let vb = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "exp.json") --artifact-name smolfire-amd64 } | complete)
+let vb = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "exp.json") --artifact-name smolfire-amd64 --workflow-id 1001 --workflow-path $builder_path --repository $repo --target-sha $target_sha } | complete)
 assert equal $vb.exit_code 1 "expired artifact refused via CLI"
+print "test: archive digest, member selection and aarch64 verdict"
+let archive = ($wd | path join "archive.zip")
+"abc" | save $archive
+let vc = (do { ^nu $rp verify-archive --archive $archive --digest "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" } | complete)
+assert equal $vc.exit_code 0 "exact archive digest accepted"
+let bad_vc = (do { ^nu $rp verify-archive --archive $archive --digest "sha256:0000000000000000000000000000000000000000000000000000000000000000" } | complete)
+assert equal $bad_vc.exit_code 1 "changed archive digest rejected"
+let members = ($wd | path join "members.txt")
+"nested/smolfire-amd64.qcow2\n" | save -f $members
+let sm = (do { ^nu $rp select-member --list $members --basename smolfire-amd64.qcow2 } | complete)
+assert equal ($sm.stdout | str trim) "nested/smolfire-amd64.qcow2" "one safe member selected"
+"nested/smolfire-amd64.qcow2\nother/smolfire-amd64.qcow2\n" | save -f $members
+let dup = (do { ^nu $rp select-member --list $members --basename smolfire-amd64.qcow2 } | complete)
+assert equal $dup.exit_code 1 "ambiguous archive member rejected"
+let gate = ($wd | path join "gate-verdict.txt")
+"verdict=pass\nexit_code=0\n" | save -f $gate
+let gate_ok = (do { ^nu $rp validate-gate-verdict --file $gate } | complete)
+assert equal $gate_ok.exit_code 0 "aarch64 explicit pass accepted"
+"verdict=inconclusive\nexit_code=3\n" | save -f $gate
+let gate_bad = (do { ^nu $rp validate-gate-verdict --file $gate } | complete)
+assert equal $gate_bad.exit_code 1 "green soft-gate inconclusive refused"
 rm -rf $wd $emptyd
 
 print "test: workflow structure (release-flow invariants)"

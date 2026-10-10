@@ -85,6 +85,46 @@ export def artifact-problems [artifacts: record, name: string, label: string]: n
     } else { [] }
 }
 
+# Release source must match the approved workflow and exact tag tree.
+export def source-problems [
+    run: record, label: string, workflow_id: int, workflow_path: string,
+    repository: string, target_sha: string,
+]: nothing -> list<string> {
+    mut errs = []
+    if (($run | get -o workflow_id) != $workflow_id) { $errs = ($errs | append $"($label): wrong workflow_id") }
+    let run_path = ($run | get -o path | default "" | split row "@" | first)
+    if $run_path != $workflow_path { $errs = ($errs | append $"($label): wrong workflow path '($run_path)'") }
+    if (($run | get -o event | default "") != "workflow_dispatch") { $errs = ($errs | append $"($label): source event must be workflow_dispatch") }
+    if (($run | get -o head_repository.full_name | default "") != $repository) { $errs = ($errs | append $"($label): wrong head repository") }
+    if (($run | get -o head_sha | default "") != $target_sha) { $errs = ($errs | append $"($label): source head_sha differs from release target") }
+    # GitHub artifact metadata has a run ID but no attempt ID; a rerun can
+    # expose an artifact uploaded by an earlier, failed attempt of that run.
+    if (($run | get -o run_attempt) != 1) { $errs = ($errs | append $"($label): rerun artifacts cannot be bound to one validated attempt") }
+    $errs
+}
+
+# GitHub's artifact digest covers the ZIP archive, not the extracted image.
+export def artifact-selection [
+    artifacts: record, name: string, label: string, run_id: int, target_sha: string,
+]: nothing -> record {
+    let all = ($artifacts | get -o artifacts | default [])
+    let hits = ($all | where {|a| ($a | get -o name | default "") == $name and (($a | get -o expired | default true) == false) })
+    mut errs = []
+    if (($artifacts | get -o total_count) != ($all | length)) { $errs = ($errs | append $"($label): artifact listing truncated or lacks total_count") }
+    if ($hits | length) != 1 {
+        $errs = ($errs | append $"($label): expected exactly one live artifact '($name)', found ($hits | length)")
+        return {problems: $errs, artifact_id: null, artifact_digest: null}
+    }
+    let a = ($hits | first)
+    let id = ($a | get -o id)
+    let digest = ($a | get -o digest | default "")
+    if $id == null or $id <= 0 { $errs = ($errs | append $"($label): artifact has no positive ID") }
+    if not ($digest =~ '^sha256:[0-9a-f]{64}$') { $errs = ($errs | append $"($label): artifact has no SHA-256 archive digest") }
+    if (($a | get -o workflow_run.id) != $run_id) { $errs = ($errs | append $"($label): artifact belongs to a different run") }
+    if (($a | get -o workflow_run.head_sha | default "") != $target_sha) { $errs = ($errs | append $"($label): artifact is from a different tree") }
+    {problems: $errs, artifact_id: $id, artifact_digest: $digest}
+}
+
 export def asset-name [tag: string, arch: string]: nothing -> string {
     $"smolfire-($arch)-($tag).qcow2"
 }
@@ -162,15 +202,61 @@ def "main validate-tag" [tag: string] {
 def "main validate-run" [
     --run: string, --compare: string, --label: string = "run",
     --artifacts: string, --artifact-name: string,
+    --workflow-id: int, --workflow-path: string, --repository: string,
+    --target-sha: string,
 ] {
     let r = (open --raw $run | from json)
     let c = (open --raw $compare | from json)
     mut p = (run-problems $r $c $label)
-    if $artifacts != null and $artifact_name != null {
-        $p = ($p | append (artifact-problems (open --raw $artifacts | from json) $artifact_name $label))
+    let source_args = [$workflow_id $workflow_path $repository $target_sha]
+    if ($source_args | any {|v| $v != null }) {
+        if ($source_args | any {|v| $v == null }) {
+            $p = ($p | append $"($label): source binding arguments are incomplete")
+        } else {
+            $p = ($p | append (source-problems $r $label $workflow_id $workflow_path $repository $target_sha))
+        }
+    }
+    mut selected = {problems: [], artifact_id: null, artifact_digest: null}
+    if $artifacts != null or $artifact_name != null {
+        if $artifacts == null or $artifact_name == null or $target_sha == null {
+            $p = ($p | append $"($label): artifact binding arguments are incomplete")
+        } else {
+            $selected = (artifact-selection (open --raw $artifacts | from json) $artifact_name $label $r.id $target_sha)
+            $p = ($p | append $selected.problems)
+        }
     }
     if ($p | is-not-empty) { refuse $p }
-    {id: $r.id, head_sha: $r.head_sha} | to json -r | print
+    {id: $r.id, head_sha: $r.head_sha, artifact_id: $selected.artifact_id, artifact_digest: $selected.artifact_digest} | to json -r | print
+}
+
+def "main verify-archive" [--archive: string, --digest: string] {
+    if not ($digest =~ '^sha256:[0-9a-f]{64}$') { refuse ["invalid expected archive digest"] }
+    let got = $"sha256:(open --raw $archive | hash sha256)"
+    if $got != $digest { refuse ["downloaded artifact archive digest mismatch"] }
+    print "ok"
+}
+
+# bsdtar lists members before extraction; emit exactly one safe name for -xO.
+def "main select-member" [--list: string, --basename: string] {
+    let names = (open --raw $list | lines)
+    let hits = ($names | where {|n|
+        ($n =~ '^[A-Za-z0-9._/-]+$')
+        and (not ($n | str starts-with "/"))
+        and (not ($n | str starts-with "-"))
+        and (not ($n | split row "/" | any {|part| $part == ".." or $part == "" }))
+        and (($n | path basename) == $basename)
+    })
+    if ($hits | length) != 1 { refuse [$"archive must contain exactly one safe '($basename)' member"] }
+    print ($hits | first)
+}
+
+def "main validate-gate-verdict" [--file: string] {
+    let rows = (open --raw $file | lines)
+    let verdict = ($rows | where {|l| $l | str starts-with "verdict=" })
+    let code = ($rows | where {|l| $l | str starts-with "exit_code=" })
+    if ($verdict | length) != 1 or ($code | length) != 1 { refuse ["aarch64 gate evidence has missing or duplicate verdict/exit_code"] }
+    if ($verdict | first) != "verdict=pass" or ($code | first) != "exit_code=0" { refuse ["aarch64 boot gate did not record an unambiguous pass"] }
+    print "ok"
 }
 
 def "main names" [--tag: string, --arch: string, --kernel] {

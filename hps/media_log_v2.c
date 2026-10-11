@@ -73,7 +73,8 @@ int ml2_exact_retry(const struct ml2_record *record,
 int ml2_checked_slot_offset(uint64_t index, uint64_t stride,
                             uint64_t maximum_offset, uint64_t *out)
 {
-    if (out == NULL || stride == 0 || index > maximum_offset / stride)
+    if (out == NULL || stride == 0 || maximum_offset < ML2_RECORD_BYTES - 1u ||
+        index > (maximum_offset - (ML2_RECORD_BYTES - 1u)) / stride)
         return -1;
     *out = index * stride;
     return 0;

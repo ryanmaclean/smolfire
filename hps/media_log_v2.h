@@ -91,7 +91,11 @@ struct ml2_scan_result {
 void ml2_scan(const struct ml2_scan_config *config, ml2_read_slot_fn read_slot,
               void *context, struct ml2_scan_result *out);
 
-/* Helper for a backend reader: check index*stride against its off_t ceiling. */
+/*
+ * Bound every byte of the fixed record against an inclusive offset ceiling.
+ * On failure, leave *out unchanged. This proves neither extent completeness
+ * nor physical slot isolation; stride below 56 remains caller policy.
+ */
 int ml2_checked_slot_offset(uint64_t index, uint64_t stride,
                             uint64_t maximum_offset, uint64_t *out);
 

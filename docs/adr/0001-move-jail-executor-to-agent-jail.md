@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed. Migration planned, not executed, in this pass. Tracking issue:
-`ryanmaclean/agent-jail#2`.
+Accepted ownership decision. Agent-jail PR #3 and the paired smolfire adapter
+are still draft migration work; implementation is not complete until both land
+with a pinned agent-jail install artifact. Tracking issue: `ryanmaclean/agent-jail#2`.
 
 ## Context
 
@@ -16,12 +17,12 @@ rule:
 `canonical_for = ["bsd-jail-agent-isolation"]`, and its `AGENTS.md` lists
 "jail isolation" and "jail lifecycle" under **Owns**.
 
-In practice, the jail executor was implemented and lives in this repo
+Before the paired migration, the jail executor was implemented in this repo
 (`smolfire`):
 
 - `bin/jail-execute.nu` — `run-jail-task`, sibling of `bin/vm-execute.nu`,
   same `{verdict, boot_sec, outputs, error?}` contract
-- `tests/jail-execute-test.nu` — 29 host-independent tests, stubs the
+- `tests/jail-execute-test.nu` — host-independent tests, stubs the
   FreeBSD tools on `PATH`
 - `docs/JAIL-EXECUTOR.md` — contract, backends (`--base` nullfs,
   `--zfs-snapshot` clone, `--image` ocijail), hardening (per-task salted
@@ -58,7 +59,7 @@ executor to `agent-jail`; smolfire keeps a thin adapter.**
   executor and translates the result into smolfire's existing dispatch
   envelope and state-file shape
   (`task_executors.<task_id> = {executor, network, request_id}`).
-- The 29 host-independent tests in `tests/jail-execute-test.nu` move to
+- The lifecycle tests in `tests/jail-execute-test.nu` move to
   `agent-jail` (same FreeBSD-tool stubbing approach); smolfire keeps a
   smaller test that the adapter forwards/translates correctly.
 - `docs/JAIL-EXECUTOR.md` becomes canonical in `agent-jail`; smolfire's copy
@@ -69,9 +70,9 @@ executor to `agent-jail`; smolfire keeps a thin adapter.**
   re-introduce a second jail-lifecycle implementation.
 
 Full migration shape and sequencing are tracked in
-`ryanmaclean/agent-jail#2`, not executed here — this is a documented
-decision plus registry update, matching the task constraint that no code
-moves between repos in this pass (multi-day migration).
+`ryanmaclean/agent-jail#2`. The paired source candidate removes smolfire's
+lifecycle copy, but the installed artifact and native acceptance remain open;
+the ownership transfer is not complete merely because these files change.
 
 ## Alternatives considered
 
@@ -89,13 +90,14 @@ canonically owns.
   the implementation its charter already claims; smolfire's coordinator
   stays focused on routing/policy (dispatch, retries, executor selection)
   rather than jail mechanics.
-- Cost: a real migration (vendor the code, port 29 tests, wire the adapter,
-  update docs) is required before this ADR's decision is fully realized;
-  until then this document and the registry update are the load-bearing
-  artifacts, and the existing `bin/jail-execute.nu` keeps working unchanged.
-- Follow-up: `ryanmaclean/agent-jail#2` tracks the implementation migration.
-  A follow-up smolfire PR will swap `bin/jail-execute.nu` for the thin
-  adapter once `agent-jail`'s copy is verified equivalent.
+- Cost: a coordinated first-party source transfer, lifecycle-test ownership,
+  smolfire adapter, pinned install artifact, and native verification are
+  required before this ADR's decision is fully realized. The paired smolfire
+  change deletes `bin/jail-execute.nu` and adds `bin/coord-jail-dispatch.nu`;
+  neither PR should be merged until both are reviewed against exact heads.
+- Follow-up: `ryanmaclean/agent-jail#2` tracks the migration. Once the
+  artifact pin, native gate, and paired merge complete, mark this ADR
+  Implemented and remove the draft caveat above.
 
 ## References
 

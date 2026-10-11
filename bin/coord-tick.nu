@@ -35,14 +35,14 @@ const STATE_VERSION = "1"
 
 # Task executors. `vm` (default) keeps today's dispatch path unchanged;
 # `jail` (experimental, FreeBSD hosts only) runs the request's commands in an
-# ephemeral jail via bin/jail-execute.nu. `fleet` (opt-in, only when
+# ephemeral jail via bin/coord-jail-dispatch.nu and agent-jail. `fleet` (opt-in, only when
 # SMOLFIRE_FLEET_ENABLE=1) runs them on a remote fleet worker via
 # bin/coord-fleet-dispatch.nu. Selected per request by a TOML
 # `executor = "vm"|"jail"|"fleet"` field, else SMOLFIRE_EXECUTOR, else the
 # recipient role (`fleet-*` → fleet when enabled), else "vm".
 const EXECUTORS = ["vm", "jail"]
 const DEFAULT_EXECUTOR = "vm"
-const JAIL_EXECUTOR_SCRIPT = path self jail-execute.nu
+const JAIL_EXECUTOR_SCRIPT = path self coord-jail-dispatch.nu
 const FLEET_EXECUTOR_SCRIPT = path self coord-fleet-dispatch.nu
 
 # Max-inflight caps (gastown parity; Jev 0.88 decision: in-flight work is
@@ -257,6 +257,46 @@ def clear-slots-by-task [slots: record, task_id: string] {
 
 def update-slot-field [slots: record, executor: string, idx: int, field: string, value: string] {
     set-slot $slots $executor $idx ((($slots | get $executor) | get $idx) | upsert $field $value)
+}
+
+# The current dispatch survives waiting's slot clear and is changed only when
+# a new attempt is actually sent. A live legacy slot is a migration fallback.
+def task-dispatch-id [state: record, task_id: string] {
+    let info = $state.task_executors | get -o $task_id | default {}
+    let pinned = $info | get -o current_dispatch_id | default ""
+    if $pinned != "" { return $pinned }
+    let live = (slot-entries (get-pending-slots $state)) | where {|e|
+        $e.slot.task_id == $task_id and $e.slot.request_id != "" and $e.slot.dispatched_at != ""
+    }
+    if ($live | length) == 1 { ($live | first).slot.request_id } else { "" }
+}
+
+def set-task-dispatch-id [state: record, task_id: string, dispatch_id: string] {
+    let raw = $state.task_executors | get -o $task_id | default {}
+    let info = if ($raw | describe | str starts-with "record") { $raw } else { {} }
+    $state | update task_executors ($state.task_executors | upsert $task_id ($info | upsert current_dispatch_id $dispatch_id))
+}
+
+# A reply may change state only for the one issued dispatch currently owned by
+# this task. This also rejects duplicate Message-IDs and a reply after HALT.
+def reply-is-current [state: record, messages: list, msg: record, task_id: string] {
+    if $task_id in $state.halted_tasks { return false }
+    let reply_id = msg-id $msg
+    let in_reply_to = $msg.headers | get "In-Reply-To"? | default ""
+    let expected = task-dispatch-id $state $task_id
+    if $reply_id == "" or $expected == "" or $in_reply_to != $expected { return false }
+    let same_id = $messages | where {|m| (msg-id $m) == $reply_id }
+    if ($same_id | length) != 1 { return false }
+    let issued = $messages | where {|m|
+        let body = extract-toml $m
+        (msg-id $m) == $expected
+        and ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
+        and ($m.headers | get "To"? | default "") != "coordinator@smolfire.local"
+        and not ("_parse_error" in $body)
+        and ($body | get -o task_id | default "") == $task_id
+        and ($body | get -o action | default "") == "dispatch"
+    }
+    ($issued | length) == 1
 }
 
 def sync-legacy-mirror [state: record] {
@@ -919,7 +959,7 @@ def record-worker-failure [state: record, executor: string] {
 # the D2 table (retry while attempts < 3, else the standard escalation —
 # the budget owns the outcome, never the reap). X-Dead-Worker-Reap marks the
 # provenance for operators grepping the spool.
-def append-dead-reap-fail [spool: string, task_id: string, worker: string, age: int, threshold: int, tick: int] {
+def append-dead-reap-fail [spool: string, task_id: string, dispatch_id: string, worker: string, age: int, threshold: int, tick: int] {
     let dir = $spool | path dirname
     if not ($dir | path exists) { mkdir $dir }
     let ts = date now | format date "%Y%m%d%H%M%S"
@@ -928,6 +968,7 @@ def append-dead-reap-fail [spool: string, task_id: string, worker: string, age: 
 From: coordinator@smolfire.local
 To: coordinator@smolfire.local
 Message-ID: ($synth_id)
+In-Reply-To: ($dispatch_id)
 X-Dead-Worker-Reap: ($worker)
 Content-Type: text/toml; charset=utf-8
 
@@ -942,7 +983,7 @@ failure_reason = \"dead worker ($worker): no successful round trip for ($age) ti
 # FSM state, before the HALT check — same placement as prune-inflight, which
 # runs first so halted / budget-exhausted / stale slots are already owned
 # elsewhere and never reach the reap).
-def sweep-dead-workers [state: record, spool: string] {
+def sweep-dead-workers [state: record, spool: string, root: string] {
     let table = get-workers $state
     if ($table | columns | is-empty) {
         return $state
@@ -973,12 +1014,27 @@ def sweep-dead-workers [state: record, spool: string] {
         if $is_dead {
             # Already dead: no repeat event, but still reap promptly.
             if ($eligible | is-empty) { continue }
+            mut reaped = []
+            mut quarantined = []
             for t in $eligible {
+                let dispatch_id = task-dispatch-id $next_state $t
+                if $dispatch_id == "" {
+                    let attempts = $next_state.attempt_counts | get -o $t | default 0
+                    let _ = write-halt-marker $root $t "worker-reap-uncorrelated" "unknown" "" $attempts
+                    append-halt-message $spool $t "worker-reap-uncorrelated" "unknown" $attempts ["inspect", "edit", "abort"]
+                    $next_slots = if $t in ($next_slots | columns) { $next_slots | reject $t } else { $next_slots }
+                    $next_pend = clear-slots-by-task $next_pend $t
+                    $next_state = set-task-dispatch-id ($next_state | update halted_tasks ($next_state.halted_tasks | append $t)) $t ""
+                    $quarantined = $quarantined | append $t
+                    log-event "worker_reap_uncorrelated" {task_id: $t, worker: $worker, resolution: "halt"}
+                    continue
+                }
                 $next_slots = if $t in ($next_slots | columns) { $next_slots | reject $t } else { $next_slots }
                 $next_pend = clear-slots-by-task $next_pend $t
-                append-dead-reap-fail $spool $t $worker $age $threshold $state.tick_count
+                append-dead-reap-fail $spool $t $dispatch_id $worker $age $threshold $state.tick_count
+                $reaped = $reaped | append $t
             }
-            log-event "worker_tasks_reaped" {worker: $worker, tasks: $eligible}
+            log-event "worker_tasks_reaped" {worker: $worker, tasks: $reaped, quarantined_tasks: $quarantined}
             continue
         }
         # Idle workers (no owned inflight) are never dead.
@@ -988,17 +1044,33 @@ def sweep-dead-workers [state: record, spool: string] {
             | upsert last_seen_tick $last
             | upsert consecutive_failures (try { $entry | get consecutive_failures | into int } catch { 0 })
             | upsert dead true)
+        mut reaped = []
+        mut quarantined = []
         for t in $eligible {
+            let dispatch_id = task-dispatch-id $next_state $t
+            if $dispatch_id == "" {
+                let attempts = $next_state.attempt_counts | get -o $t | default 0
+                let _ = write-halt-marker $root $t "worker-reap-uncorrelated" "unknown" "" $attempts
+                append-halt-message $spool $t "worker-reap-uncorrelated" "unknown" $attempts ["inspect", "edit", "abort"]
+                $next_slots = if $t in ($next_slots | columns) { $next_slots | reject $t } else { $next_slots }
+                $next_pend = clear-slots-by-task $next_pend $t
+                $next_state = set-task-dispatch-id ($next_state | update halted_tasks ($next_state.halted_tasks | append $t)) $t ""
+                $quarantined = $quarantined | append $t
+                log-event "worker_reap_uncorrelated" {task_id: $t, worker: $worker, resolution: "halt"}
+                continue
+            }
             $next_slots = if $t in ($next_slots | columns) { $next_slots | reject $t } else { $next_slots }
             $next_pend = clear-slots-by-task $next_pend $t
-            append-dead-reap-fail $spool $t $worker $age $threshold $state.tick_count
+            append-dead-reap-fail $spool $t $dispatch_id $worker $age $threshold $state.tick_count
+            $reaped = $reaped | append $t
         }
         log-event "worker_marked_dead" {
             worker: $worker
             last_seen_tick: $last
             age_ticks: $age
             threshold_ticks: $threshold
-            reaped_tasks: $eligible
+            reaped_tasks: $reaped
+            quarantined_tasks: $quarantined
         }
     }
     $next_state = set-inflight $next_state $next_slots
@@ -1006,7 +1078,7 @@ def sweep-dead-workers [state: record, spool: string] {
     set-workers $next_state $next_table
 }
 
-# Launch bin/jail-execute.nu detached for a dispatched task (executor = jail).
+# Launch smolfire's thin agent-jail dispatch adapter for a jail task.
 # Values reach the child as positional argv, never interpolated into the sh
 # script, so task ids / Message-IDs cannot inject shell.
 def spawn-jail-executor [task_id: string, dispatch_id: string, request_id: string, spool_path: string, root: string] {
@@ -1167,6 +1239,9 @@ def process-resume-actions [state: record, root: string, spool: string, event_pr
             $next_state = ($next_state
                 | update halted_tasks ($next_state.halted_tasks | where {|t| $t != $task})
                 | update fsm_state "idle")
+            # Also revoke a persisted pre-upgrade HALT identity; a resume
+            # alone never authorizes a reply from the old dispatch.
+            $next_state = set-task-dispatch-id $next_state $task ""
         } else {
             log-event $"($event_prefix)_abort" {task_id: $task}
         }
@@ -1278,6 +1353,13 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
             }
 
             if $direction == "reply" {
+                let in_reply_to = $msg.headers | get "In-Reply-To"? | default ""
+                if not (reply-is-current $current_state $messages $msg $task_id) {
+                    log-event "harvest_stale_reply" {message_id: $id, task_id: $task_id, in_reply_to: $in_reply_to, current_dispatch_id: (task-dispatch-id $current_state $task_id)}
+                    $new_seen = $new_seen | append $id
+                    $current_state = $current_state | update seen_ids $new_seen
+                    continue
+                }
                 # Get current attempt count for this task
                 let attempt_n = $current_state.attempt_counts | get -o $task_id | default 0
 
@@ -1354,6 +1436,37 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         # slot like new requests. At cap the retry is DEFERRED:
                         # no verdict (the decision is postponed, not made), no
                         # seen_ids append — the reply is re-harvested next tick.
+                        # The answered attempt no longer consumes its own cap.
+                        # Release only a pending slot for this exact dispatch;
+                        # a distinct same-task slot still trips the guard below.
+                        let completed_id = $msg.headers | get "In-Reply-To"? | default ""
+                        # A timeout/dead-reap reply is coordinator-authored.
+                        # Its retry must go to the issued dispatch recipient,
+                        # never back to the coordinator's own address.
+                        let retry_to = if $from_addr == "coordinator@smolfire.local" {
+                            let prior = $messages | where {|m|
+                                (msg-id $m) == $completed_id
+                                and ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
+                                and ((extract-toml $m) | get -o action | default "") == "dispatch"
+                            } | first 1
+                            if ($prior | is-empty) { "" } else { ($prior | first).headers | get "To"? | default "" }
+                        } else { $from_addr }
+                        if $retry_to == "" or $retry_to == "coordinator@smolfire.local" {
+                            log-event "retry_target_missing" {task_id: $task_id, message_id: $id, dispatch_id: $completed_id}
+                            $deferred_count = $deferred_count + 1
+                            $deferred_task = $task_id
+                            $deferred_msgid = $id
+                            continue
+                        }
+                        mut released_pend = get-pending-slots $current_state
+                        for entry in (slot-entries $released_pend) {
+                            if $entry.slot.task_id == $task_id and $entry.slot.request_id == $completed_id {
+                                $released_pend = clear-slot $released_pend $entry.executor $entry.index
+                            }
+                        }
+                        let live_table = get-inflight $current_state
+                        let released_inflight = if $task_id in ($live_table | columns) { $live_table | reject $task_id } else { $live_table }
+                        $current_state = sync-legacy-mirror (set-pending-slots (set-inflight $current_state $released_inflight) $released_pend)
                         let retry_exec = $current_state.task_executors | get -o $task_id | get -o executor | default $DEFAULT_EXECUTOR
                         let retry_exec = if $retry_exec in $SLOT_ORDER { $retry_exec } else { $DEFAULT_EXECUTOR }
                         let gate = inflight-status (get-inflight $current_state) $retry_exec
@@ -1396,9 +1509,10 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         }
                         log-verdict $category $decision "dispatching" --task-id $task_id --attempt $attempt_n --message-id $id
                         $new_seen = $new_seen | append $id
-                        $current_state = sync-legacy-mirror (set-pending-slots $current_state (set-slot (get-pending-slots $current_state) $retry_exec $free_idx {task_id: $task_id, request_id: $id, to_addr: $from_addr, dispatched_at: ""})
+                        $current_state = sync-legacy-mirror (set-pending-slots $current_state (set-slot (get-pending-slots $current_state) $retry_exec $free_idx {task_id: $task_id, request_id: $id, to_addr: $retry_to, dispatched_at: ""})
                             | update seen_ids $new_seen)
-                        $targets = $targets | append {task_id: $task_id, trigger_id: $id, to_addr: $from_addr, executor: $retry_exec, reason: "retry", verdict: $category, attempt: $attempt_n}
+                        $current_state = set-task-dispatch-id $current_state $task_id ""
+                        $targets = $targets | append {task_id: $task_id, trigger_id: $id, to_addr: $retry_to, executor: $retry_exec, reason: "retry", verdict: $category, attempt: $attempt_n}
                         continue
                     }
                     _ => {
@@ -1420,6 +1534,9 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         let pend = clear-slots-by-task (get-pending-slots $current_state) $task_id
                         $current_state = sync-legacy-mirror (set-pending-slots (set-inflight $current_state $cleared_slots
                             | update halted_tasks ($current_state.halted_tasks | append $task_id)) $pend)
+                        # HALT revokes this attempt. Resume must issue a fresh
+                        # dispatch before any later reply can settle the task.
+                        $current_state = set-task-dispatch-id $current_state $task_id ""
                         $new_seen = $new_seen | append $id
                         $current_state = $current_state | update seen_ids $new_seen
                         $halted_any = true
@@ -1600,9 +1717,19 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
     mut matched_slot = empty-slot
     mut matched_reply_id = ""
     for entry in $occupied {
+        let candidate_state = set-task-dispatch-id $cur ($entry.slot | get task_id) ($entry.slot | get request_id)
         let hits = $messages | where {|m|
             let in_reply_to = $m.headers | get "In-Reply-To"? | default ""
+            let reply_id = msg-id $m
+            let body = extract-toml $m
+            let same_id = $messages | where {|other| (msg-id $other) == $reply_id }
             $in_reply_to == ($entry.slot | get request_id)
+            and $reply_id != "" and not ($reply_id in $cur.seen_ids)
+            and ($same_id | length) == 1
+            and ($m.headers | get "To"? | default "") == "coordinator@smolfire.local"
+            and not ("_parse_error" in $body)
+            and ($body | get -o task_id | default "") == ($entry.slot | get task_id)
+            and (reply-is-current $candidate_state $messages $m ($entry.slot | get task_id))
         } | first 1
         if ($hits | length) > 0 {
             $matched_executor = $entry.executor
@@ -1623,6 +1750,7 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
         # liveness regardless of verdict (harvest still classifies quality) —
         # piggyback heartbeat on the matched slot's task, no new traffic.
         $cur = record-heartbeat $cur (resolve-task-executor $cur ($matched_slot | get task_id)) ($cur.tick_count)
+        $cur = set-task-dispatch-id $cur ($matched_slot | get task_id) ($matched_slot | get request_id)
         let cleared = clear-slot (get-pending-slots $cur) $matched_executor $matched_index
         $cur = sync-legacy-mirror (set-pending-slots $cur $cleared | update fsm_state "harvesting")
         tick $cur $spool $root ($remaining - 1)
@@ -1630,9 +1758,10 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
         log-event "waiting_no_reply" {pending_request_id: $cur.pending_request_id}
 
         # Per-slot timeout: treat no-reply > 300s as a fail (triggers D2 retry
-        # table on next harvest). Timed-out slots keep their task/request so
-        # the retry reuses the same slot; dispatched_at is blanked so the
-        # injection fires once.
+        # table on next harvest). Release the old slot after appending the
+        # synthetic reply; retaining task_id would make retry defer forever.
+        # A crash before the state save leaves the old waiting slot and the
+        # appended reply, which waiting can match and release on the next tick.
         mut timed_out = []
         mut slots2 = get-pending-slots $cur
         for entry in $occupied {
@@ -1660,7 +1789,8 @@ verdict = \"fail\"
 failure_reason = \"timeout: no reply within 300s\"
 "
                     $synth_msg | save --append $spool
-                    $slots2 = update-slot-field $slots2 $entry.executor $entry.index "dispatched_at" ""
+                    $cur = set-task-dispatch-id $cur ($entry.slot | get task_id) ($entry.slot | get request_id)
+                    $slots2 = clear-slot $slots2 $entry.executor $entry.index
                     $timed_out = $timed_out | append $entry
                 }
             }
@@ -1795,6 +1925,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
             }
             log-transition "dispatching" "waiting" "resume-inflight-dispatch" --task-id $task_id --message-id $inflight_id
             $cur = sync-legacy-mirror (set-pending-slots $cur (set-slot (get-pending-slots $cur) $ex $idx ($sl | upsert request_id $inflight_id | upsert dispatched_at (now-str))))
+            $cur = set-task-dispatch-id $cur $task_id $inflight_id
             continue
         }
 
@@ -1877,6 +2008,7 @@ executor = \"($exec_info.executor)\"
         )
         $cur = set-pending-slots $cur (set-slot (get-pending-slots $cur) $ex $idx {task_id: $task_id, request_id: $msg_id, to_addr: $to_addr, dispatched_at: (now-str)})
         $cur = sync-legacy-mirror $cur
+        $cur = set-task-dispatch-id $cur $task_id $msg_id
     }
 
     if (occupied-slot-count (get-pending-slots $cur)) > 0 {
@@ -1937,7 +2069,7 @@ def tick [state: record, spool: string, root: string, remaining: int] {
     # every FSM state, before the HALT check, so a halted coordinator still
     # reclaims rather than leaking caps across the pause. Prune runs first so
     # halted/exhausted/stale slots are owned elsewhere, never reaped.
-    let swept_state = sweep-dead-workers (prune-inflight $resumed_state) $spool
+    let swept_state = sweep-dead-workers (prune-inflight $resumed_state) $spool $root
 
     # O(1) HALT check before every state dispatch — spec §13.
     if (halt-present $root) {

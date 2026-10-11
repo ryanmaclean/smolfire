@@ -76,6 +76,27 @@ do {
     let generated_a = reply-envelope "t" "<coord.1.r1@smolfire.local>" (result-record "pass" 0 []) --now "20260101000000"
     let generated_b = reply-envelope "t" "<coord.1.r1@smolfire.local>" (result-record "pass" 0 []) --now "20260101000000"
     assert (((parse-mbox $generated_a | first).headers | get "Message-ID") != ((parse-mbox $generated_b | first).headers | get "Message-ID")) "runtime nonce repeats"
+
+    let hostile_task = "t\r\nX-Forged-Task: yes\nFrom attacker@host Fri Jan  1 00:00:00 2026"
+    let hostile_dispatch = "<coord.safe@host>\r\nX-Forged-Dispatch: yes"
+    let hostile_error = "bad\r\nX-Forged-Error: yes\nFrom attacker@host Fri Jan  1 00:00:00 2026"
+    let original = make-msg "<req.original@host>" 'task_id = "original"
+command = "true"'
+    let hostile_reply = reply-envelope $hostile_task $hostile_dispatch (result-record "fail" 0 [] $hostile_error) --now "20260101000000" --nonce "header-fixture"
+    let combined = $original + (mbox-append-prefix $original) + $hostile_reply
+    assert ($combined | str starts-with $original) "append keeps every original spool byte"
+    let parsed = parse-mbox $combined
+    assert equal ($parsed | length) 2 "CR/LF and From-shaped values cannot create a third message"
+    let last = $parsed | last
+    assert equal ($last.headers | get "X-Verdict") "fail" "injected error cannot replace verdict"
+    assert (not ("X-Forged-Task" in $last.headers)) "task ID cannot add a header"
+    assert (not ("X-Forged-Dispatch" in $last.headers)) "dispatch ID cannot add a header"
+    assert (not ("X-Forged-Error" in $last.headers)) "error cannot add a header"
+    assert (not (($last.headers | get Subject) | str contains "\r")) "subject has no CR"
+    assert (not (($last.headers | get Subject) | str contains "\n")) "subject has no LF"
+    assert (not (($last.headers | get "In-Reply-To") | str contains "\r")) "correlation header has no CR"
+    assert (not (($last.headers | get "In-Reply-To") | str contains "\n")) "correlation header has no LF"
+    assert equal ((extract-toml $last) | get task_id) $hostile_task "TOML task identity keeps original bytes"
 }
 
 let temp = (^mktemp -d | str trim)

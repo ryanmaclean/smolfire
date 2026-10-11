@@ -36,6 +36,10 @@ export def mbox-append-prefix [existing: string] {
     }
 }
 
+def header-value [value: string] {
+    $value | str replace --all "\r" " " | str replace --all "\n" " "
+}
+
 # Preserve the existing jail reply envelope and coordinator's claim shape.
 export def reply-envelope [task_id: string, dispatch_id: string, result: record, --now: string = "", --nonce: string = ""] {
     let stamp  = if $now == "" { date now | format date "%Y%m%d%H%M%S" } else { $now }
@@ -47,15 +51,18 @@ export def reply-envelope [task_id: string, dispatch_id: string, result: record,
         $"  {cmd = ($o.cmd | to json), stdout = ($o.stdout | to json), stderr = ($o.stderr | to json), exit_code = ($o.exit_code)}"
     } | str join ",\n"
     let err = $result | get -o error | default ""
-    let error_line = if $err != "" { $"\nX-Jail-Error: ($err | str replace --all "\n" " ")" } else { "" }
+    let error_line = if $err != "" { $"\nX-Jail-Error: (header-value $err)" } else { "" }
+    let header_task = header-value $task_id
+    let header_dispatch = header-value $dispatch_id
     let exit_codes = $result.outputs | get -o exit_code | default [] | each {|c| $c | into string} | str join ","
     let claim_subject = if $result.verdict == "pass" { "jail executed all commands" } else { "jail execution failed or incomplete" }
+    let claim_evidence = $"($result.outputs | length) commands run; exit codes [($exit_codes)]"
     $"From jail-agent@smolfire.local ($dstamp)
 From: jail-agent@smolfire.local
 To: coordinator@smolfire.local
-Subject: Re: [($task_id)] jail execution result
+Subject: Re: [($header_task)] jail execution result
 Message-ID: <jail.($task_key).($dispatch_key).($stamp).($unique_key)@smolfire.local>
-In-Reply-To: ($dispatch_id)
+In-Reply-To: ($header_dispatch)
 X-Project: smolfire
 X-Executor: jail
 X-Verdict: ($result.verdict)($error_line)
@@ -75,7 +82,7 @@ kind      = \"command_executed\"
 task_id   = ($task_id | to json)
 subject   = ($claim_subject | to json)
 expected  = \"all commands exit 0\"
-evidence  = ($"($result.outputs | length) commands run; exit codes [($exit_codes)]" | to json)
+evidence  = ($claim_evidence | to json)
 verdict   = ($result.verdict | to json)
 
 "

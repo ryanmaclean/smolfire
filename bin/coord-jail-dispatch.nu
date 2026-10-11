@@ -113,7 +113,7 @@ export def valid-contract [value: any] {
     } catch { false }
 }
 
-export def normalize-run-result [stdout: string, exit_code: int] {
+export def normalize-run-result [stdout: string, exit_code: int, commands: list<string>] {
     let value = try { $stdout | from json } catch {
         return (result-record "fail" 0 [] "agent-jail returned non-JSON result")
     }
@@ -132,6 +132,13 @@ export def normalize-run-result [stdout: string, exit_code: int] {
     }
     if (($exit_code == 0 and $value.verdict != "pass") or ($exit_code != 0 and $value.verdict == "pass") or not ($exit_code in [0 1 2])) {
         return (result-record "fail" 0 [] "agent-jail exit code and result disagree")
+    }
+    if $value.verdict == "pass" {
+        let reported_commands = $value.outputs | each {|o| $o.cmd}
+        let nonzero_output = $value.outputs | any {|o| $o.exit_code != 0}
+        if (($commands | is-empty) or ($reported_commands != $commands) or $nonzero_output) {
+            return (result-record "fail" 0 [] "agent-jail success does not match requested commands")
+        }
     }
     $value
 }
@@ -199,7 +206,7 @@ def run-request [task_id: string, payload: record] {
     let allow_unpatched = ($env.SMOLFIRE_JAIL_ALLOW_UNPATCHED? | default "") in ["1" "true" "yes"]
     let args = run-args $task_id $commands $base $zsnap $image (network-wanted $tools) $timeout $jail_root $allow_unpatched
     let outcome = call-agent $script $args
-    normalize-run-result $outcome.stdout $outcome.exit_code
+    normalize-run-result $outcome.stdout $outcome.exit_code $commands
 }
 
 def "main dispatch" [
@@ -212,13 +219,17 @@ def "main dispatch" [
     # all caught setup, pin, contract, and run failures become one fail reply.
     let result = try {
         let msgs = parse-mbox (open --raw $spool)
-        let req = $msgs | where {|m| (msg-id $m) == $request_id } | first 1
+        let req = $msgs | where {|m| (msg-id $m) == $request_id }
         if ($req | is-empty) {
             result-record "fail" 0 [] $"request ($request_id) not found in spool"
+        } else if ($req | length) != 1 {
+            result-record "fail" 0 [] $"request ($request_id) is not unique in spool"
         } else {
             let payload = extract-toml ($req | first)
             if "_parse_error" in $payload {
                 result-record "fail" 0 [] "original jail request has invalid TOML"
+            } else if (($task_id == "") or (($payload | get -o task_id | default "") != $task_id)) {
+                result-record "fail" 0 [] "original jail request task_id does not match dispatch"
             } else {
                 run-request $task_id $payload
             }

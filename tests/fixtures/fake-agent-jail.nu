@@ -41,7 +41,16 @@ def "main run" [
         print ({verdict: "fail", boot_sec: 0, outputs: $outputs, error: "fixture failure"} | to json)
         exit 1
     }
-    print ({verdict: "pass", boot_sec: 0, outputs: $outputs} | to json)
+    let reported_outputs = if $mode == "short-pass" {
+        []
+    } else if $mode == "wrong-command-pass" {
+        $outputs | each {|o| $o | update cmd "unexpected-command"}
+    } else if $mode == "nonzero-pass" {
+        $outputs | each {|o| $o | update exit_code 7}
+    } else {
+        $outputs
+    }
+    print ({verdict: "pass", boot_sec: 0, outputs: $reported_outputs} | to json)
 }
 
 def main [] { print "offline fake agent-jail" }

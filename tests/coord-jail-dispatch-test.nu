@@ -46,9 +46,16 @@ do {
     assert (network-wanted ["Read" "Network"])
     assert (valid-contract {schema: "agent-jail.executor.contract.v1", canonical_repo: "ryanmaclean/agent-jail", executor: "jail", executor_schema: "v1"})
     assert (not (valid-contract {schema: "wrong"}))
-    assert equal (normalize-run-result '{"verdict":"fail","boot_sec":0,"outputs":[],"error":"refused"}' 2 | get verdict) "fail"
-    assert equal (normalize-run-result "not JSON" 1 | get verdict) "fail"
-    assert equal (normalize-run-result '{"verdict":"pass","boot_sec":0,"outputs":[]}' 1 | get verdict) "fail"
+    assert equal (normalize-run-result '{"verdict":"fail","boot_sec":0,"outputs":[],"error":"refused"}' 2 ["true"] | get verdict) "fail"
+    assert equal (normalize-run-result "not JSON" 1 ["true"] | get verdict) "fail"
+    assert equal (normalize-run-result '{"verdict":"pass","boot_sec":0,"outputs":[]}' 1 ["true"] | get verdict) "fail"
+    let two_outputs = '{"verdict":"pass","boot_sec":0,"outputs":[{"cmd":"one","stdout":"","stderr":"","exit_code":0},{"cmd":"two","stdout":"","stderr":"","exit_code":0}]}'
+    assert equal (normalize-run-result $two_outputs 0 ["one" "two"] | get verdict) "pass" "matching ordered command outputs"
+    assert equal (normalize-run-result $two_outputs 0 ["two" "one"] | get verdict) "fail" "reordered command outputs"
+    assert equal (normalize-run-result $two_outputs 0 ["one"] | get verdict) "fail" "extra command output"
+    assert equal (normalize-run-result '{"verdict":"pass","boot_sec":0,"outputs":[]}' 0 ["one"] | get verdict) "fail" "missing command output"
+    assert equal (normalize-run-result '{"verdict":"pass","boot_sec":0,"outputs":[]}' 0 [] | get verdict) "fail" "no-command success"
+    assert equal (normalize-run-result '{"verdict":"pass","boot_sec":0,"outputs":[{"cmd":"one","stdout":"","stderr":"","exit_code":7}]}' 0 ["one"] | get verdict) "fail" "nonzero command output"
     let args = run-args "t-argv" ["echo hello world" "--looks-like-option"] "/fixture/base" "" "" false 240 "/fixture/root" false
     assert equal ($args | last 3) ["--" "echo hello world" "--looks-like-option"]
     assert (not ("--network" in $args))
@@ -137,6 +144,21 @@ command = "true"' | save --force $spool
     assert equal (reply $spool | get verdict) "fail"
 }
 
+print "adapter: a success claim must match the issued command sequence"
+for mode in ["short-pass" "wrong-command-pass" "nonzero-pass"] {
+    let spool = [$temp $"($mode).spool"] | path join
+    let log = [$temp $"($mode).json"] | path join
+    make-msg $"<req.($mode)@host>" 'task_id = "t-claimed"
+command = "true"' | save --force $spool
+    let run = run-adapter $spool $"<req.($mode)@host>" "t-claimed" {AGENT_JAIL_EXECUTOR_PATH: $fixture, AGENT_JAIL_EXECUTOR_SHA256: $digest, FAKE_AGENT_LOG: $log, FAKE_AGENT_MODE: $mode}
+    assert equal $run.exit_code 1 $mode
+    assert ($log | path exists) "fake agent ran and returned malformed success"
+    let body = reply $spool
+    assert equal $body.verdict "fail" $mode
+    assert equal ($body.claims | first | get verdict) "fail" $mode
+    assert equal ($body.claims | first | get subject) "jail execution failed or incomplete" $mode
+}
+
 print "adapter: missing original request produces one fail reply without invoking agent-jail"
 do {
     let spool = [$temp "missing-request.spool"] | path join
@@ -155,6 +177,39 @@ do {
     assert equal $run.exit_code 1
     assert equal (reply $spool | get verdict) "fail"
     assert (not ($log | path exists)) "agent-jail run was not called"
+}
+
+print "adapter: mismatched task identity fails before invoking agent-jail"
+do {
+    let spool = [$temp "wrong-task.spool"] | path join
+    let log = [$temp "wrong-task-run.json"] | path join
+    make-msg "<req.wrong-task@host>" 'task_id = "t-other"
+command = "true"' | save --force $spool
+    let run = run-adapter $spool "<req.wrong-task@host>" "t-expected" {AGENT_JAIL_EXECUTOR_PATH: $fixture, AGENT_JAIL_EXECUTOR_SHA256: $digest, FAKE_AGENT_LOG: $log}
+    assert equal $run.exit_code 1
+    let body = reply $spool
+    assert equal $body.verdict "fail"
+    assert equal ($body.claims | first | get verdict) "fail"
+    assert (not ($log | path exists)) "mismatched task never reaches agent-jail"
+}
+
+print "adapter: duplicate request identity fails before invoking agent-jail"
+do {
+    let spool = [$temp "duplicate-request.spool"] | path join
+    let log = [$temp "duplicate-request-run.json"] | path join
+    let first = make-msg "<req.duplicate@host>" 'task_id = "t-duplicate"
+command = "true"'
+    let second = make-msg "<req.duplicate@host>" 'task_id = "t-duplicate"
+command = "false"'
+    ($first + (mbox-append-prefix $first) + $second) | save --force $spool
+    let run = run-adapter $spool "<req.duplicate@host>" "t-duplicate" {AGENT_JAIL_EXECUTOR_PATH: $fixture, AGENT_JAIL_EXECUTOR_SHA256: $digest, FAKE_AGENT_LOG: $log}
+    assert equal $run.exit_code 1
+    let messages = parse-mbox (open --raw $spool)
+    assert equal ($messages | length) 3 "two requests, one failure reply"
+    let body = extract-toml ($messages | last)
+    assert equal $body.verdict "fail"
+    assert equal ($body.claims | first | get verdict) "fail"
+    assert (not ($log | path exists)) "duplicate request never reaches agent-jail"
 }
 
 ^rm -rf $temp

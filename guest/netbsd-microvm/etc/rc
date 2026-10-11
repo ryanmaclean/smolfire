@@ -24,6 +24,24 @@ umask 022
 
 say() { echo "$*" > /dev/console; }
 
+# agent.env is literal KEY=VALUE data, never shell source. Keep parser state
+# private; valid environment keys otherwise remain compatible with the agent.
+load_agent_env() {
+	SMOLFIRE_ENV_LINE=
+	while IFS= read -r SMOLFIRE_ENV_LINE || [ -n "$SMOLFIRE_ENV_LINE" ]; do
+		case "$SMOLFIRE_ENV_LINE" in ''|\#*) continue ;; esac
+		case "$SMOLFIRE_ENV_LINE" in *=*) ;; *) return 1 ;; esac
+		SMOLFIRE_ENV_KEY=${SMOLFIRE_ENV_LINE%%=*}
+		case "$SMOLFIRE_ENV_KEY" in
+			''|[0123456789]*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*|SMOLFIRE_ENV_*) return 1 ;;
+		esac
+		# export is a shell builtin; quoted data is not evaluated or put in
+		# an external utility's argv. Suppress diagnostics containing values.
+		export "$SMOLFIRE_ENV_LINE" >/dev/null 2>&1 || return 1
+	done < "$1" || return 1
+	unset SMOLFIRE_ENV_LINE SMOLFIRE_ENV_KEY
+}
+
 # --- scratch -------------------------------------------------------------
 mount -t tmpfs -o -s64m tmpfs /tmp
 for d in /var/run /var/log /var/db /var/tmp; do
@@ -84,13 +102,14 @@ agent=/opt/datadog/bin/dd-agent-rs
 if [ "$mode" = rw ] && [ -r /state/agent.env ] && [ -x "$agent" ]; then
 	mkdir -p /state/run /state/log
 	(
-		set -a
-		. /state/agent.env
-		set +a
+		if ! load_agent_env /state/agent.env >/dev/null 2>&1; then
+			say "SMOLFIRE_NETBSD_ENV_FAIL reason=invalid-agent-env"
+			exit 1
+		fi
 		DD_RUN_PATH=${DD_RUN_PATH:-/state/run}
 		DD_STATUS_FILE=${DD_STATUS_FILE:-/state/run/status.json}
 		export DD_RUN_PATH DD_STATUS_FILE
-		exec "$agent" run > /state/log/dd-agent-rs.log 2>&1
+		exec /opt/datadog/bin/dd-agent-rs run > /state/log/dd-agent-rs.log 2>&1
 	) &
 	pid=$!
 	echo "$pid" > /var/run/dd-agent-rs.pid

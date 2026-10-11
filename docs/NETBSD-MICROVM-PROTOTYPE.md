@@ -87,10 +87,35 @@ gunzip -kc DL/netbsd-MICROVM.gz > out/netbsd-MICROVM
 nu bin/netbsd-microvm-rootfs.nu --sets-dir DL --out out/root.img \
   --add out/dd-agent-rs:/opt/datadog/bin/dd-agent-rs:0755 \
   --authorized-keys ~/.ssh/id_ed25519.pub --hostname smolfire-netbsd
-# secrets go to the state disk only, over stdin; the report lists key names only
-printf 'DD_API_KEY=%s\nDD_SITE=datadoghq.com\nDD_TAGS=lab:1010\n' "$KEY" |
-  nu bin/netbsd-microvm-rootfs.nu state --out out/state.img --size-mb 64 --env-stdin
+# Supply an existing protected environment file through stdin. Do not expand
+# a secret into printf arguments or paste it into command history.
+nu bin/netbsd-microvm-rootfs.nu state --out out/state.img --size-mb 64 --env-stdin \
+  < /protected/path/agent.env
 ```
+
+The input file is literal newline-separated `KEY=VALUE` data. Blank lines
+and lines beginning with `#` are ignored. Keys use ASCII identifier syntax;
+`SMOLFIRE_ENV_*` is reserved for parser state. Duplicate keys use the last
+value, and an empty value is allowed. Spaces, quotes, dollar signs, backticks
+and additional equals signs in values are literal: there is no expansion,
+command substitution, escape processing or shell sourcing. Use LF line endings
+and no NUL bytes; the builder rejects NUL before constructing the image.
+The shell reader cannot represent NUL, so manually modifying the state file
+with binary data bypasses this producer guarantee and is unsupported. Rebuild
+the state image through the validator when changing its environment.
+
+Migration from the old shell-sourced file: remove `export ` prefixes and
+shell quote delimiters; expand any intended variable references in the trusted
+configuration producer before supplying the file. Do not rely on executable
+shell statements in this file. Builder validation occurs before creating a
+staging directory or replacing an image; guest parsing/export failure aborts
+agent startup. The report lists key names only.
+
+This remains trusted privileged configuration. Valid environment names such
+as `PATH`, `ENV`, and dynamic-loader variables are preserved for compatibility
+and can affect the agent or its descendants. Literal parsing removes shell
+syntax evaluation here; it does not make attacker-controlled environment data
+safe. Protect the input file and state disk and keep their contents out of logs.
 
 Debian/Ubuntu ship NetBSD's makefs as the `makefs` package. The rootfs report
 (`smolfire.netbsd-microvm-rootfs/v1`) records each set's SHA512, the tree

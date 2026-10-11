@@ -171,6 +171,27 @@ def main [
     } | to json --indent 2 | print
 }
 
+# Match the guest's literal environment grammar; never parse shell syntax.
+# Errors intentionally omit input lines and values.
+def validate-agent-env [text: string]: nothing -> list<string> {
+    if $text =~ '\x00' {
+        error make {msg: "agent.env must be text without NUL bytes"}
+    }
+    mut keys = []
+    for line in ($text | split row "\n") {
+        if $line == "" or ($line | str starts-with "#") { continue }
+        if $line !~ '^[A-Za-z_][A-Za-z0-9_]*=' {
+            error make {msg: "invalid agent.env assignment"}
+        }
+        let key = ($line | split row "=" | first)
+        if ($key | str starts-with "SMOLFIRE_ENV_") {
+            error make {msg: "reserved agent.env key"}
+        }
+        $keys = ($keys | append $key)
+    }
+    $keys
+}
+
 # Build the writable state disk (FFSv2, mounted with -o log = WAPBL).
 def "main state" [
     --out: string                # output image path (required)
@@ -178,19 +199,20 @@ def "main state" [
     --env-stdin                  # read KEY=VALUE lines from stdin into /agent.env (0600)
 ] {
     if $out == null { error make {msg: "--out is required"} }
+    mut text = ""
+    mut env_keys = []
+    if $env_stdin {
+        $text = (^cat | into string)
+        $env_keys = (validate-agent-env $text)
+    }
     for t in [makefs sha256sum] { need $t }
     let out_abs = ($out | path expand)
     let staging = (mktemp -d -p ($out_abs | path dirname) "nbmicrovm-state.XXXXXX")
     ^chmod 0700 $staging
-    mut env_keys = []
     if $env_stdin {
-        # nu does not hand a script's stdin to main as $in; read it explicitly
-        let text = (^cat | into string)
         let envf = ($staging | path join "agent.env")
         $text | save --force $envf
         ^chmod 0600 $envf
-        # report key names only, never values
-        $env_keys = ($text | lines | where {|l| $l =~ '^[A-Za-z_][A-Za-z0-9_]*=' } | each {|l| $l | split row "=" | first })
     }
     rm -f $out_abs
     (^makefs -t ffs -B le -o version=2 -o minfree=0 -s $"($size_mb)m" $out_abs $staging) | ignore

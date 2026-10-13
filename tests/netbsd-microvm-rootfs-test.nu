@@ -40,7 +40,7 @@ if (which makefs | is-empty) {
     let img = ($tmp | path join "state.img")
     let secret = "not-a-real-key-0123456789abcdef"
     let r = ($"DD_API_KEY=($secret)\nDD_SITE=datadoghq.com\n" | ^nu (script-path) state --out $img --size-mb 4 --env-stdin | complete)
-    assert ($r.exit_code == 0) $"state build failed: ($r.stderr)"
+    assert ($r.exit_code == 0) $"state build failed: ($r | to json)"
     assert (not ($r.stdout | str contains $secret)) "a value from stdin leaked into the report"
     let rep = ($r.stdout | from json)
     assert ($rep.env_keys == ["DD_API_KEY", "DD_SITE"]) "env key names"
@@ -50,7 +50,7 @@ if (which makefs | is-empty) {
 
 
 print "test: invalid environment is rejected before image replacement"
-for bad in ["export DD_API_KEY=dummy", "1BAD=dummy", "SMOLFIRE_ENV_LINE=dummy", "DD_API_KEY=dummy\nnot-an-assignment", ("DD_API_KEY=dummy" + (char --unicode 0000))] {
+for bad in ["export DD_API_KEY=dummy", "1BAD=dummy", "SMOLFIRE_ENV_LINE=dummy", "DD_API_KEY=dummy\nnot-an-assignment", ("DD_API_KEY=dummy" + (char --unicode '0000'))] {
     let tmp = (mktemp -d)
     let img = ($tmp | path join "state.img")
     "preserve-existing-image" | save $img

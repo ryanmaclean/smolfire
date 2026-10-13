@@ -193,3 +193,66 @@ shipped guest rc does not read the `smolfire.*` arguments.
   `smolfire.state_dev=ld0a`, and `smolfire.state_fs=<variant>`. Adjust with
   `--root-device`, `--state-device`, and `--append` if the guest artifact uses
   a different layout.
+
+
+### Image build transaction and failure recovery
+
+Both existing root and state entry points now build inside a fresh private
+0700 sibling directory. They never remove the previous output before makefs.
+Set SHA512 validation precedes extraction; extraction consumes private copies
+whose full hashes match that validation. This checks the caller-selected list,
+not its release-signature authenticity. Keep the source sets and supplied files
+quiescent during selection/copy. No automatic retry is performed.
+
+Every external operation must return an integer zero status. Installed file
+permissions, candidate regular-file type, restrictive0600 image permissions,
+positive size (exact requested size for state), and full SHA256 are checked
+before publication. Destination shape/inode/content are rechecked before the
+move. The published size/mode/hash are read back. CLI failure is nonzero with a
+bounded JSON error stage and private workspace path; environment values and
+native stderr are not serialized. An invalid environment still fails before
+any staging or replacement. Native diagnostics may require inspecting retained
+private artifacts under the owner, never publishing secret state files.
+
+The caller must own the output parent exclusively for the operation: no
+concurrent writers, path replacements, mount changes, or privileged interference.
+The builder rejects existing symlink components and nonregular output targets.
+The private candidate and destination share that parent filesystem; selected
+Nu mv uses its normal move implementation. Under this cooperative contract the
+same-filesystem rename replaces the filename. The check and move are not an
+atomic compare-and-swap; a hostile concurrent writer is not handled. No fsync,
+power-loss durability, filesystem validity, boot readiness or Genoa deployment
+receipt is claimed by this local builder. Genoa remains the deployment owner.
+
+The additive transaction field distinguishes published true, false (no commit
+attempt), and null (commit attempted but operation raised before confirmation).
+A post-publication readback failure reports published:true plus failure; it does
+not pretend that the old image survived. Pre-publication failure retains the
+previous image and the private failed workspace. Staging cleanup occurs before
+commit unless --keep-staging was selected; cleanup failure prevents commit.
+The workspace itself is intentionally retained even on success (root set copies
+and inspection inputs may remain). State secret staging is removed on successful
+normal cleanup, but a failure retains it under the private0700 workspace.
+Operators must reconcile the explicit stage/result before removing that owned
+workspace. No recovery is promised for process kill, crash or machine loss.
+
+The --add destination accepts a confined guest-relative path, optionally with a
+leading slash, and ordinary octal permissions. Empty, dot and parent components,
+control characters, duplicate destinations and nonregular sources are refused.
+Each existing staging ancestor and final target is checked to avoid following
+an extracted symlink; missing parents are created individually. This is an
+ordinary trusted-release/exclusive-staging check, not a descriptor-relative
+sandbox against a privileged concurrent replacement or malicious archive.
+Root installation no longer depends on nonportable install -D.
+
+The original tests/netbsd-microvm-rootfs-test.nu remains unchanged. The additional
+image-transaction-test.nu calls the actual exported build-image coordinator
+with a test-only effect closure. It verifies failure preservation, explicit
+publication uncertainty, permission/hash checks, set-copy mismatch, add-path
+refusal and CA bundle staging using ordinary private files. The model never
+runs sudo, bsdtar, install, makefs, chown, a VM or a service. It uses real Nu
+filesystem/hash operations and ordinary chmod/ln on private paths. Its fake
+image bytes are intentionally not an FFS image. Native makefs, image inspection,
+rootfs/guest boot and original performance/intake goals remain separate gates.
+
+The builder requires OpenSSL 3 with its default provider for SHA512 (`openssl dgst -provider default -propquery provider=default -sha512 -binary`). It streams each selected file through stdin, checks the child exit and exact 64-byte digest, and converts that digest to hexadecimal. There is no alternate checksum fallback. Execution must select and admit the actual OpenSSL binary, dependencies and configuration; the modeled transaction fixture uses the same real checksum helper.

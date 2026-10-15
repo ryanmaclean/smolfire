@@ -38,6 +38,7 @@ Optional environment variables:
 | `SMOLFIRE_EXECUTOR` | `vm` | `vm` or `jail` (experimental, FreeBSD only — see `docs/JAIL-EXECUTOR.md`) |
 | `SMOLFIRE_SPAWN_SUBAGENT` | unset (disabled) | Billed-subprocess guard: must be set to exactly `1` to allow `coord-tick.nu`/`coord-dispatch.nu` to actually launch a real `claude` CLI subagent (`--max-budget-usd 1.0`, real API spend). Unset (the default, and the required setting for every test and CI run) makes spawning a no-op that logs `subagent_spawn_skipped` instead. |
 | `SMOLFIRE_SUBAGENT_CMD` | `claude` | Overrides the binary name/path resolved and launched as the subagent CLI. Tests use this to point at a harmless stub instead of relying solely on PATH ordering/stripping to keep a real `claude` from being resolved. |
+| `SMOLFIRE_RETRY_BACKOFF` | unset (ON) | Spec §12 retry backoff. ON by default: a failed attempt's retry is scheduled (never slept) 60 s, 60 s, then 120 s out via `not_before` in the crash-atomic slot, for every executor (vm/jail/fleet) and every retry source including the dead-worker reap. The held retry keeps its pending slot and inflight reservation but blocks no other task. Only the exact value `0` is the kill switch (immediate retry dispatch); any other value, including `false`/`off`, leaves it ON. Escalation (retry-exhausted HALT) is never delayed. |
 
 Run a single tick manually:
 

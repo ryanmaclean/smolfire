@@ -16,6 +16,14 @@
 #      firmware dir so the verdict classifier is testable without qemu/ARM
 #      hardware (tests/aarch64-boot-probe-test.nu; same pattern as the
 #      tpm-attest-verify argv seam).
+#      PROBE_KERNEL=1 — IMG is an arm64 Image booted directly with
+#      `qemu -kernel` (no AAVMF, no loader, no disk): the SMOLFIRE one-file
+#      microVM path (docs/SMOLFIRE-A64-FEASIBILITY.md). Then also:
+#        PROBE_APPEND     kernel cmdline; MUST start with "FreeBSD:" or the
+#                         kernel ignores it (machdep_boot.c CMDLINE_GUARD)
+#        PROBE_PASS       glob that means pass (default SMOLFIRE_READY)
+#        PROBE_QEMU_EXTRA extra qemu argv (Tcl list), e.g. a -drive
+#      The verdict contract is unchanged; AAVMF is not required here.
 #
 # Exit codes / VERDICT lines (the gate's contract — see the soft-gate job):
 #   0  VERDICT=pass                  login: within budget; TIME_TO_LOGIN printed
@@ -47,7 +55,9 @@ AAVMF_VARS=$AAVMF_DIR/AAVMF_VARS.fd
 
 # Evidence lines (design: verify the consumer side, never assume it)
 echo "PROBE: $("$PROBE_QEMU" --version | head -1)"
-ls -l "$AAVMF_DIR" || { echo "PROBE: AAVMF firmware missing (install qemu-efi-aarch64)" >&2; exit 64; }
+if [ -z "${PROBE_KERNEL:-}" ]; then
+  ls -l "$AAVMF_DIR" || { echo "PROBE: AAVMF firmware missing (install qemu-efi-aarch64)" >&2; exit 64; }
+fi
 
 # pauth-impdef preflight: -S pauses at first insn, so a 5s survival means
 # the cpu property parsed; a property error exits (non-124) immediately.
@@ -65,7 +75,9 @@ if [ "$CPU" != "${CPU%,*}" ]; then
 fi
 echo "PROBE: cpu=$CPU budget=${BUDGET}s img=$IMG"
 
-cp "$AAVMF_VARS" "$WORKDIR/vars.fd"   # fresh NVRAM per boot
+if [ -z "${PROBE_KERNEL:-}" ]; then
+  cp "$AAVMF_VARS" "$WORKDIR/vars.fd"   # fresh NVRAM per boot
+fi
 
 # Staged markers, each printed once with its elapsed time:
 #   uefi   — EDK2/AAVMF produced output (firmware alive)
@@ -74,6 +86,8 @@ cp "$AAVMF_VARS" "$WORKDIR/vars.fd"   # fresh NVRAM per boot
 #   rc     — "Setting hostname" (verified string, ledger run 35834636637)
 # Terminal: login: / mountroot> / panic / timeout / eof.
 export PROBE_IMG="$IMG" PROBE_CPU="$CPU" PROBE_BUDGET="$BUDGET" PROBE_QEMU
+export PROBE_KERNEL="${PROBE_KERNEL:-}" PROBE_APPEND="${PROBE_APPEND:-FreeBSD:}"
+export PROBE_PASS="${PROBE_PASS:-SMOLFIRE_READY}" PROBE_QEMU_EXTRA="${PROBE_QEMU_EXTRA:-}"
 export PROBE_VARS="$WORKDIR/vars.fd" PROBE_CODE="$AAVMF_CODE" PROBE_SERIAL="$SERIAL_LOG"
 
 rc=0
@@ -88,14 +102,26 @@ log_file -a $env(PROBE_SERIAL)
 
 # romfile= disables the NIC's PXE option ROM (efi-virtio.rom lives in the
 # separate ipxe-qemu package on Ubuntu and is never needed for EFI disk boot)
-spawn $env(PROBE_QEMU) -machine virt -accel tcg,thread=multi \
-  -cpu $env(PROBE_CPU) -smp 4 -m 1024M \
-  -drive if=pflash,format=raw,unit=0,file=$env(PROBE_CODE),readonly=on \
-  -drive if=pflash,format=raw,unit=1,file=$env(PROBE_VARS) \
-  -drive file=$env(PROBE_IMG),format=qcow2,if=virtio,snapshot=on \
-  -device virtio-rng-pci \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile= \
-  -display none -serial mon:stdio
+if {$env(PROBE_KERNEL) ne ""} {
+  # Direct arm64 Image boot: QEMU passes the DTB in x0 (Linux boot protocol
+  # = any non-ELF -kernel); FreeBSD LINUX_BOOT_ABI consumes it. No firmware.
+  set pass_pat $env(PROBE_PASS)
+  spawn $env(PROBE_QEMU) -machine virt -accel tcg,thread=multi \
+    -cpu $env(PROBE_CPU) -smp 4 -m 1024M \
+    -kernel $env(PROBE_IMG) -append $env(PROBE_APPEND) \
+    -device virtio-rng-pci {*}$env(PROBE_QEMU_EXTRA) \
+    -display none -serial mon:stdio
+} else {
+  set pass_pat "login:"
+  spawn $env(PROBE_QEMU) -machine virt -accel tcg,thread=multi \
+    -cpu $env(PROBE_CPU) -smp 4 -m 1024M \
+    -drive if=pflash,format=raw,unit=0,file=$env(PROBE_CODE),readonly=on \
+    -drive if=pflash,format=raw,unit=1,file=$env(PROBE_VARS) \
+    -drive file=$env(PROBE_IMG),format=qcow2,if=virtio,snapshot=on \
+    -device virtio-rng-pci \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile= \
+    -display none -serial mon:stdio
+}
 
 proc mark {name} {
     global seen last
@@ -118,7 +144,7 @@ while {1} {
         -re {FreeBSD EFI boot block|FreeBSD/arm64 EFI loader|Consoles: EFI} { mark loader; continue }
         "Copyright (c) 1992" { mark kernel; continue }
         "Setting hostname"   { mark rc; continue }
-        "login:" {
+        $pass_pat {
             puts "\nTIME_TO_LOGIN=[elapsed]s\nVERDICT=pass"
             exit 0
         }

@@ -277,7 +277,7 @@ release), crash-recovery (harnais QEMU monitor à implémenter), TPM complet
 
 Une image amd64 a été construite par compilation croisée sur <aarch64-builder>
 (`TARGET=amd64 TARGET_ARCH=amd64`) et est disponible sous :
-`smolbsd-buildworld @ 108.61.206.203:/root/genoa/out/smolbsd-linode-amd64-v0.1.0.raw`
+`smolbsd-buildworld @ <vultr-build-host>:/root/genoa/out/smolbsd-linode-amd64-v0.1.0.raw`
 (2,0 Gio, GPT : 128 Mio ESP avec `BOOTX64.EFI` + racine UFS 1,9 Gio,
 noyau GENERIC). Un noyau `SMOLBSD` configurable reste à construire.
 

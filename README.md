@@ -22,7 +22,7 @@ As of 2026-09-24:
 | Product | Boot gate              | Artifact size         | Notes                                  |
 |---------|------------------------|-----------------------|----------------------------------------|
 | amd64   | 9s to login on KVM — PASS | **62.6 MiB raw, 25.0 MiB compressed download** (≤ 512 MiB gate PASS) | Built end-to-end by the hosted pipeline in ~35 min; [releases](https://github.com/ryanmaclean/smolfire/releases) (0.1.0: 223 MiB → diet rounds 2+3 + build-knob trims: 62.6/25.0 MiB, zero orphaned sonames per the LDDCHECK gate) |
-| aarch64 | **31s to login under same-ISA TCG soft-gate — PASS** (no hardware accel needed; `ubuntu-24.04-arm` runner) | **63.1 MiB raw, 24.9 MiB compressed** (size gate PASS) | First image ever produced by the scripted aarch64 leg (run 35947103487); HVF on Apple Silicon boots it natively |
+| aarch64 | **30s to login under same-ISA TCG soft-gate — PASS** (no hardware accel needed; `ubuntu-24.04-arm` runner) | **61.3 MiB raw, 24.2 MiB compressed** (size gate PASS; the released 0.5.0 asset) | First images ever produced by the scripted aarch64 leg (runs 35947103487, then the round-3-cut rebuild 35965919427 that shipped in 0.5.0); HVF on Apple Silicon boots it natively |
 | **SMOLFIRE** (microVM) | **511 ms to shell under Firecracker** (569 ms QEMU microvm), TCP net gate + host ping PASS | **37 MiB — one PVH ELF is the whole OS** (kernel + static /rescue MFS root) | Rump-kernel spirit: no bootloader, no disk, no pkgbase; `sys/amd64/conf/SMOLFIRE` + `bin/build-smolfire.sh` |
 
 See `docs/UR-BSD-VERIFY.md` for the verified findings and the image-diet

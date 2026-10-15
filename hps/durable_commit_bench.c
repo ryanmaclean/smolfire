@@ -206,9 +206,14 @@ static uint64_t recover(int fd, size_t recsize, uint32_t *epoch, uint64_t *bad)
         ssize_t r = pread(fd, buf, recsize, off);
         if (r < (ssize_t)recsize) break;
         struct hdr h; memcpy(&h, buf, sizeof h);
+        /* Reject a malformed header before its length can size a CRC read. */
+        if (h.magic != MAGIC || h.len != recsize - sizeof h || h.seq != seq + 1) {
+            (*bad)++;
+            break;
+        }
         uint32_t want = h.crc; h.crc = 0; memcpy(buf, &h, sizeof h);
         uint32_t got = crc32_ieee(buf, sizeof h + h.len, 0);
-        if (h.magic != MAGIC || h.len != recsize - sizeof h || got != want || h.seq != seq + 1) { (*bad)++; break; }
+        if (got != want) { (*bad)++; break; }
         seq = h.seq; if (h.epoch > *epoch) *epoch = h.epoch;
         off += (off_t)recsize;
     }

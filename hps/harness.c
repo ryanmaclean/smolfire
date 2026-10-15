@@ -1154,7 +1154,7 @@ static int run_diff(unsigned long n, uint32_t seed)
 {
     uint64_t base = 0, next = 0, d = 0, v = 0;
     uint32_t rc0 = 0, rc1 = 0;
-    unsigned long i, c_good = 0, c_dup = 0, c_gap = 0, c_malf = 0,
+    unsigned long i, c_good = 0, c_dup = 0, c_gap = 0, c_invalid = 0,
                   c_read = 0;
     uint64_t t0, t1;
     rng_state = (seed != 0) ? seed : 0x9E3779B9u;
@@ -1205,7 +1205,7 @@ static int run_diff(unsigned long n, uint32_t seed)
         } else if (r < 88) {
             rc = vec_invalid(next, (unsigned)i);
             if (rc == 0)
-                c_malf++;
+                c_invalid++;
         } else {
             rc = vec_read(next, (unsigned)i);
             if (rc == 0)
@@ -1227,8 +1227,8 @@ static int run_diff(unsigned long n, uint32_t seed)
     if (read_durable(&d) != 0 || read_visible(&v) != 0)
         return 1;
     printf("harness: diff OK n=%lu seed=%u good=%lu dup=%lu gap=%lu"
-           " malf=%lu read=%lu d=%llu v=%llu %.1f ops/s\n",
-           n, seed, c_good, c_dup, c_gap, c_malf, c_read,
+           " invalid=%lu read=%lu d=%llu v=%llu %.1f ops/s\n",
+           n, seed, c_good, c_dup, c_gap, c_invalid, c_read,
            (unsigned long long)d, (unsigned long long)v,
            (1000.0 * (double)n) / (double)(t1 - t0 + 1));
     return (oracle_compare(next, d, next, v) == 0) ? 0 : 1;

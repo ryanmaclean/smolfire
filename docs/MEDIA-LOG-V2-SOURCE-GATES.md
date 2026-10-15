@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Media-log v2 source and execution gates
 
-Status: source correction only; native, RTL, physical media and board acceptance HOLD.
+Status: C/Nu native logical observer source published; exact-head hosted execution, RTL, physical media and board acceptance HOLD.
 
 ## Record offset contract
 
@@ -11,13 +11,13 @@ ml2_checked_slot_offset treats maximum_offset as an inclusive byte ceiling. A su
 
 The PR124-specific Icarus installation, Bash/mapfile/process-substitution orchestration, Git assertion, coreutils hashing/timeout and artifact-as-PASS path have been removed. tests/pr124-offboard-gate.nu now fails explicitly and launches no external tool. The PR124 Linux CI step also reports HOLD using Nushell; neither general CI success nor old artifact banners replace this gate. The rest of the repository CI is not audited or admitted by this change. Do not execute any route until the complete selected remote tool/dependency graph satisfies the MIT/BSD/Apache-only rule. No simulator replacement or new tool dependency is asserted.
 
-## Regression proposal and missing native interface
+## Published logical observer and missing execution gate
 
 New tests/scripts must be Nushell under AGENTS.md. Existing hps/media_log_v2_test.c is preserved unchanged for provenance; its prior execution and language choice are not newly authorized. The existing UART harness comment claims a historical C(termios) ruling, but does not establish approval for a new C media RPC/test harness. No C assertions were moved behind a Nushell wrapper and no parallel decoder was created.
 
-tests/media-log-v2-fixtures.nu exports28 proposed cases and fixed byte vectors. It contains no runner and is not wired into CI. It preserves the existing cases for exact prefix, single unacknowledged candidate, second complete/partial candidate, distinct EOF/I/O/short reads, forged length, CRC corruption, extent-before-I/O checks and exact/changed retries. It adds full-record offset ceilings, zero/null guards, signed/unsigned extremes and unchanged-output failures. Full u64 inputs/outputs are decimal strings. The independent known CRC constant and56-byte fixture remain explicit; generating fixture bytes is not execution of the C decoder.
+tests/media-log-v2-fixtures.nu exports 28 fixed-vector cases. Published hps/media_log_observe.c invokes the actual decoder/scanner functions, and tests/media-log-v2-observe.nu checks 60 native semantic cases, 13 malformed native requests and six fake-output controls. The driver checks full-width decimal u64 fields, callback observations, identity/TID faults and output clearing. These are source-defined logical controls, not an exact-head hosted CI receipt.
 
-A future approved binding must invoke the actual C functions, preserve u64 values losslessly, observe callback order/count and output clearing, and compare these expected outcomes in Nushell. Null-pointer and synthetic callback-error cases need an explicitly approved native callable/testing interface; a file-reading CLI alone cannot claim those cases. Until that interface and the full remote tool graph exist, this is a fixture proposal, not a complete replacement for the old C harness. Removal of that harness is deliberately deferred. Native negative-control failure propagation, RTL119/0 vectors and board behavior remain separately unproved.
+A historical off-laptop run of the identical published logical source bytes was independently witnessed, but preceded publication. A new exact-head logical CI route requires a selected remote runner and complete MIT/BSD/Apache-2.0 closure for its compiler/linker, Nushell, timeout, runtime, actions and helpers. The retained C aggregate test still needs separate language approval. Even a passing logical route would not prove RTL, HPS/media W/G authority, board provenance or physical power-cut recovery.
 
 ## HPS/media completion remains unavailable
 

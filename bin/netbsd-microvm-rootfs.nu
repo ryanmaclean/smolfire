@@ -191,7 +191,7 @@ def verify-sets [effect: closure, dir: string] {
         let want = ($lines | parse 'SHA512 ({name}) = {hex}' | where name == $name)
         if ($want | length) != 1 { error make {msg: 'set requires exactly one SHA512 entry'} }
         let digest = (do $effect {op: hash512, path: $path})
-        if ($digest !~ '^[0-9a-f]{128}$') or $digest != ($want.0.hex | str trim | str lowercase) {
+        if ($digest !~ '^[0-9a-f]{128}$') or $digest != ($want.0.hex | str trim | str downcase) {
             error make {msg: $'SHA512 mismatch for ($name)'}
         }
         $result = ($result | append {set: $name, sha512: $digest, bytes: $meta.bytes})

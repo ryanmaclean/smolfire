@@ -21,7 +21,7 @@
 // The HARDWARE default stays 115200; the protocol is baud-agnostic.
 //   iverilog -g2012 -o sim_uart dut_top_uart.v dut_uart.v durable_tid_v0.v \
 //     dut_uart_tb.sv && ./sim_uart
-// Exit banner is `$display PASS/FAIL` + `$finish`.
+// Exit is nonzero on any failed check.
 //
 // NOTE ON SCOPE (read before "porting" fault-injection windows here).
 // The original suite's reset-mid-commit (TEST 6) and submit-while-busy
@@ -73,10 +73,12 @@ module dut_uart_tb;
   localparam [7:0] CMD_READ  = 8'h02;
   localparam [7:0] CMD_RESET = 8'h03;
   localparam [7:0] CMD_PING  = 8'h04;
+  localparam [7:0] CMD_READ_BOUND = 8'h06;
   localparam [7:0] RSP_WRITE = 8'h81;
   localparam [7:0] RSP_READ  = 8'h82;
   localparam [7:0] RSP_RESET = 8'h83;
   localparam [7:0] RSP_PING  = 8'h84;
+  localparam [7:0] RSP_READ_BOUND = 8'h86;
 
   // DUT byte offsets (must match rtl/durable_tid_v0.v header map).
   localparam [7:0] A_EPOCH = 8'h00;
@@ -101,6 +103,8 @@ module dut_uart_tb;
   localparam [7:0] A_PEND_HI = 8'h50;
   localparam [7:0] A_MAGIC = 8'h54;
   localparam [7:0] A_VERSION = 8'h58;
+  localparam [7:0] A_ID_PROBE = 8'h5C;
+  localparam [7:0] A_ID_CAPS = 8'h60;
 
   localparam CTRL_SUBMIT  = 32'h00000001;
   localparam CTRL_RECOVER = 32'h00000004;
@@ -172,6 +176,31 @@ module dut_uart_tb;
         checks_failed = checks_failed + 1;
         $display("[FAIL] %0s", name);
       end
+    end
+  endtask
+
+  // Versioned bound reply. The wire carries the exact latched address,
+  // challenge and value, so a zero from another register cannot pass.
+  task host_resp_bound(output [7:0] addr, output [31:0] challenge,
+                       output [31:0] value, output ok);
+    reg [7:0] f[0:12];
+    reg byte_ok;
+    reg [7:0] sum;
+    integer i;
+    begin : rb
+      addr = 0; challenge = 0; value = 0; ok = 1'b0;
+      for (i = 0; i < 13; i = i + 1) begin
+        uart_get(f[i], byte_ok);
+        if (!byte_ok) disable rb;
+      end
+      sum = 0;
+      for (i = 2; i < 12; i = i + 1)
+        sum = sum + f[i];
+      addr = f[3];
+      challenge = {f[7], f[6], f[5], f[4]};
+      value = {f[11], f[10], f[9], f[8]};
+      ok = f[0] == M0 && f[1] == M1 &&
+           f[2] == RSP_READ_BOUND && f[12] == sum;
     end
   endtask
 
@@ -351,6 +380,21 @@ module dut_uart_tb;
     end
   endtask
 
+  task u_read_bound(input [7:0] addr, input [31:0] challenge,
+                    output [31:0] rdata, output ok);
+    reg [7:0] echoed_addr;
+    reg [31:0] echoed_challenge;
+    reg rok;
+    begin
+      fork
+        host_cmd(CMD_READ_BOUND, addr, challenge);
+        host_resp_bound(echoed_addr, echoed_challenge, rdata, rok);
+      join
+      ok = rok && echoed_addr == addr &&
+           echoed_challenge == challenge;
+    end
+  endtask
+
   // PING round trip. ok=1 iff PONG with caller-TID ABI VERSION==1.
   // (Forked CMD/RSP for the same early-RSP reason as u_write.)
   task u_ping(output ok);
@@ -482,6 +526,11 @@ module dut_uart_tb;
     check("U1 magic reads DUR0 over UART", t_ok && t_rdata == 32'h44555230);
     u_read(A_VERSION, t_rdata, t_ok);
     check("U1 version is v1 over UART", t_ok && t_rdata == 32'h00000001);
+    u_read_bound(A_ID_CAPS, 32'h00010203, t_rdata, t_ok);
+    check("U1 bound CAPS zero at reset", t_ok && t_rdata == 0);
+    u_read_bound(A_EPOCH, 32'h04050607, t_rdata, t_ok);
+    check("U1 bound EPOCH zero has distinct address/challenge",
+          t_ok && t_rdata == 0);
 
     // U2: WRITE-REG round trip + readback.
     u_write(A_EPOCH, 32'h00000001, t_ok);
@@ -667,12 +716,24 @@ module dut_uart_tb;
     check("U9 trusted pulse count == completed ops",
           mon_trusted_cnt == 15);
 
+    // U10: READ_BOUND after prior writes, reset, malformed traffic, and
+    // burst. Legacy READ remains independently byte-compatible.
+    u_read_bound(A_ID_PROBE, 32'h10203040, t_rdata, t_ok);
+    check("U10 bound probe echoes address/challenge/value",
+          t_ok && t_rdata == 32'h53535031);
+    u_read_bound(A_ID_CAPS, 32'h01020304, t_rdata, t_ok);
+    check("U10 bound zero CAPS is distinct from EPOCH request",
+          t_ok && t_rdata == 32'h00000000);
+    u_read_bound(A_EPOCH, 32'h05060708, t_rdata, t_ok);
+    check("U10 bound EPOCH after traffic", t_ok && t_rdata == 32'h1);
+    u_read(A_ID_CAPS, t_rdata, t_ok);
+    check("U10 legacy read remains compatible", t_ok && t_rdata == 0);
+
     $display("----------------------------------------");
     $display("checks passed: %0d  failed: %0d", checks_passed, checks_failed);
-    if (checks_failed == 0)
-      $display("PASS");
-    else
-      $display("FAIL");
+    if (checks_failed != 0)
+      $fatal(1, "FAIL: UART checks failed");
+    $display("PASS");
     $finish;
   end
 

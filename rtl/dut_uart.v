@@ -29,7 +29,8 @@
 //   CMD frame (host -> FPGA), 9 bytes:
 //     [0] MAGIC0 = 0x44 ('D')   [1] MAGIC1 = 0x55 ('U')
 //     [2] CMD: 0x01 WRITE-REG | 0x02 READ-REG | 0x03 RESET | 0x04 PING
-//     [3] ADDR: byte offset within the DUT 4 KB window (map tops at 0x058,
+//              | 0x06 READ_BOUND
+//     [3] ADDR: byte offset within the DUT 4 KB window (map tops at 0x060,
 //         so the low 8 bits suffice; upper 4 address bits are zero)
 //     [4..7] DATA (32-bit LE; ignored for READ-REG payload/RESET/PING)
 //     [8] CHK = (CMD + ADDR + D0 + D1 + D2 + D3) mod 256
@@ -40,6 +41,10 @@
 //          0x82 READ-DATA (DATA = register value)
 //          0x83 RESET-DONE (DATA = RESET_CNT after the reset pulse)
 //          0x84 PONG (DATA = VERSION 0x00000001)
+//   READ_BOUND uses the same 9-byte CMD with DATA=challenge and returns
+//   13 bytes: [44 55 86 ADDR CHALLENGE32 VALUE32 CHK], all words LE.
+//   CHK sums bytes 2..11 modulo 256. This identifies the response to a
+//   particular read; it is not a storage receipt or authentication MAC.
 //   BURST frame (host -> FPGA), variable 5+16*N bytes, N = COUNT (1..64):
 //     [0] MAGIC0  [1] MAGIC1  [2] CMD_BURST_SUBMIT = 0x05  [3] COUNT
 //     [4..4+16*N-1] N entries, 16 bytes each, all words little-endian:
@@ -110,13 +115,15 @@ module dut_uart #(
   localparam [7:0] CMD_PING   = 8'h04;
   // CMD_BURST_SUBMIT = 0x05: next free CMD value (0x01..0x04 taken), so
   // all existing single-submit frames keep working byte-identically; the
-  // RSP keeps the CMD|0x80 convention (0x05|0x80 = 0x85). 0x06+ reserved.
+  // RSP keeps the CMD|0x80 convention (0x05|0x80 = 0x85).
   localparam [7:0] CMD_BURST  = 8'h05;
+  localparam [7:0] CMD_READ_BOUND = 8'h06;
   localparam [7:0] RSP_WRITE  = 8'h81;
   localparam [7:0] RSP_READ   = 8'h82;
   localparam [7:0] RSP_RESET  = 8'h83;
   localparam [7:0] RSP_PING   = 8'h84;
   localparam [7:0] RSP_BURST  = 8'h85;
+  localparam [7:0] RSP_READ_BOUND = 8'h86;
   localparam [7:0] A_RSTCNT   = 8'h20; // RESET_CNT byte offset (response data)
   localparam [31:0] VERSION_VAL = 32'h00000001; // matches DUT A_VERSION
 
@@ -474,6 +481,7 @@ module dut_uart #(
               if (fbuf[0] == MAGIC0 && fbuf[1] == MAGIC1
                   && chk_tmp[7:0] == rx_byte
                   && (fbuf[2] == CMD_WRITE || fbuf[2] == CMD_READ
+                      || fbuf[2] == CMD_READ_BOUND
                       || fbuf[2] == CMD_RESET || fbuf[2] == CMD_PING)) begin
                 p_cmd  <= fbuf[2];
                 p_addr <= fbuf[3];
@@ -482,7 +490,8 @@ module dut_uart #(
                   avr_address_r   <= {4'h0, fbuf[3]};
                   avr_writedata_r <= {fbuf[7], fbuf[6], fbuf[5], fbuf[4]};
                   p_state <= E_WR;
-                end else if (fbuf[2] == CMD_READ) begin
+                end else if (fbuf[2] == CMD_READ
+                             || fbuf[2] == CMD_READ_BOUND) begin
                   avr_address_r <= {4'h0, fbuf[3]};
                   p_state <= E_RD;
                 end else if (fbuf[2] == CMD_RESET) begin
@@ -533,19 +542,39 @@ module dut_uart #(
         end
         E_RD_CAP: begin
           avr_read_r <= 1'b0;
-          rsp_code <= RSP_READ;
           rsp_data <= avr_readdata; // DUT read data (registered)
           txbuf[0] <= MAGIC0;
           txbuf[1] <= MAGIC1;
-          txbuf[2] <= RSP_READ;
-          txbuf[3] <= avr_readdata[7:0];
-          txbuf[4] <= avr_readdata[15:8];
-          txbuf[5] <= avr_readdata[23:16];
-          txbuf[6] <= avr_readdata[31:24];
-          chk_b = RSP_READ + avr_readdata[7:0] + avr_readdata[15:8]
-                + avr_readdata[23:16] + avr_readdata[31:24];
-          txbuf[7] <= chk_b;
-          tx_len <= 7'd8; // legacy 8-byte RSP
+          if (p_cmd == CMD_READ_BOUND) begin
+            rsp_code <= RSP_READ_BOUND;
+            txbuf[2] <= RSP_READ_BOUND;
+            txbuf[3] <= p_addr;
+            txbuf[4] <= p_data[7:0];
+            txbuf[5] <= p_data[15:8];
+            txbuf[6] <= p_data[23:16];
+            txbuf[7] <= p_data[31:24];
+            txbuf[8] <= avr_readdata[7:0];
+            txbuf[9] <= avr_readdata[15:8];
+            txbuf[10] <= avr_readdata[23:16];
+            txbuf[11] <= avr_readdata[31:24];
+            chk_b = RSP_READ_BOUND + p_addr + p_data[7:0]
+                  + p_data[15:8] + p_data[23:16] + p_data[31:24]
+                  + avr_readdata[7:0] + avr_readdata[15:8]
+                  + avr_readdata[23:16] + avr_readdata[31:24];
+            txbuf[12] <= chk_b;
+            tx_len <= 7'd13;
+          end else begin
+            rsp_code <= RSP_READ;
+            txbuf[2] <= RSP_READ;
+            txbuf[3] <= avr_readdata[7:0];
+            txbuf[4] <= avr_readdata[15:8];
+            txbuf[5] <= avr_readdata[23:16];
+            txbuf[6] <= avr_readdata[31:24];
+            chk_b = RSP_READ + avr_readdata[7:0] + avr_readdata[15:8]
+                  + avr_readdata[23:16] + avr_readdata[31:24];
+            txbuf[7] <= chk_b;
+            tx_len <= 7'd8; // legacy 8-byte RSP unchanged
+          end
           tx_start <= 1'b1;
           p_state  <= E_TXWAIT;
         end

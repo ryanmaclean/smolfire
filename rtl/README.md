@@ -1,8 +1,9 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# durable_tid_v0 — register-only durable completion gate (issue #87)
+# durable_tid_v0 — register-only ordering experiment (issue #87)
 
-v0 FPGA experiment: caller-supplied 0-based TID + commit FSM enforcing
-`TRUSTED_COMPLETE(N) => PERSISTENT(N)`. No BRAM queue, DMA engine, SHA,
+v0 FPGA experiment: caller-supplied 0-based TID + commit FSM ordering
+acceptance; it does not prove `TRUSTED_COMPLETE(N) => PERSISTENT(N)`.
+No BRAM queue, DMA engine, SHA,
 RISC-V softcore, NVMe stack, filesystem, networking, or generic ring —
 per #87 exclusions. Integrity is CRC-32 (IEEE 802.3).
 
@@ -10,10 +11,11 @@ per #87 exclusions. Integrity is CRC-32 (IEEE 802.3).
 > caller-supplied 0-based TID, while PENDING/DURABLE/VISIBLE remain *counts*;
 > the next valid request equals the durable count. A duplicate below the
 > durable count is rejected without a side effect. This register-only DUT
-> cannot compare a retry payload with persisted media, so the host must do
-> that before re-acknowledging an identical operation. This revision has not
-> passed an approved simulator, fitter, or same-board FPGA run. Historical
-> PASS counts later in this file belong to earlier source, not these bytes.
+> cannot compare a retry payload with persisted media. A future host would
+> need that comparison before re-acknowledging an identical operation. This
+> revision has off-board simulation of its register probe but no fitter or
+> same-board FPGA run. Historical PASS counts below may describe earlier
+> source; see the PR evidence for exact-source test results.
 
 ## Files
 
@@ -222,26 +224,28 @@ unexpressible and the continue-on-reject rule untestable.
 
 **BURST-RSP frame, FPGA → host, `13 + N` bytes (max 77):**
 `[0x44][0x55][RSP=0x85][COUNT=N]`
-+ N result bytes `R0..R{N-1}`: `bit0` COMMITTED (1 = entry committed,
-durable advanced) | `bit1` REJECT (`= ~COMMITTED`) | `bits[4:2]` CODE
++ N result bytes `R0..R{N-1}`: `bit0` COMMITTED (legacy wire name;
+1 = entry accepted and completed by the local FSM, with no media claim)
+| `bit1` REJECT (`= ~COMMITTED`) | `bits[4:2]` CODE
 (`0` none, `1` CRC_ERR, `2` DUP_SEQ, `3` GAP_SEQ, `4` MALFORMED,
 `5` OVERFLOW, `6..7` reserved) | `bits[7:5]` reserved 0
-+ `DURABLE_LO` (4 B LE) + `DURABLE_HI` (4 B LE, final watermark =
-committed count added to the pre-burst watermark)
++ `DURABLE_LO` (4 B LE) + `DURABLE_HI` (4 B LE, local ordering count
+after the burst; the register names are legacy and do not imply persistence)
 + `[CHK]`, `CHK = (RSP + COUNT + R0..R{N-1} + 8 watermark bytes) mod 256`.
 
 **Execution semantics (bridge-internal, fabric cycles):** the whole frame
-is buffered and checksum-validated BEFORE dispatch (a CHK failure commits
-nothing — no partial commit). Then, per entry: write
+is buffered and checksum-validated BEFORE dispatch (a CHK failure dispatches
+no entries). Then, per entry: write
 `EPOCH` (pinned to the frame-start value for all N) / `DESC0` / `DESC1` /
 `REQ_LO` / `REQ_HI=0` / `DESC_CRC` / `CTRL.SUBMIT`, settle past the commit
-pipeline, sample `ERROR`. Each entry is validated against the live durable
-count at feed time, so a mid-burst reject does NOT cascade: the code
+pipeline, sample `ERROR`. Each entry is validated against the live local
+ordering count at feed time, so a mid-burst reject does NOT cascade: the code
 is recorded, that entry's sticky `ERROR` bits are rw1c-cleared (required
 for per-entry isolation — otherwise entry i+1 would inherit entry i's
 bits), and the rest CONTINUE, never stall. Pre-existing sticky `ERROR`
 bits (set before the burst) are never cleared — only the entry's new bits
-are. The host derives every per-submit outcome from the result bytes.
+are. The host derives each local FSM outcome from the result bytes; none is
+a durable media receipt.
 
 **Resync rule:** `COUNT` 0 or >64 is a malformed frame (silent drop, no
 RSP). The DUT cannot know an invalid frame's length, so the rejected
@@ -267,7 +271,11 @@ cascade); B3 mid-burst CRC-bad (`C/CRC/C`, +2); B4 mid-burst GAP
 survives); B5 N=64 max-length frame (1029-byte CMD, 77-byte RSP, all 64
 commit, watermark +64); B6 malformed (`COUNT=0`, bad CHK → silent drop,
 resync-flush, link alive); B7 error-clear / IDLE / visible==durable.
-Same always-on monitors (trusted ⇒ persistent, watermarks monotonic).
+Same legacy ordering/monotonicity monitors; they do not prove persistence.
+
+### Current admission status: ordering only
+
+`DURABLE_LO/HI` and the burst-RSP watermark report a volatile FPGA ordering count, not crash-safe persistence. The experimental host log syncs `FRAME2`/`DATA2` records before writing and syncing a `SEAL2` marker. Recovery credits only validated, contiguous sealed frames, refuses unsealed or legacy records, and refuses every nonempty recovered log even if its count matches the FPGA. The fabric has no retained payload or epoch identity; an ACK can also precede every surviving log byte. The harness does not replay missing payloads or reconcile a reset count with a retained media identity. It currently refuses every durable submitting mode, even if future RTL reports all capability bits; raw diagnostic writes and resets are outside that refusal. Both RTL variants now expose read-only `ID_PROBE=SSP1` and `ID_CAPS=0` to identify this diagnostic ABI without claiming media capability. The `DURABLE_*` wire names remain for compatibility and mean “ordered” in this revision. No-double-apply, media recovery, and board acceptance remain unproved.
 
 ### CST story (build host only — no remote files touched)
 

@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-// durable_tid_v0.sv -- register-only durable completion gate (issue #87, v0).
+// durable_tid_v0.sv -- register-only ordered completion gate (issue #87, v0).
 //
-// Smallest FPGA experiment: a caller-sequenced commit FSM that
-// enforces the invariant
-//
-//    TRUSTED_COMPLETE(N) => PERSISTENT(N)
-//
-// i.e. the trusted-complete signal for sequence N is asserted only after N
-// has reached the persistent (durable) register set, and the committed /
-// visible watermarks never regress.
+// v0 ordering-only diagnostic: a caller-sequenced commit FSM advances a
+// fabric count after COMMIT_LATENCY cycles and emits a completion pulse.
+// This timer is not a media barrier. reset_n erases all fabric state; neither
+// the count nor HPS-writable EPOCH proves persisted payload/history identity.
+// Host durable/replay mode must refuse this version's zero-capability probe
+// at 0x05C/0x060.
 //
 // v0 EXCLUSIONS (per #87; do NOT add): BRAM queue, DMA engine, SHA,
 // RISC-V softcore, NVMe stack, filesystem, networking, generic ring.
@@ -40,7 +38,7 @@
 //   output        avs_waitrequest  -- tied 0 (always ready, single cycle)
 //   output        avs_readdatavalid-- registered: avs_read delayed 2 cycles
 //   output        trusted_complete_o -- 1-cycle pulse in COMPLETE state
-//   output [63:0] durable_tid_o   -- persistent watermark (observation)
+//   output [63:0] durable_tid_o   -- legacy-named ordered count (observation)
 //   output        busy_o           -- FSM not in IDLE (backpressure)
 //
 // 4 KB base-offset map (concrete offsets; replaces MISTER-DUT-PLAN TBDs).
@@ -52,9 +50,9 @@
 //   +0x008 PENDING_LO   (ro)  accepted-op count incl. in-flight
 //                             (= highest accepted TID + 1; parked at DURABLE
 //                             on soft reset), low 32.
-//   +0x00C DURABLE_LO   (ro)  TRUSTED_COMPLETE watermark as a COUNT of durable
-//                             ops (= highest durable TID + 1; 0 when empty).
-//                             Monotonic.
+//   +0x00C DURABLE_LO   (ro)  legacy-named ordered-op COUNT
+//                             (= highest ordered TID + 1; 0 when empty).
+//                             Not a media-durable witness.
 //   +0x010 VISIBLE_LO   (ro)  completion/visible count (= highest visible
 //                             TID + 1). Never regresses.
 //   +0x014 FSM_STATE    (ro)  commit-FSM encoding (low 3 bits).
@@ -90,11 +88,15 @@
 //   +0x03C TID_LO       (ro)  last committed TID, low 32.
 //   +0x040 TID_HI       (ro)  last committed TID, high 32.
 //   +0x044 REQ_HI       (rw)  requested 0-based TID, high 32 bits.
-//   +0x048 DURABLE_HI   (ro)  durable watermark (count), high 32.
+//   +0x048 DURABLE_HI   (ro)  legacy-named ordered count, high 32.
 //   +0x04C VISIBLE_HI   (ro)  visible watermark (count), high 32.
 //   +0x050 PENDING_HI   (ro)  pending watermark (count), high 32.
 //   +0x054 MAGIC        (ro)  0x44555230 ("DUR0").
 //   +0x058 VERSION      (ro)  0x00000001 (caller-supplied TID ABI).
+//   +0x05C ID_PROBE     (ro)  0x53535031 ("SSP1" capability ABI marker).
+//   +0x060 ID_CAPS      (ro)  0: no retained payload identity, independent
+//                             W/G fence, recovery-ready state or bound
+//                             media receipt. Never infer these from counts.
 //
 // Submit protocol (HPS side): write DESC0/DESC1/REQ_LO/REQ_HI/DESC_CRC, then
 // write CTRL.SUBMIT=1. Poll STATUS.BUSY==0, then read DURABLE/VISIBLE/ERROR.
@@ -103,7 +105,7 @@
 //
 // Reset semantics: hard reset (reset_n) zeroes everything. Soft reset
 // (fsm_reset_i or CTRL.SOFT_RST) parks the FSM in IDLE, sets
-// PENDING=DURABLE (in-flight dropped, never surfaced as durable) and preserves
+// PENDING=DURABLE (in-flight dropped, never surfaced as ordered) and preserves
 // EPOCH/DURABLE/VISIBLE. The caller may resubmit the same 0-based TID because
 // the next accepted TID is always the durable COUNT. A duplicate below that
 // count has no hardware side effect; re-ack requires a host comparison with
@@ -113,8 +115,8 @@
 `timescale 1ns / 1ps
 
 module durable_tid_v0 #(
-  parameter integer COMMIT_LATENCY = 2  // cycles spent in COMMIT (persistence
-                                        // barrier model; also the HPS fault-
+  parameter integer COMMIT_LATENCY = 2  // cycles spent in COMMIT (ordering
+                                        // delay model, not a media barrier; also the HPS fault-
                                         // injection window for reset mid-commit)
 ) (
   input  logic        clk,
@@ -157,9 +159,13 @@ module durable_tid_v0 #(
   localparam integer W_PEND_HI  = 12'h050 >> 2;
   localparam integer W_MAGIC    = 12'h054 >> 2;
   localparam integer W_VERSION  = 12'h058 >> 2;
+  localparam integer W_ID_PROBE = 12'h05C >> 2;
+  localparam integer W_ID_CAPS  = 12'h060 >> 2;
 
   localparam logic [31:0] MAGIC_VAL   = 32'h44555230; // "DUR0"
   localparam logic [31:0] VERSION_VAL = 32'h00000001; // caller-supplied TID ABI
+  localparam logic [31:0] ID_PROBE_VAL = 32'h53535031; // SSP1 capability ABI marker
+  localparam logic [31:0] ID_CAPS_VAL  = 32'h00000000; // no media backend
 
   // FSM encoding (3 bits: S_CRC added 2026-09-25 for the pipelined
   // CRC -- stage 1 registers the first-half CRC in S_SUBMIT, stage 2
@@ -182,8 +188,8 @@ module durable_tid_v0 #(
   // State.
   logic [31:0] epoch;
   logic [31:0] req_lo, req_hi;
-  logic [63:0] pending;     // accepted but not yet durable
-  logic [63:0] durable;     // PERSISTENT watermark (monotonic)
+  logic [63:0] pending;     // accepted but not yet ordered
+  logic [63:0] durable;     // legacy-named ordered count (resettable)
   logic [63:0] visible;     // completion/visible watermark (never regresses)
   logic [63:0] tid_last;    // last committed TID
   logic [2:0]  state;       // 3 bits: S_CRC added for the pipelined CRC
@@ -322,6 +328,8 @@ module durable_tid_v0 #(
       W_PEND_HI:  rd_mux = pending[63:32];
       W_MAGIC:    rd_mux = MAGIC_VAL;
       W_VERSION:  rd_mux = VERSION_VAL;
+      W_ID_PROBE: rd_mux = ID_PROBE_VAL;
+      W_ID_CAPS:  rd_mux = ID_CAPS_VAL;
       default:    rd_mux = 32'h00000000;
     endcase
   end
@@ -373,13 +381,13 @@ module durable_tid_v0 #(
       // the old clocked branch assigned nothing to them here either).
       state_n       = S_IDLE;
       ctrl_n        = 32'h00000000;
-      pending_n     = durable; // in-flight never surfaces as durable
+      pending_n     = durable; // in-flight never surfaces as ordered
       reset_cnt_n   = reset_cnt + 32'h00000001;
       commit_hold_n = 2'd0;
       if (state == S_SUBMIT || state == S_CRC || state == S_COMMIT) begin
         err_n[E_RSTMID] = 1'b1;
         // No allocation to revoke: durable remains the next valid 0-based
-        // request TID until the persistence barrier advances it.
+        // request TID until the ordering timer advances the count.
       end
     end else begin
       // --- read pipeline advances (frozen under soft reset above) ----
@@ -473,7 +481,7 @@ module durable_tid_v0 #(
           end
           if (~crc_fin_comb == lat_crc) begin
             crc_ok_last_n = 1'b1;
-            // Watermarks are COUNTS (highest durable TID + 1): the accepted
+            // Watermarks are COUNTS (highest ordered TID + 1): the accepted
             // TID lat_tid surfaces as lat_tid+1 in PENDING/DURABLE/VISIBLE,
             // matching what the HPS harness oracle compares (count of
             // committed ops). tid_last keeps the 0-based TID (see COMPLETE).
@@ -487,10 +495,10 @@ module durable_tid_v0 #(
           end
         end
         S_COMMIT: begin
-          // Persistence barrier model. DURABLE advances here and only
-          // here; a soft reset in this state drops the op instead.
+          // Ordering delay only. No media receipt or persistence barrier.
+          // A soft reset here drops the in-flight op.
           if (commit_hold == 2'd0) begin
-            durable_n = pending; // PERSISTENT(N) established
+            durable_n = pending; // legacy register name; ordered count only
             state_n   = S_COMPLETE;
           end else begin
             commit_hold_n = commit_hold - 2'd1;
@@ -501,8 +509,7 @@ module durable_tid_v0 #(
           end
         end
         S_COMPLETE: begin
-          // TRUSTED_COMPLETE(N) asserted only with DURABLE == N already
-          // persistent (written in S_COMMIT the previous cycle(s)).
+          // Legacy completion pulse is not a media-durable receipt.
           visible_n         = durable;
           tid_last_n        = lat_tid; // 0-based TID; watermarks hold +1
           complete_sticky_n = 1'b1;

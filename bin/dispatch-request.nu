@@ -174,7 +174,7 @@ export def validate-request [req: any, workflows_dir: string, --branches: any = 
 
 # The JSON body GitHub's workflow-dispatch REST endpoint expects.
 export def dispatch-body [req: record]: nothing -> string {
-    { ref: $req.ref, inputs: $req.inputs } | to json -r
+    { ref: $req.ref, inputs: $req.inputs, return_run_details: true } | to json -r
 }
 
 def gh-bin []: nothing -> string { $env | get -o DISPATCH_GH | default "gh" }
@@ -281,41 +281,34 @@ def "main run" [--file: string, --workflows-dir: string = "target/.github/workfl
     let req = (validate-request (read-request $file) $workflows_dir)
     if not (branch-exists $repo $req.ref) { reject $"ref (show $req.ref) is not a branch of this repo" }
     let wf = $req.workflow
-    let before = (gh-ok ["run" "list" "-R" $repo "-w" $wf "-e" "workflow_dispatch" "-L" "20" "--json" "databaseId"])
-    let max_before = if $before.exit_code == 0 { ($before.stdout | from json | get databaseId | append 0 | math max) } else { 0 }
-    let res = (dispatch-body $req | do { ^(gh-bin) api --method POST $"repos/($repo)/actions/workflows/($wf)/dispatches" --input - } | complete)
+    let res = (dispatch-body $req | do { ^(gh-bin) api --method POST -H "X-GitHub-Api-Version: 2022-11-28" $"repos/($repo)/actions/workflows/($wf)/dispatches" --input - } | complete)
     if $res.exit_code != 0 { reject $"dispatch API call failed: ($res.stderr | str trim)" }
     summary $"Dispatched ($wf) on ($req.ref) with inputs ($req.inputs | to json -r)"
-    # The dispatch API returns 204 without a run id: find the new run.
-    mut run = {}
-    let poll_s = ($env | get -o DISPATCH_POLL_SECONDS | default "5" | into int)
-    for _ in 1..24 {
-        let l = (gh-ok ["run" "list" "-R" $repo "-w" $wf "-e" "workflow_dispatch" "-b" $req.ref "-L" "20" "--json" "databaseId,url"])
-        if $l.exit_code == 0 {
-            let fresh = ($l.stdout | from json | where databaseId > $max_before)
-            if ($fresh | is-not-empty) { $run = ($fresh | sort-by databaseId | last); break }
-        }
-        sleep ($poll_s * 1sec)
-    }
-    if ($run | is-empty) { reject "dispatch accepted but no new run appeared within 2 minutes (check the Actions tab)" }
-    summary $"Run URL: ($run.url)"
-    emit-output "run_url" $run.url
-    emit-output "run_id" ($run.databaseId | into string)
+    let receipt = try { $res.stdout | from json } catch { reject "dispatch accepted but returned no run details; outcome unknown" }
+    if not (is-record $receipt) { reject "dispatch response is not a run-details object" }
+    if not (has-key $receipt "workflow_run_id") { reject "dispatch response has no workflow_run_id" }
+    if ($receipt.workflow_run_id | describe) != "int" { reject "dispatch response has invalid workflow_run_id" }
+    let run_id = $receipt.workflow_run_id
+    if $run_id <= 0 { reject "dispatch response has invalid workflow_run_id" }
+    let run_url = $"https://github.com/($repo)/actions/runs/($run_id)"
+    summary $"Run URL: ($run_url)"
+    emit-output "run_url" $run_url
+    emit-output "run_id" ($run_id | into string)
     if $req.watch {
         let deadline = ((date now) + ($req.timeout_minutes * 1min))
         let watch_s = ($env | get -o DISPATCH_WATCH_SECONDS | default "30" | into int)
         loop {
-            let v = (gh-ok ["run" "view" ($run.databaseId | into string) "-R" $repo "--json" "status,conclusion"])
+            let v = (gh-ok ["run" "view" ($run_id | into string) "-R" $repo "--json" "status,conclusion"])
             if $v.exit_code == 0 {
                 let s = ($v.stdout | from json)
                 if $s.status == "completed" {
                     summary $"Run finished: ($s.conclusion)"
-                    if $s.conclusion != "success" { reject $"dispatched run concluded ($s.conclusion): ($run.url)" }
+                    if $s.conclusion != "success" { reject $"dispatched run concluded ($s.conclusion): ($run_url)" }
                     return
                 }
             }
             if (date now) > $deadline {
-                summary $"Watch timed out after ($req.timeout_minutes) min; run continues: ($run.url)"
+                summary $"Watch timed out after ($req.timeout_minutes) min; run continues: ($run_url)"
                 reject "watch timeout"
             }
             sleep ($watch_s * 1sec)

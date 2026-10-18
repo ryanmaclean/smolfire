@@ -1,23 +1,21 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Media-log v2 source and execution gates
 
-Status: C/Nu native logical observer source published; exact-head hosted execution, RTL, physical media and board acceptance HOLD.
+Status: C/Nu native logical observer, retained C vectors and an Icarus Verilog RTL simulation gate run in PR124 Linux CI (source/model evidence only); physical media, HPS W/G authority and board acceptance HOLD.
 
 ## Record offset contract
 
 ml2_checked_slot_offset treats maximum_offset as an inclusive byte ceiling. A successful result proves both the first byte index*stride and final byte index*stride+55 fit. It first rejects a ceiling below55 and compares index against (ceiling-55)/stride before multiplication. Null output and zero stride fail; failure leaves an existing output value untouched. This helper does not prove physical extent, disjoint failure units, an acceptable stride, or any barrier. A stride below56 remains representable for logical diagnostics and must not be admitted as isolated physical storage.
 
-## No diagnostic-tool exception
+## CI gate and tool approvals
 
-The PR124-specific Icarus installation, Bash/mapfile/process-substitution orchestration, Git assertion, coreutils hashing/timeout and artifact-as-PASS path have been removed. tests/pr124-offboard-gate.nu now fails explicitly and launches no external tool. The PR124 Linux CI step also reports HOLD using Nushell; neither general CI success nor old artifact banners replace this gate. The rest of the repository CI is not audited or admitted by this change. Do not execute any route until the complete selected remote tool/dependency graph satisfies the MIT/BSD/Apache-only rule. No simulator replacement or new tool dependency is asserted.
+Owner approvals recorded 2026-10-18 on PR124: (1) the retained hps/media_log_v2_test.c is kept as a C test; (2) Icarus Verilog (GPL) is allowed ONLY as a CI/test tool for RTL simulation. It is installed from the runner package manager at CI time, never vendored, shipped or linked. No other GPL tool exception is granted.
 
-## Published logical observer and missing execution gate
+tests/pr124-offboard-gate.nu (Nushell; workflow glue is POSIX sh for the apt install only) builds and runs: the retained C vectors plus a deliberate-failure control that must exit 1; the native logical observer (actual ml2_decode_record / ml2_scan / ml2_checked_slot_offset) driven by tests/media-log-v2-observe.nu with 60 cases, 13 malformed requests and six fake-output controls, including wrong-store, wrong-epoch and wrong-TID vectors that must reach ML2_FAULT_IDENTITY / ML2_FAULT_TID with a cleared candidate; and both rtl/durable_tid_v0.sv and .v against durable_tid_v0_tb.sv (119 passed / 0 failed) with a deliberate-failure control per variant that must exit nonzero. A green gate is source/model evidence for these logical and RTL-model checks only.
 
-New tests/scripts must be Nushell under AGENTS.md. Existing hps/media_log_v2_test.c is preserved unchanged for provenance; its prior execution and language choice are not newly authorized. The existing UART harness comment claims a historical C(termios) ruling, but does not establish approval for a new C media RPC/test harness. No C assertions were moved behind a Nushell wrapper and no parallel decoder was created.
+## Published logical observer
 
-tests/media-log-v2-fixtures.nu exports 28 fixed-vector cases. Published hps/media_log_observe.c invokes the actual decoder/scanner functions, and tests/media-log-v2-observe.nu checks 60 native semantic cases, 13 malformed native requests and six fake-output controls. The driver checks full-width decimal u64 fields, callback observations, identity/TID faults and output clearing. These are source-defined logical controls, not an exact-head hosted CI receipt.
-
-A historical off-laptop run of the identical published logical source bytes was independently witnessed, but preceded publication. A new exact-head logical CI route requires a selected remote runner and complete MIT/BSD/Apache-2.0 closure for its compiler/linker, Nushell, timeout, runtime, actions and helpers. The retained C aggregate test still needs separate language approval. Even a passing logical route would not prove RTL, HPS/media W/G authority, board provenance or physical power-cut recovery.
+New tests/scripts must be Nushell under AGENTS.md. hps/media_log_v2_test.c is retained with owner approval (above). The UART harness comment claims a historical C(termios) ruling, which is not relied on here. No C assertions were moved behind a Nushell wrapper and no parallel decoder was created. tests/media-log-v2-fixtures.nu exports 28 fixed-vector cases and hps/media_log_observe.c is the callable native seam; expected values and pass/fail logic stay in Nushell.
 
 ## HPS/media completion remains unavailable
 

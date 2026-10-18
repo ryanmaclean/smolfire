@@ -213,13 +213,45 @@ jobs:
           nu bin/durable-tid-model.nu
           nu tests/durable-tid-model-test.nu
 
-      # PR124 publishes a C observer and Nu driver, but has no admitted
-      # exact-head CI execution or RTL/media/physical acceptance route.
-      - name: PR124 native media and RTL gate unavailable
+      # PR124 source/model gate: retained C vectors, native logical observer and
+      # both RTL variants under Icarus Verilog. Icarus (GPL) is owner-approved
+      # (2026-10-18) ONLY as a CI/test tool installed from the runner package
+      # manager at CI time; it is never vendored, shipped or linked. Earlier
+      # generic checks use GitHub's PR merge tree; this gate checks the
+      # submitted PR head instead. Source/model evidence only: no physical
+      # media, HPS W/G authority, board or power-cut claim.
+      - name: Check out exact source head for PR124 gate (Linux)
         if: runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install Icarus Verilog (CI test tool only, PR124 Linux)
+        if: runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends iverilog
+
+      - name: PR124 C + native observer + RTL (Icarus) gate (Linux)
+        if: runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        timeout-minutes: 15
         shell: nu {0}
         run: |
-          error make {msg: "PR124 HOLD: exact-head logical CI tool graph, RTL/media W/G authority and physical acceptance are unproved; see docs/MEDIA-LOG-V2-SOURCE-GATES.md"}
+          nu tests/pr124-offboard-gate.nu ($env.RUNNER_TEMP | path join "pr124-offboard")
+
+      - name: Upload PR124 gate raw evidence (Linux)
+        if: always() && runner.os == 'Linux' && github.event_name == 'pull_request' && github.event.pull_request.number == 124
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr124-offboard-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/pr124-offboard/*.json
+            ${{ runner.temp }}/pr124-offboard/*.stdout
+            ${{ runner.temp }}/pr124-offboard/*.stderr
+            ${{ runner.temp }}/pr124-offboard/*.txt
+          if-no-files-found: warn
+          retention-days: 7
 
   # ── Shell script linting ─────────────────────────────────────────────────────
   shellcheck:

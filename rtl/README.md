@@ -49,9 +49,12 @@ testbench is hardware verification, not a repo test script.
 
 Icarus Verilog 13.0 (`brew install icarus-verilog`, ~7 MB):
 
-Current execution gate: **HOLD**. The former Icarus invocation is not permitted
-under the all-tools MIT/BSD/Apache policy. Historical results below are not
-current execution admission; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
+Current execution gate: PR124 Linux CI runs `tests/pr124-offboard-gate.nu`, which
+simulates `durable_tid_v0_tb.sv` against both the `.sv` and `.v` DUTs under Icarus
+Verilog (119 passed / 0 failed, plus a deliberate-failure control per variant).
+Icarus (GPL) is owner-approved 2026-10-18 as a CI/test tool only: installed from
+the runner package manager at CI time, never vendored, shipped or linked. Source/model
+evidence only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
 
 Fixes applied to reach PASS (register map UNCHANGED — offsets, widths,
 semantics of the map itself untouched):
@@ -250,9 +253,10 @@ resumes (verify with PING). Length-known rejects (bad magic/checksum on a
 
 ### Burst TB status: PASS (42 checks, icarus 13.0)
 
-Current execution gate: **HOLD**. The former Icarus invocation is not permitted
-under the all-tools MIT/BSD/Apache policy. Historical results below are not
-current execution admission; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
+Current execution gate: **HOLD** for this testbench. The PR124 CI gate runs only
+`durable_tid_v0_tb.sv`; this UART testbench is not run by it, so the historical
+results below are not current execution admission (Icarus is allowed as a CI/test
+tool only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md)).
 
 `rtl/dut_uart_burst_tb.sv` (new; `dut_uart_tb.sv` untouched, still 43):
 B0 N=1 / B1 N=2 good; B2 mid-burst DUP (`C/DUP/C`, watermark +2, no
@@ -279,9 +283,10 @@ IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
 
 ### UART TB status: PASS (verified 2026-09-25, icarus 13.0)
 
-Current execution gate: **HOLD**. The former Icarus invocation is not permitted
-under the all-tools MIT/BSD/Apache policy. Historical results below are not
-current execution admission; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
+Current execution gate: **HOLD** for this testbench. The PR124 CI gate runs only
+`durable_tid_v0_tb.sv`; this UART testbench is not run by it, so the historical
+results below are not current execution admission (Icarus is allowed as a CI/test
+tool only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md)).
 
 The TB drives the 50 MHz board clock (= fabric clock, direct) and runs at the HARDWARE baud
 (`BAUD=115200`, divisor 434 cycles/bit) so
@@ -318,9 +323,12 @@ remain covered by the parallel 48-check suite (still PASS, DUT untouched).
 
 ## How the TB runs (once a simulator exists)
 
-Current execution gate: **HOLD**. The former Icarus invocation is not permitted
-under the all-tools MIT/BSD/Apache policy. Historical results below are not
-current execution admission; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
+Current execution gate: PR124 Linux CI runs `tests/pr124-offboard-gate.nu`, which
+simulates `durable_tid_v0_tb.sv` against both the `.sv` and `.v` DUTs under Icarus
+Verilog (119 passed / 0 failed, plus a deliberate-failure control per variant).
+Icarus (GPL) is owner-approved 2026-10-18 as a CI/test tool only: installed from
+the runner package manager at CI time, never vendored, shipped or linked. Source/model
+evidence only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
 
 The TB assumes the default `COMMIT_LATENCY=2` for the reset-mid-commit
 injection window (TEST 6); if the parameter is changed, adjust TEST 6.

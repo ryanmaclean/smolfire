@@ -102,6 +102,22 @@ nodevice ppbus
 nodevice lpt
 
 # -----------------------------------------------------------------------
+# Strip PS/2 keyboard + mouse (i8042 KBC) — boot-time cut #1
+# -----------------------------------------------------------------------
+# Evidence: serial transcript of the shipped 0.5.0 amd64 qcow2 (QEMU q35, TCG,
+# per-line timestamps): atkbdc0 -> atkbd0 -> psm0 probe spans 7135 -> 8549 ms,
+# ~1.4 s of a ~2.7 s kernel phase, and psm0 prints a "Giant locked" WARNING.
+# Same-image A/B with hint.{atkbdc,atkbd,psm}.0.disabled="1" in loader.conf
+# (the runtime equivalent of removing the drivers): see
+# docs/BOOT-TIME-ROADMAP.md section 2.9. Input is serial (uart0) + virtio only;
+# kbdmux + vt stay (the arm64 kernel boots with kbdmux and no atkbd), so the
+# VGA/vt console and the serial console are unaffected.
+nodevice atkbdc
+nodevice atkbd
+nodevice psm
+nodevice ppi            # parallel-port interface (ppbus/ppc/lpt already gone)
+
+# -----------------------------------------------------------------------
 # Strip sound (headless server image)
 # -----------------------------------------------------------------------
 nooptions SND_SUPPORT

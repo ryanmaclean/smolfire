@@ -14,7 +14,7 @@ safety rails, and `tests/shrink-image-test.nu` for the removal-class tests.
 ## Run: Phase‑1 aarch64 image, `coordinator` profile
 
 Executed on the FreeBSD 15.0-RELEASE-p5 amd64 build host
-(`root@108.61.206.203`, 2 vCPU / 4 GiB RAM), against the Phase‑1 aarch64
+(`root@<vultr-build-host>`, 2 vCPU / 4 GiB RAM), against the Phase‑1 aarch64
 image copied there as `/root/shrink/a64.qcow2`:
 
 ```

@@ -154,9 +154,22 @@ def test-idle-to-harvesting-to-idle [] {
     let root = make-temp-root
 
     let msg_id = "<task-0001.tester@smolfire.local>"
-    let envelope = make-reply-msg $msg_id ""
-
-    $envelope | save ($root | path join "var" "mail" "spool")
+    let dispatch_id = "<task-0001.dispatch@smolfire.local>"
+    let envelope = make-reply-msg $msg_id $dispatch_id
+    let issued = $"From coordinator@smolfire.local Mon May  4 10:00:00 2026\nFrom: coordinator@smolfire.local\nTo: builder@smolfire.local\nMessage-ID: ($dispatch_id)\nContent-Type: text/toml; charset=utf-8\n\ntask_id = \"test-task\"\naction = \"dispatch\"\nexecutor = \"vm\"\n\n"
+    ($issued + $envelope) | save ($root | path join "var" "mail" "spool")
+    {
+        version: "1"
+        tick_count: 0
+        fsm_state: "idle"
+        seen_ids: [$dispatch_id]
+        last_tick_at: "2026-05-04T10:00:00Z"
+        pending_request_id: ""
+        pending_task_id: ""
+        pending_to_addr: ""
+        dispatched_at: ""
+        task_executors: {"test-task": {executor: "vm", network: false, request_id: $dispatch_id, current_dispatch_id: $dispatch_id}}
+    } | to toml | save ($root | path join "var" "run" "coord-state.toml")
 
     let r = run-coord $root "var/mail/spool" "var/run/coord-state.toml" 5
 
@@ -166,7 +179,8 @@ def test-idle-to-harvesting-to-idle [] {
     let ok = (
         $r.exit_code == 0
         and ($state | get fsm_state? | default "") == "idle"
-        and ($seen | length) == 1
+        and ($seen | length) == 2
+        and ($seen | any {|id| $id == $dispatch_id})
         and ($seen | any {|id| $id == $msg_id})
         and ($r.stdout | str contains "harvest_message")
     )
@@ -390,6 +404,18 @@ def mbox-msg [
     $"From ($from_addr) Mon May  4 10:00:00 2026\nFrom: ($from_addr)\nTo: ($to_addr)\nSubject: s005 fixture\nMessage-ID: ($msg_id)\n($irt)Content-Type: text/toml; charset=utf-8\n\n($body)\n\n"
 }
 
+# A valid reply needs an issued coordinator dispatch and a persisted current
+# attempt. Seed both without introducing extra telemetry transitions.
+def issued-dispatch-msg [task: string, dispatch_id: string] {
+    mbox-msg "coordinator@smolfire.local" "builder@smolfire.local" $dispatch_id $"task_id = \"($task)\"\naction = \"dispatch\"\nexecutor = \"vm\""
+}
+
+def seed-issued [root: string, task: string, dispatch_id: string, --attempts: int = 0] {
+    let execs = {} | upsert $task {executor: "vm", network: false, request_id: $dispatch_id, current_dispatch_id: $dispatch_id}
+    let counts = if $attempts > 0 { {} | upsert $task $attempts } else { {} }
+    seed-state {seen_ids: [$dispatch_id], task_executors: $execs, attempt_counts: $counts} | to toml | save ([$root, $STATE_REL] | path join)
+}
+
 def spool-path [root: string] { [$root, $SPOOL_REL] | path join }
 
 # Collapse a list of run-coord results into one scenario record.
@@ -431,7 +457,9 @@ def scenario-halt [] {
 def scenario-fail-retry [] {
     let root  = make-temp-root
     let spool = spool-path $root
-    mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-retry.r0@smolfire.local>" "task_id = \"s5-retry\"\nverdict = \"fail\"" | save $spool
+    let dispatch_id = "<s5-retry.d0@smolfire.local>"
+    seed-issued $root "s5-retry" $dispatch_id
+    ((issued-dispatch-msg "s5-retry" $dispatch_id) + (mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-retry.r0@smolfire.local>" "task_id = \"s5-retry\"\nverdict = \"fail\"" --in-reply-to $dispatch_id)) | save $spool
     let r1 = run-coord $root $SPOOL_REL $STATE_REL 10
     let pending = $r1.state | get pending_request_id? | default ""
     mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-retry.r1@smolfire.local>" "task_id = \"s5-retry\"\nverdict = \"fail\"" --in-reply-to $pending | save --append $spool
@@ -446,8 +474,9 @@ def scenario-fail-retry [] {
 # and the task stays halted.
 def scenario-escalate-exhausted [] {
     let root = make-temp-root
-    seed-state {attempt_counts: {"s5-esc": 3}} | to toml | save ([$root, $STATE_REL] | path join)
-    mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-esc.r3@smolfire.local>" "task_id = \"s5-esc\"\nverdict = \"fail\"" | save (spool-path $root)
+    let dispatch_id = "<s5-esc.d3@smolfire.local>"
+    seed-issued $root "s5-esc" $dispatch_id --attempts 3
+    ((issued-dispatch-msg "s5-esc" $dispatch_id) + (mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-esc.r3@smolfire.local>" "task_id = \"s5-esc\"\nverdict = \"fail\"" --in-reply-to $dispatch_id)) | save (spool-path $root)
     let r1 = run-coord $root $SPOOL_REL $STATE_REL 10
     let r2 = run-coord $root $SPOOL_REL $STATE_REL 10
     cleanup $root
@@ -457,7 +486,9 @@ def scenario-escalate-exhausted [] {
 # Scenario: blocked reply with no blocked_by → immediate HALT no-unblocker.
 def scenario-escalate-no-unblocker [] {
     let root = make-temp-root
-    mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-blk.r0@smolfire.local>" "task_id = \"s5-blk\"\nverdict = \"blocked\"" | save (spool-path $root)
+    let dispatch_id = "<s5-blk.d0@smolfire.local>"
+    seed-issued $root "s5-blk" $dispatch_id
+    ((issued-dispatch-msg "s5-blk" $dispatch_id) + (mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-blk.r0@smolfire.local>" "task_id = \"s5-blk\"\nverdict = \"blocked\"" --in-reply-to $dispatch_id)) | save (spool-path $root)
     let r1 = run-coord $root $SPOOL_REL $STATE_REL 10
     cleanup $root
     scenario-result "escalate-no-unblocker" [$r1]
@@ -475,7 +506,9 @@ def scenario-malformed [] {
 # Scenario: pass reply that required attestation but carries no [[claims]] → malformed + retry.
 def scenario-attestation-malformed [] {
     let root = make-temp-root
-    mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-att.r0@smolfire.local>" "task_id = \"s5-att\"\nverdict = \"pass\"\nattestation_required = true" | save (spool-path $root)
+    let dispatch_id = "<s5-att.d0@smolfire.local>"
+    seed-issued $root "s5-att" $dispatch_id
+    ((issued-dispatch-msg "s5-att" $dispatch_id) + (mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-att.r0@smolfire.local>" "task_id = \"s5-att\"\nverdict = \"pass\"\nattestation_required = true" --in-reply-to $dispatch_id)) | save (spool-path $root)
     let r1 = run-coord $root $SPOOL_REL $STATE_REL 10
     cleanup $root
     scenario-result "attestation-malformed" [$r1]
@@ -484,7 +517,9 @@ def scenario-attestation-malformed [] {
 # Scenario: verdict outside the protocol enum → verdict=unknown, no state change.
 def scenario-unknown-verdict [] {
     let root = make-temp-root
-    mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-unk.r0@smolfire.local>" "task_id = \"s5-unk\"\nverdict = \"maybe\"" | save (spool-path $root)
+    let dispatch_id = "<s5-unk.d0@smolfire.local>"
+    seed-issued $root "s5-unk" $dispatch_id
+    ((issued-dispatch-msg "s5-unk" $dispatch_id) + (mbox-msg "builder@smolfire.local" "coordinator@smolfire.local" "<s5-unk.r0@smolfire.local>" "task_id = \"s5-unk\"\nverdict = \"maybe\"" --in-reply-to $dispatch_id)) | save (spool-path $root)
     let r1 = run-coord $root $SPOOL_REL $STATE_REL 10
     cleanup $root
     scenario-result "unknown-verdict" [$r1]

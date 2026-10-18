@@ -309,10 +309,17 @@ do {
 
     # pending_task_id exempts t-e from the entry sweep, isolating the
     # harvest-escalation release path: attempts=3 + fail → HALT + slot gone.
-    write-spool $spool_abs (make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<fail.rl8@host>" "verdict = \"fail\"\ntask_id = \"t-e\"")
+    let dispatch_id = "<dispatch.rl8@host>"
+    let issued = make-msg "coordinator@smolfire.local" "agent@smolfire.local" $dispatch_id "task_id = \"t-e\"\naction = \"dispatch\"\nexecutor = \"vm\""
+    let reply = make-msg "agent@smolfire.local" "coordinator@smolfire.local" "<fail.rl8@host>" "verdict = \"fail\"\ntask_id = \"t-e\"" --in-reply-to $dispatch_id
+    write-spool $spool_abs ($issued + $reply)
     write-state $state_abs ((base-state)
+        | update seen_ids [$dispatch_id]
+        | update pending_request_id $dispatch_id
         | update pending_task_id "t-e"
+        | update pending_to_addr "agent@smolfire.local"
         | update attempt_counts {"t-e": 3}
+        | update task_executors {"t-e": {executor: "vm", network: false, request_id: "<req.rl8@host>", current_dispatch_id: $dispatch_id}}
         | update inflight {"t-e": {executor: "vm", since_tick: 10}})
 
     run-tick $tmp $state_rel $spool_rel

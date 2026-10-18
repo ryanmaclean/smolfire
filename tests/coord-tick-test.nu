@@ -89,6 +89,31 @@ def make-msg [
     ($header_lines | str join "\n") + "\n\n" + $body + "\n"
 }
 
+def issued-dispatch [task: string, dispatch_id: string, --to: string = "agent@smolfire.local", --parent: string = ""] {
+    make-msg "coordinator@smolfire.local" $to $dispatch_id $"task_id = \"($task)\"\naction = \"dispatch\"\nexecutor = \"vm\"" --in-reply-to $parent
+}
+
+# Model the state after a real dispatch was issued and its waiting slot was
+# released for harvesting. An unthreaded direct reply can no longer settle.
+def issued-state [task: string, dispatch_id: string, --attempts: int = 0, --request-id: string = ""] {
+    let original = if $request_id == "" { $dispatch_id } else { $request_id }
+    let counts = if $attempts > 0 { {} | upsert $task $attempts } else { {} }
+    let execs = {} | upsert $task {executor: "vm", network: false, request_id: $original, current_dispatch_id: $dispatch_id}
+    {
+        version: "1"
+        tick_count: 0
+        fsm_state: "idle"
+        seen_ids: [$dispatch_id]
+        last_tick_at: "2026-01-01T00:00:00Z"
+        pending_request_id: ""
+        pending_task_id: ""
+        pending_to_addr: ""
+        dispatched_at: ""
+        attempt_counts: $counts
+        task_executors: $execs
+    }
+}
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 print "test 1: idle — no spool"
@@ -149,8 +174,10 @@ do {
 
     let msg_id = "<reply.pass.001@host>"
     let body = "verdict = \"pass\"\ntask_id = \"t1\""
-    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body
-    write-spool $spool_abs $msg
+    let dispatch_id = "<dispatch.t1@host>"
+    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body --in-reply-to $dispatch_id
+    write-spool $spool_abs ((issued-dispatch "t1" $dispatch_id) + $msg)
+    write-state $state_abs (issued-state "t1" $dispatch_id)
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -233,17 +260,19 @@ do {
     let body = "verdict = \"pass\"\ntask_id = \"t2\""
     let msg = (make-msg "agent@smolfire.local" "coordinator@smolfire.local" $reply_id $body
                --in-reply-to $pending_id)
-    write-spool $spool_abs $msg
+    write-spool $spool_abs ((issued-dispatch "t2" $pending_id) + $msg)
 
     write-state $state_abs {
         version:            "1"
         tick_count:         2
         fsm_state:          "waiting"
-        seen_ids:           []
+        seen_ids:           [$pending_id]
         last_tick_at:       "2026-01-01T00:00:00Z"
         pending_request_id: $pending_id
         pending_task_id:    "t2"
         pending_to_addr:    "agent@smolfire.local"
+        dispatched_at:      "2026-01-01T00:00:00Z"
+        task_executors:     {t2: {executor: "vm", network: false, request_id: "<original.t2@host>", current_dispatch_id: $pending_id}}
     }
 
     run-tick $tmp $state_rel $spool_rel
@@ -288,8 +317,10 @@ do {
 
     let msg_id = "<reply.fail.t3@host>"
     let body = "verdict = \"fail\"\ntask_id = \"t3\""
-    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body
-    write-spool $spool_abs $msg
+    let dispatch_id = "<dispatch.t3@host>"
+    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body --in-reply-to $dispatch_id
+    write-spool $spool_abs ((issued-dispatch "t3" $dispatch_id) + $msg)
+    write-state $state_abs (issued-state "t3" $dispatch_id)
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -315,8 +346,10 @@ do {
 
     let msg_id = "<fail.1@host>"
     let body = "verdict = \"fail\"\ntask_id = \"t-retry\""
-    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body
-    write-spool $spool_abs $msg
+    let dispatch_id = "<dispatch.t-retry@host>"
+    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body --in-reply-to $dispatch_id
+    write-spool $spool_abs ((issued-dispatch "t-retry" $dispatch_id) + $msg)
+    write-state $state_abs (issued-state "t-retry" $dispatch_id)
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -341,26 +374,14 @@ do {
     let spool_dir = [$tmp, "var", "mail"] | path join
     mkdir $spool_dir
 
-    # Manually write state with attempt_counts = {t-exhaust: 3}
-    let state_dir = [$tmp, "var", "run"] | path join
-    mkdir $state_dir
-    (
-        "version = \"1\"\n" +
-        "tick_count = 0\n" +
-        "fsm_state = \"idle\"\n" +
-        "seen_ids = []\n" +
-        "last_tick_at = \"2026-01-01T00:00:00Z\"\n" +
-        "pending_request_id = \"\"\n" +
-        "pending_task_id = \"\"\n" +
-        "pending_to_addr = \"\"\n\n" +
-        "[attempt_counts]\n" +
-        "t-exhaust = 3\n"
-    ) | save --force $state_abs
+    # The third failure belongs to an issued current dispatch.
+    let dispatch_id = "<dispatch.t-exhaust@host>"
+    write-state $state_abs (issued-state "t-exhaust" $dispatch_id --attempts 3)
 
     let msg_id = "<fail.exhaust@host>"
     let body = "verdict = \"fail\"\ntask_id = \"t-exhaust\""
-    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body
-    write-spool $spool_abs $msg
+    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body --in-reply-to $dispatch_id
+    write-spool $spool_abs ((issued-dispatch "t-exhaust" $dispatch_id) + $msg)
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -406,8 +427,10 @@ do {
 
     let msg_id = "<attest.fail.t-attest@host>"
     let body = "verdict = \"pass\"\ntask_id = \"t-attest\"\nattestation_required = true"
-    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body
-    write-spool $spool_abs $msg
+    let dispatch_id = "<dispatch.t-attest@host>"
+    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body --in-reply-to $dispatch_id
+    write-spool $spool_abs ((issued-dispatch "t-attest" $dispatch_id) + $msg)
+    write-state $state_abs (issued-state "t-attest" $dispatch_id)
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -434,9 +457,12 @@ do {
 
     let reply_id = "<reply.attest.t-attest-req@host>"
     let reply_body = "verdict = \"pass\"\ntask_id = \"t-attest-req\""
-    let reply_msg = make-msg "builder@smolfire.local" "coordinator@smolfire.local" $reply_id $reply_body --in-reply-to $req_id
+    let dispatch_id = "<dispatch.t-attest-req@host>"
+    let dispatch_msg = issued-dispatch "t-attest-req" $dispatch_id --to "builder@smolfire.local" --parent $req_id
+    let reply_msg = make-msg "builder@smolfire.local" "coordinator@smolfire.local" $reply_id $reply_body --in-reply-to $dispatch_id
 
-    write-spool $spool_abs ($req_msg + "\n" + $reply_msg)
+    write-spool $spool_abs ($req_msg + $dispatch_msg + $reply_msg)
+    write-state $state_abs ((issued-state "t-attest-req" $dispatch_id --request-id $req_id) | upsert seen_ids [$req_id $dispatch_id])
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -462,9 +488,12 @@ do {
 
     let reply_id = "<reply.attest.t-attest-ok@host>"
     let reply_body = "verdict = \"pass\"\ntask_id = \"t-attest-ok\"\n\n[[claims]]\nsubject = \"proof\"\nverdict = \"pass\""
-    let reply_msg = make-msg "builder@smolfire.local" "coordinator@smolfire.local" $reply_id $reply_body --in-reply-to $req_id
+    let dispatch_id = "<dispatch.t-attest-ok@host>"
+    let dispatch_msg = issued-dispatch "t-attest-ok" $dispatch_id --to "builder@smolfire.local" --parent $req_id
+    let reply_msg = make-msg "builder@smolfire.local" "coordinator@smolfire.local" $reply_id $reply_body --in-reply-to $dispatch_id
 
-    write-spool $spool_abs ($req_msg + "\n" + $reply_msg)
+    write-spool $spool_abs ($req_msg + $dispatch_msg + $reply_msg)
+    write-state $state_abs ((issued-state "t-attest-ok" $dispatch_id --request-id $req_id) | upsert seen_ids [$req_id $dispatch_id])
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -520,8 +549,10 @@ do {
 
     let msg_id = "<blocked.no-unblocker.t-block@host>"
     let body = "verdict = \"blocked\"\ntask_id = \"t-block\""
-    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body
-    write-spool $spool_abs $msg
+    let dispatch_id = "<dispatch.t-block@host>"
+    let msg = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body --in-reply-to $dispatch_id
+    write-spool $spool_abs ((issued-dispatch "t-block" $dispatch_id) + $msg)
+    write-state $state_abs (issued-state "t-block" $dispatch_id)
 
     run-tick $tmp $state_rel $spool_rel
 
@@ -836,27 +867,15 @@ do {
     mkdir $mail_dir
     mkdir $state_dir
 
-    # Seed state with attempt_counts = {t17: 3} — already at MAX_ATTEMPTS
-    (
-        "version = \"1\"\n" +
-        "tick_count = 0\n" +
-        "fsm_state = \"idle\"\n" +
-        "seen_ids = []\n" +
-        "last_tick_at = \"2026-01-01T00:00:00Z\"\n" +
-        "pending_request_id = \"\"\n" +
-        "pending_task_id = \"\"\n" +
-        "pending_to_addr = \"\"\n" +
-        "dispatched_at = \"\"\n" +
-        "halted_tasks = []\n\n" +
-        "[attempt_counts]\n" +
-        "t17 = 3\n"
-    ) | save --force $state_abs
+    # Seed the third failed attempt with an issued current dispatch.
+    let dispatch_id = "<dispatch.t17@host>"
+    write-state $state_abs (issued-state "t17" $dispatch_id --attempts 3)
 
     # Seed a fail reply for t17 into the spool
     let msg_id = "<t17.fail.agent@smolfire.local>"
     let body   = "verdict = \"fail\"\ntask_id = \"t17\""
-    let msg    = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body
-    write-spool $spool_abs $msg
+    let msg    = make-msg "agent@smolfire.local" "coordinator@smolfire.local" $msg_id $body --in-reply-to $dispatch_id
+    write-spool $spool_abs ((issued-dispatch "t17" $dispatch_id) + $msg)
 
     # Run coord-tick — must exit 0 even though IRC host is unreachable
     let exit_code = try { run-tick $tmp $state_rel $spool_rel; 0 } catch { 1 }

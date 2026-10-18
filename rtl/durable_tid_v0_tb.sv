@@ -15,7 +15,7 @@
 // Style is a conservative SystemVerilog-2012 subset (no classes, mailboxes,
 // break/continue, or string type) so it runs on ANY simulator. Reference:
 //   iverilog -g2012 -o sim durable_tid_v0.sv durable_tid_v0_tb.sv && ./sim
-// Exit banner is `$display PASS/FAIL` + `$finish`.
+// A failed assertion exits nonzero, so automated gates cannot accept FAIL.
 //
 // NOTE: this TB assumes the default COMMIT_LATENCY=2 for the reset
 // mid-commit injection window (see TEST 6). The pipelined DUT inserts
@@ -709,11 +709,13 @@ module durable_tid_v0_tb;
 
     $display("----------------------------------------");
     $display("checks passed: %0d  failed: %0d", checks_passed, checks_failed);
-    if (checks_failed == 0)
+    if (checks_failed == 0) begin
       $display("PASS");
-    else
+      $finish;
+    end else begin
       $display("FAIL");
-    $finish;
+      $fatal(1, "durable_tid_v0_tb: %0d failed checks", checks_failed);
+    end
   end
 
 endmodule

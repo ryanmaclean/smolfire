@@ -1,0 +1,6 @@
+#!/usr/bin/env nu
+# SPDX-License-Identifier: Apache-2.0
+# Source-only Expect/QEMU fixture. Starts no process or VM.
+def main [--signal: string, --kill-after: string, duration: string, command: string, --command-text(-c): string] {
+    print --no-newline $"SMOLFIRE_NET_OK ($env.CPUID_NONCE)\nSMOLFIRE_READY\nTIME_TO_READY=420ms\nSMOLFIRE_TSLOG_DONE\nSHELL_GATE=pass\nHOST_PING=pass\nCPUID_40000010 max=1073741825 eax=0 ebx=0 ecx=0 edx=0\nVERDICT_RC=0\n"
+}

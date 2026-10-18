@@ -1,0 +1,6 @@
+#!/usr/bin/env nu
+# SPDX-License-Identifier: Apache-2.0
+# Source-only network fixture; ignores the URL and returns the fresh token file.
+def main [--fail(-f), --silent(-s), --show-error(-S), --max-time: int = 3, url: string] {
+    print --no-newline (open --raw $env.CPUID_TOKEN_FILE)
+}

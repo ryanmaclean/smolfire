@@ -47,7 +47,7 @@ $errs = ($errs | append (expect-accept "watch+timeout" ($ok | merge {watch: true
 $errs = ($errs | append (expect-accept "known branch" $ok $fx ["main" "claude/foo"]))
 let norm = (validate-request ($ok | update inputs {run_id: 5, flag: true}) $fx)
 if $norm.inputs != {run_id: "5", flag: "true"} { $errs = ($errs | append $"normalization wrong: ($norm.inputs | to json -r)") }
-if (dispatch-body $norm) != '{"ref":"claude/foo","inputs":{"run_id":"5","flag":"true"}}' { $errs = ($errs | append $"dispatch-body wrong: (dispatch-body $norm)") }
+if (dispatch-body $norm) != '{"ref":"claude/foo","inputs":{"run_id":"5","flag":"true"},"return_run_details":true}' { $errs = ($errs | append $"dispatch-body wrong: (dispatch-body $norm)") }
 
 # ── accept: the REAL workflows in this repo parse and take their real inputs ─
 $errs = ($errs | append (expect-accept "real build-image-hosted" {workflow: "build-image-hosted.yml", ref: "main", inputs: {arch: "aarch64", kernel_only: true, kernconf: "SMOLFIRE-VM-TSLOG"}} $wfdir))
@@ -139,7 +139,10 @@ def --wrapped main [...rest: string] {
         if ($b | str contains 'missing') { exit 1 }
         print $\"refs/heads/($b)\"
     } else if ($joined | str starts-with 'api --method POST') {
+        if (($env | get -o STUB_API_FAIL | default '0') == '1') { exit 1 }
         cat | save --force $env.STUB_BODY
+        let receipt = ($env | get -o STUB_RECEIPT | default '{\"workflow_run_id\":101}')
+        if $receipt != 'NO_BODY' { print $receipt }
     } else if ($joined | str starts-with 'run list') {
         if ($rest | any {|a| $a == '-b' }) { print '[{\"databaseId\":101,\"url\":\"https://example.invalid/runs/101\"}]' } else { print '[{\"databaseId\":100}]' }
     } else if ($joined | str starts-with 'run view') {
@@ -152,13 +155,47 @@ $stub_src | save $stub
 chmod +x $stub
 let reqf = ($tmp | path join "r.json")
 '{"workflow":"smolfire.yml","ref":"claude/t","inputs":{"run_id":"7","note":"x"},"watch":true,"timeout_minutes":5}' | save $reqf
-let envs = {DISPATCH_GH: $stub, STUB_LOG: $log, STUB_BODY: $body, GITHUB_REPOSITORY: "o/r", DISPATCH_POLL_SECONDS: "0", DISPATCH_WATCH_SECONDS: "0", GITHUB_OUTPUT: ($tmp | path join "out.txt")}
-let r1 = (with-env $envs { do { ^$nuexe $script run --file $reqf --workflows-dir $fx } | complete })
+let envs = {DISPATCH_GH: $stub, STUB_LOG: $log, STUB_BODY: $body, GITHUB_REPOSITORY: "o/r", DISPATCH_WATCH_SECONDS: "0", GITHUB_OUTPUT: ($tmp | path join "out.txt")}
+let r1 = (with-env ($envs | insert GITHUB_REF "refs/heads/claude/source-a") { do { ^$nuexe $script run --file $reqf --workflows-dir $fx } | complete })
 if $r1.exit_code != 0 { $errs = ($errs | append $"stub run failed: ($r1.stdout) ($r1.stderr)") }
-if not ($r1.stdout | str contains "https://example.invalid/runs/101") { $errs = ($errs | append "run URL not printed") }
-if not ($body | path exists) or (open --raw $body) != '{"ref":"claude/t","inputs":{"run_id":"7","note":"x"}}' { $errs = ($errs | append $"dispatch body wrong: (open --raw $body)") }
+if not ($r1.stdout | str contains "https://github.com/o/r/actions/runs/101") { $errs = ($errs | append "run URL not printed") }
+if not ($body | path exists) or (open --raw $body) != '{"ref":"claude/t","inputs":{"run_id":"7","note":"x"},"return_run_details":true}' { $errs = ($errs | append $"dispatch body wrong: (open --raw $body)") }
+if ((open --raw $log | lines | where {|l| $l | str starts-with "run list" } | length) > 0) { $errs = ($errs | append "run ID must come from dispatch receipt, not a run-list heuristic") }
+let a_views = (open --raw $log | lines | where {|l| $l | str starts-with "run view" })
+if ($a_views | length) != 1 or not ($a_views | any {|l| $l | str contains "run view 101 " }) { $errs = ($errs | append "source-a watched a run other than its receipt ID 101") }
 let r2 = (with-env ($envs | insert STUB_CONCLUSION "failure") { do { ^$nuexe $script run --file $reqf --workflows-dir $fx } | complete })
 if $r2.exit_code == 0 { $errs = ($errs | append "watch of failed run should exit non-zero") }
+rm -f $log
+let source_b = (with-env ($envs | merge {GITHUB_REF: "refs/heads/claude/source-b", STUB_RECEIPT: '{"workflow_run_id":102}'}) { do { ^$nuexe $script run --file $reqf --workflows-dir $fx } | complete })
+if $source_b.exit_code != 0 { $errs = ($errs | append $"source-b dispatch failed: ($source_b.stderr)") }
+if not ($source_b.stdout | str contains "https://github.com/o/r/actions/runs/102") { $errs = ($errs | append "source-b did not report its own receipt ID 102") }
+let b_views = (open --raw $log | lines | where {|l| $l | str starts-with "run view" })
+if ($b_views | length) != 1 or not ($b_views | any {|l| $l | str contains "run view 102 " }) { $errs = ($errs | append "source-b watched a run other than its receipt ID 102") }
+for c in [
+    {name: "empty", response: "NO_BODY"}
+    {name: "missing", response: "{}"}
+    {name: "malformed", response: "{"}
+    {name: "null-body", response: "null"}
+    {name: "null-id", response: '{"workflow_run_id":null}'}
+    {name: "float", response: '{"workflow_run_id":101.9}'}
+    {name: "string", response: '{"workflow_run_id":"101"}'}
+    {name: "boolean", response: '{"workflow_run_id":true}'}
+    {name: "zero", response: '{"workflow_run_id":0}'}
+    {name: "negative", response: '{"workflow_run_id":-1}'}
+] {
+    rm -f $log
+    let out_before = (open --raw $envs.GITHUB_OUTPUT)
+    let bad = (with-env ($envs | insert STUB_RECEIPT $c.response) { do { ^$nuexe $script run --file $reqf --workflows-dir $fx } | complete })
+    if $bad.exit_code == 0 { $errs = ($errs | append $"($c.name) receipt was accepted") }
+    if ($bad.stdout | str contains "Run URL:") { $errs = ($errs | append $"($c.name) receipt produced a run URL") }
+    if (open --raw $envs.GITHUB_OUTPUT) != $out_before { $errs = ($errs | append $"($c.name) receipt wrote GITHUB_OUTPUT") }
+    if ((open --raw $log | lines | where {|l| $l | str starts-with "run view" } | length) > 0) { $errs = ($errs | append $"($c.name) receipt watched a run") }
+}
+rm -f $log
+let out_before = (open --raw $envs.GITHUB_OUTPUT)
+let api_fail = (with-env ($envs | insert STUB_API_FAIL "1") { do { ^$nuexe $script run --file $reqf --workflows-dir $fx } | complete })
+if $api_fail.exit_code == 0 { $errs = ($errs | append "failed dispatch API was accepted") }
+if (open --raw $envs.GITHUB_OUTPUT) != $out_before { $errs = ($errs | append "failed dispatch API wrote GITHUB_OUTPUT") }
 '{"workflow":"smolfire.yml","ref":"claude/missing","inputs":{"run_id":"7"}}' | save --force $reqf
 rm -f $log
 let r3 = (with-env $envs { do { ^$nuexe $script run --file $reqf --workflows-dir $fx } | complete })

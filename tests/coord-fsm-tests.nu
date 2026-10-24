@@ -253,7 +253,7 @@ def test-dispatching-to-waiting-to-idle [] {
     # generates IDs like <coord.N.rN.TS@smolfire.local>) and reference it.
     let dispatched_id = $spool_msgs | last | get headers | get "Message-ID"
     let reply_id  = "<task-0002.reply@smolfire.local>"
-    let reply_env = make-reply-msg $reply_id $dispatched_id
+    let reply_env = (make-reply-msg $reply_id $dispatched_id) | str replace "task_id = \"test-task\"" "task_id = \"task-0002\""
     $reply_env | save --append $spool_path
 
     # Second tick: waiting → reply found → harvesting → idle.

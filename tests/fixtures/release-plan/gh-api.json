@@ -1,0 +1,250 @@
+{
+  "_comment": "Offline fixtures shaped like GitHub REST responses used by bin/release-plan.nu. Placeholder SHAs only.",
+  "runs": {
+    "ok": {
+      "id": 30407544832,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "event": "workflow_dispatch",
+      "workflow_id": 1001,
+      "path": ".github/workflows/build-image-hosted.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "ryanmaclean/smolfire"
+      },
+      "run_attempt": 1
+    },
+    "failed": {
+      "id": 111,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "completed",
+      "conclusion": "failure",
+      "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "event": "workflow_dispatch",
+      "workflow_id": 1001,
+      "path": ".github/workflows/build-image-hosted.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "ryanmaclean/smolfire"
+      },
+      "run_attempt": 1
+    },
+    "in_progress": {
+      "id": 112,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "in_progress",
+      "conclusion": null,
+      "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "event": "workflow_dispatch",
+      "workflow_id": 1001,
+      "path": ".github/workflows/build-image-hosted.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "ryanmaclean/smolfire"
+      },
+      "run_attempt": 1
+    },
+    "branch": {
+      "id": 113,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_branch": "feature/x",
+      "event": "workflow_dispatch",
+      "workflow_id": 1001,
+      "path": ".github/workflows/build-image-hosted.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "ryanmaclean/smolfire"
+      },
+      "run_attempt": 1
+    },
+    "wrong_workflow": {
+      "id": 902,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "event": "workflow_dispatch",
+      "workflow_id": 2002,
+      "path": ".github/workflows/ci.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "ryanmaclean/smolfire"
+      },
+      "run_attempt": 1
+    },
+    "wrong_repo": {
+      "id": 903,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "event": "workflow_dispatch",
+      "workflow_id": 1001,
+      "path": ".github/workflows/build-image-hosted.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "someone-else/smolfire"
+      },
+      "run_attempt": 1
+    },
+    "old_tree": {
+      "id": 904,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_branch": "main",
+      "event": "workflow_dispatch",
+      "workflow_id": 1001,
+      "path": ".github/workflows/build-image-hosted.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "ryanmaclean/smolfire"
+      },
+      "run_attempt": 1
+    },
+    "rerun": {
+      "id": 905,
+      "name": "Build smolfire Image (hosted runner)",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "main",
+      "event": "workflow_dispatch",
+      "workflow_id": 1001,
+      "path": ".github/workflows/build-image-hosted.yml@refs/heads/main",
+      "head_repository": {
+        "full_name": "ryanmaclean/smolfire"
+      },
+      "run_attempt": 2
+    }
+  },
+  "compare": {
+    "ancestor": {
+      "status": "behind",
+      "ahead_by": 0,
+      "behind_by": 3
+    },
+    "identical": {
+      "status": "identical",
+      "ahead_by": 0,
+      "behind_by": 0
+    },
+    "diverged": {
+      "status": "diverged",
+      "ahead_by": 2,
+      "behind_by": 5
+    },
+    "ahead": {
+      "status": "ahead",
+      "ahead_by": 2,
+      "behind_by": 0
+    }
+  },
+  "artifacts": {
+    "amd64": {
+      "total_count": 2,
+      "artifacts": [
+        {
+          "name": "smolfire-amd64",
+          "expired": false,
+          "id": 7001,
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "workflow_run": {
+            "id": 30407544832,
+            "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        {
+          "name": "tpm-t1-t6-logs",
+          "expired": false
+        }
+      ]
+    },
+    "expired": {
+      "total_count": 1,
+      "artifacts": [
+        {
+          "name": "smolfire-amd64",
+          "expired": true,
+          "id": 7002,
+          "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "workflow_run": {
+            "id": 30407544832,
+            "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    },
+    "wrong_run": {
+      "total_count": 1,
+      "artifacts": [
+        {
+          "name": "smolfire-amd64",
+          "expired": false,
+          "id": 7003,
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "workflow_run": {
+            "id": 902,
+            "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    },
+    "missing_digest": {
+      "total_count": 1,
+      "artifacts": [
+        {
+          "name": "smolfire-amd64",
+          "expired": false,
+          "id": 7004,
+          "digest": null,
+          "workflow_run": {
+            "id": 30407544832,
+            "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    },
+    "duplicate": {
+      "total_count": 2,
+      "artifacts": [
+        {
+          "name": "smolfire-amd64",
+          "expired": false,
+          "id": 7001,
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "workflow_run": {
+            "id": 30407544832,
+            "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        {
+          "name": "smolfire-amd64",
+          "expired": false,
+          "id": 7005,
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "workflow_run": {
+            "id": 30407544832,
+            "head_sha": "894bb72aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    }
+  },
+  "release_assets_before": [
+    {
+      "name": "smolfire-aarch64-v0.5.0.qcow2",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "release_assets_after_changed": [
+    {
+      "name": "smolfire-aarch64-v0.5.0.qcow2",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ]
+}

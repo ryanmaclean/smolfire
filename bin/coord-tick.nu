@@ -73,8 +73,53 @@ const INFLIGHT_STALE_AFTER_TICKS = 50
 
 # Slot constructors. Slot counts equal the per-executor inflight caps by
 # construction (slots==caps invariant): fleet 2, jail 2, vm 4.
+#
+# Retry-scheduling fields (§12, set only by the harvest retry stamp, cleared
+# by the dispatch send which rewrites the slot): not_before = RFC3339 UTC
+# earliest-send time ("" = immediately due); prior_attempt_msgid /
+# prior_attempt_count / format_violation = retry payload carried into the
+# dispatch envelope ("" / 0 / "" = not a retry).
 def empty-slot [] {
-    {task_id: "", request_id: "", to_addr: "", dispatched_at: ""}
+    {task_id: "", request_id: "", to_addr: "", dispatched_at: "", not_before: "", prior_attempt_msgid: "", prior_attempt_count: 0, format_violation: ""}
+}
+
+# §12 Fibonacci backoff [60, 60, 120] seconds, indexed by retry number
+# (attempts already made, 1-based, clamped). Scheduled, never slept: the
+# retry stamp persists not_before in the crash-atomic slot and the
+# dispatching path honours it on a later tick.
+# Kill-switch: SMOLFIRE_RETRY_BACKOFF=0 restores immediate retry dispatch
+# (only the exact string "0" disables; unset/"1"/anything else is ON).
+#
+# Interactions (tests/coord-backoff-interaction-test.nu):
+#   - ALL executors (vm/jail/fleet) and every retry source back off alike,
+#     including the dead-worker reap (sweep-dead-workers appends a synthetic
+#     fail reply; harvest treats it as any failed attempt, so the re-send
+#     waits the schedule too - the worker was silent already, 60 s more is
+#     the point, and one rule keeps the kill switch meaningful for reaps).
+#   - A held retry keeps its inflight entry: capacity is RESERVED for it so
+#     newcomers cannot starve it during the window, but it never counts
+#     against itself (inflight-excluding) and never blocks a different task.
+const RETRY_BACKOFF_SECS = [60, 60, 120]
+
+def retry-backoff-enabled [] {
+    ($env.SMOLFIRE_RETRY_BACKOFF? | default "1") != "0"
+}
+
+def retry-not-before [attempt_n: int] {
+    if not (retry-backoff-enabled) { return "" }
+    let idx = ([($attempt_n - 1), 0] | math max)
+    let idx = ([$idx, (($RETRY_BACKOFF_SECS | length) - 1)] | math min)
+    let secs = $RETRY_BACKOFF_SECS | get $idx
+    (date now) + ($secs * 1sec) | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ"
+}
+
+# A stamped-but-unsent slot is due when it has no not_before or that time has
+# passed. An unparseable not_before fails OPEN (due) so a hand-edited state
+# can never wedge a task forever.
+def slot-due [slot: record] {
+    let nb = $slot | get -o not_before | default ""
+    if $nb == "" { return true }
+    try { (($nb | into datetime --timezone UTC) <= (date now)) } catch { true }
 }
 
 def slot-count [executor: string] {
@@ -150,6 +195,10 @@ def normalize-slot [s: any] {
             request_id: ($s | get -o request_id | default "")
             to_addr: ($s | get -o to_addr | default "")
             dispatched_at: ($s | get -o dispatched_at | default "")
+            not_before: ($s | get -o not_before | default "")
+            prior_attempt_msgid: ($s | get -o prior_attempt_msgid | default "")
+            prior_attempt_count: ($s | get -o prior_attempt_count | default 0)
+            format_violation: ($s | get -o format_violation | default "")
         }
     } else {
         empty-slot
@@ -447,6 +496,7 @@ const TELEMETRY_TRANSITION_REASONS = [
     "reply-received", "no-reply", "reply-timeout",
     "dispatch-sent",
     "backpressure-deferred",
+    "retry-backoff", "retry-due",
     "halt-marker-present", "awaiting-resume", "resume-action",
     "unknown-state",
 ]
@@ -723,6 +773,20 @@ def inflight-counts [inflight: any] {
         $per = $per | upsert $k ($execs | where {|x| $x == $k } | length)
     }
     {global: ($execs | length), per_executor: $per}
+}
+
+# The slot table minus one task's own entry. A RETRY replaces its previous
+# attempt: its inflight entry persists across the retry (held-slot
+# reservation, see state-dispatching), so the retry's own admission gate must
+# not count it against itself. Without this a task whose executor cap is
+# already full of just itself (e.g. SMOLFIRE_MAX_INFLIGHT_VM=1) could never
+# retry: harvest deferred it as backpressure every tick, forever.
+def inflight-excluding [inflight: any, task_id: string] {
+    if ($inflight | describe | str starts-with "record") and ($task_id in ($inflight | columns)) {
+        $inflight | reject $task_id
+    } else {
+        $inflight
+    }
 }
 
 # Gate check for one executor. Returns {at_cap, global, global_cap,
@@ -1356,7 +1420,7 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         # seen_ids append — the reply is re-harvested next tick.
                         let retry_exec = $current_state.task_executors | get -o $task_id | get -o executor | default $DEFAULT_EXECUTOR
                         let retry_exec = if $retry_exec in $SLOT_ORDER { $retry_exec } else { $DEFAULT_EXECUTOR }
-                        let gate = inflight-status (get-inflight $current_state) $retry_exec
+                        let gate = inflight-status (inflight-excluding (get-inflight $current_state) $task_id) $retry_exec
                         if $gate.at_cap {
                             log-backpressure $task_id $retry_exec "retry" $id $gate
                             $deferred_count = $deferred_count + 1
@@ -1396,7 +1460,14 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         }
                         log-verdict $category $decision "dispatching" --task-id $task_id --attempt $attempt_n --message-id $id
                         $new_seen = $new_seen | append $id
-                        $current_state = sync-legacy-mirror (set-pending-slots $current_state (set-slot (get-pending-slots $current_state) $retry_exec $free_idx {task_id: $task_id, request_id: $id, to_addr: $from_addr, dispatched_at: ""})
+                        $current_state = sync-legacy-mirror (set-pending-slots $current_state (set-slot (get-pending-slots $current_state) $retry_exec $free_idx {
+                                task_id: $task_id, request_id: $id, to_addr: $from_addr, dispatched_at: ""
+                                # §12: schedule (never sleep) the Fibonacci backoff and carry the retry payload.
+                                not_before: (retry-not-before $attempt_n)
+                                prior_attempt_msgid: $id
+                                prior_attempt_count: $attempt_n
+                                format_violation: (if $category == "malformed" { "attestation_required=true but no [[claims]] block present" } else { "" })
+                            })
                             | update seen_ids $new_seen)
                         $targets = $targets | append {task_id: $task_id, trigger_id: $id, to_addr: $from_addr, executor: $retry_exec, reason: "retry", verdict: $category, attempt: $attempt_n}
                         continue
@@ -1740,7 +1811,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
     mut cur = sync-legacy-mirror $state
 
     # Recovery: an occupied slot that claims "sent" but has no coordinator
-    # dispatch threaded to its request_id never actually sent (crash between
+    # dispatch (threaded to, or identified by, its request_id) never actually sent (crash between
     # stamp and append with a persisted dispatched_at). Requeue it for send;
     # a slot whose dispatch exists-but-is-answered is left alone — waiting
     # routes its reply to harvest.
@@ -1750,8 +1821,16 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
             let content = try { open --raw $spool } catch { "" }
             let messages = if $content == "" { [] } else { parse-mbox $content }
             let has_disp = ($messages | any {|m|
-                ($m.headers | get "In-Reply-To"? | default "") == ($sl | get request_id)
-                and ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
+                # One expression: a line-leading `and` is parsed as a command
+                # and aborts the whole tick ("Command `and` not found").
+                let from_coord = ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
+                # An unsent/crash-stamped slot carries the TRIGGER id, so its
+                # dispatch is the coordinator message threaded to it. A SENT
+                # slot carries the dispatch's own Message-ID, so that message
+                # IS the dispatch. Matching only the first form made every
+                # genuinely sent slot look unsent whenever state-dispatching
+                # ran for another slot, re-dispatching a running task.
+                $from_coord and ((($m.headers | get "In-Reply-To"? | default "") == ($sl | get request_id)) or ((msg-id $m) == ($sl | get request_id)))
             })
             if not $has_disp {
                 $cur = set-pending-slots $cur (update-slot-field (get-pending-slots $cur) $entry.executor $entry.index "dispatched_at" "")
@@ -1759,14 +1838,27 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
         }
     }
 
-    let unsent = (slot-entries (get-pending-slots $cur)) | where {|e|
+    let stamped_unsent = (slot-entries (get-pending-slots $cur)) | where {|e|
         ($e.slot | get task_id) != "" and ($e.slot | get dispatched_at) == ""
     }
+    # §12 backoff: only DUE slots are sent; retry slots still inside their
+    # not_before window stay stamped (held) and are picked up by a later tick.
+    let unsent = $stamped_unsent | where {|e| slot-due $e.slot }
+    let held = $stamped_unsent | where {|e| not (slot-due $e.slot) }
+    let sent_count = (slot-entries (get-pending-slots $cur)) | where {|e|
+        ($e.slot | get task_id) != "" and ($e.slot | get dispatched_at) != ""
+    } | length
 
     if ($unsent | is-empty) {
-        if (occupied-slot-count (get-pending-slots $cur)) > 0 {
+        if $sent_count > 0 {
             log-transition "dispatching" "waiting" "resume-inflight-dispatch" --task-id $cur.pending_task_id --message-id $cur.pending_request_id
             return (tick ($cur | update fsm_state "waiting") $spool $root ($remaining - 1))
+        }
+        if ($held | length) > 0 {
+            let h = $held | first
+            log-event "retry_backoff_held" {task_id: ($h.slot | get task_id), not_before: ($h.slot | get not_before), held: ($held | length)}
+            log-transition "dispatching" "idle" "retry-backoff" --task-id ($h.slot | get task_id) --attempt ($cur.attempt_counts | get -o ($h.slot | get task_id) | default 0) --message-id ($h.slot | get request_id)
+            return (sync-legacy-mirror ($cur | update fsm_state "idle"))
         }
         # Nothing stamped (e.g. legacy dispatching state with blank scalars):
         # never phantom-dispatch an "unknown" task — park in idle.
@@ -1805,7 +1897,7 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
         # re-enter here with the caps since filled. Refuse rather than
         # over-dispatch; the trigger was already marked seen at harvest, so
         # un-mark it — the next tick rediscovers the work instead of dropping it.
-        let gate = inflight-status (get-inflight $cur) $exec_info.executor
+        let gate = inflight-status (inflight-excluding (get-inflight $cur) $task_id) $exec_info.executor
         if $gate.at_cap {
             log-backpressure $task_id $exec_info.executor "dispatch-backstop" $slot_request $gate
             let unseed = $cur.seen_ids | where {|s| $s != $slot_request }
@@ -1821,6 +1913,16 @@ def state-dispatching [state: record, spool: string, root: string, remaining: in
         let to_addr      = if $slot_to != "" { $slot_to } else { $"($task_id)@smolfire.local" }
         let from_addr    = "coordinator@smolfire.local"
 
+        # §12 retry payload contract: a retry envelope is never a pure resend.
+        let retry_fields = if ($sl | get prior_attempt_msgid) != "" {
+            let fv = $sl | get format_violation
+            [
+                $"prior_attempt_msgid = ($sl | get prior_attempt_msgid | to json --raw)"
+                $"prior_attempt_count = ($sl | get prior_attempt_count)"
+            ] | append (if $fv != "" { [$"format_violation = ($fv | to json --raw)"] } else { [] }) | str join "\n"
+        } else { "" }
+        let retry_block = if $retry_fields != "" { $retry_fields + "\n" } else { "" }
+
         let mbox_msg = $"From ($from_addr) ($ts)
 From: ($from_addr)
 To: ($to_addr)
@@ -1832,7 +1934,7 @@ In-Reply-To: ($slot_request)
 task_id = \"($task_id)\"
 action = \"dispatch\"
 executor = \"($exec_info.executor)\"
-"
+($retry_block)"
 
         # Append the message to the spool file.
         $mbox_msg | save --append $spool
@@ -1879,8 +1981,18 @@ executor = \"($exec_info.executor)\"
         $cur = sync-legacy-mirror $cur
     }
 
-    if (occupied-slot-count (get-pending-slots $cur)) > 0 {
+    let sent_after = (slot-entries (get-pending-slots $cur)) | where {|e|
+        ($e.slot | get task_id) != "" and ($e.slot | get dispatched_at) != ""
+    } | length
+    let held_after = (slot-entries (get-pending-slots $cur)) | where {|e|
+        ($e.slot | get task_id) != "" and ($e.slot | get dispatched_at) == ""
+    }
+    if $sent_after > 0 {
         tick ($cur | update fsm_state "waiting") $spool $root ($remaining - 1)
+    } else if ($held_after | length) > 0 {
+        let h = $held_after | first
+        log-transition "dispatching" "idle" "retry-backoff" --task-id ($h.slot | get task_id) --attempt ($cur.attempt_counts | get -o ($h.slot | get task_id) | default 0) --message-id ($h.slot | get request_id)
+        $cur | update fsm_state "idle"
     } else {
         let ctx = if ($backstopped | length) > 0 { $backstopped | first } else { {task_id: "", trigger_id: ""} }
         log-transition "dispatching" "idle" "backpressure-deferred" --task-id $ctx.task_id --message-id $ctx.trigger_id
@@ -1950,6 +2062,20 @@ def tick [state: record, spool: string, root: string, remaining: int] {
         | update last_tick_at (date now | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ")
 
     log-event "tick_enter" {tick: $next_count, fsm_state: $stamped.fsm_state, remaining: $remaining}
+
+    # §12 backoff wake-up: a retry slot held by not_before is only ever sent
+    # from dispatching. When idle/waiting and one has come due, route there
+    # (level-triggered; the persisted slot is the whole schedule).
+    let stamped = if $stamped.fsm_state in ["idle", "waiting"] {
+        let due = (slot-entries (get-pending-slots $stamped)) | where {|e|
+            ($e.slot | get task_id) != "" and ($e.slot | get dispatched_at) == "" and ($e.slot | get not_before) != "" and (slot-due $e.slot)
+        }
+        if ($due | length) > 0 {
+            let d = $due | first
+            log-transition $stamped.fsm_state "dispatching" "retry-due" --task-id ($d.slot | get task_id) --attempt ($stamped.attempt_counts | get -o ($d.slot | get task_id) | default 0) --message-id ($d.slot | get request_id)
+            $stamped | update fsm_state "dispatching"
+        } else { $stamped }
+    } else { $stamped }
 
     match $stamped.fsm_state {
         "idle"        => { state-idle        $stamped $spool $root $remaining }

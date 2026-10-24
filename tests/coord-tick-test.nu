@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # coord-tick-test.nu — integration tests for bin/coord-tick.nu FSM
 
+# These tests exercise the D2 retry table, not the §12 backoff schedule
+# (covered by tests/coord-retry-backoff-test.nu): keep retries immediate.
+export-env { $env.SMOLFIRE_RETRY_BACKOFF = "0" }
+
 # Inline assert helpers — avoids std library version sensitivity.
 def "assert equal" [left: any, right: any] {
     if $left != $right {

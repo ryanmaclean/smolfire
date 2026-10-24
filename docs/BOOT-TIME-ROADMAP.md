@@ -395,6 +395,56 @@ CI step summary on every `tslog=true` run (needs `nu` on the runner).
 i.e. §2.2–2.4 alone plausibly reach the ≤100 ms exit criterion; §2.5–2.6 are
 margin. Every step still needs its own measured delta.
 
+### 2.9 Full-image (SMOLFIRE-VM) legacy-probe + rc cuts — local TCG A/B (2026-10-01)
+
+Scope: the *full* qcow2 image (`SMOLFIRE-VM` kernconf + `smolfire-qemu*.conf`),
+not the Firecracker `SMOLFIRE` ELF of §1-§2.8. **Method:** the shipped 0.5.0
+amd64 qcow2 (sha256 `ba26c6e4…bb6d`), QEMU q35 / TCG / 2 vCPU / 512 MiB,
+`snapshot=on`, serial lines stamped with ms since QEMU exec; each variant is a
+copy of the pristine image with one in-guest edit (loader.conf hint/tunable or
+rc.conf knob), 3 interleaved boots each, host shared. TCG is ~5x slower than
+KVM (43-50 s vs ~9 s to login) and fork/exec-heavy rc steps inflate more than
+DELAY-bound kernel probes, so **absolute savings below are TCG seconds, not
+KVM seconds**; the ranking and the mechanism are the evidence, the KVM delta
+must be measured (needs_ci). Raw per-line logs were not committed.
+
+| Rank | Cut | Where | TCG evidence (clean -> cut, 3 boots each) | Status |
+|---|---|---|---|---|
+| 1 | `devfs_load_rulesets="NO"` | rc.conf (both confs) | "Creating and/or trimming log files" -> "Starting syslogd": 8.9/9.0/6.7 s -> 3.2/3.9/2.7 s (about -5.5 s; whole boot 52.8 -> 49.5 s median alone) | landed |
+| 2 | remove `atkbdc`/`atkbd`/`psm` (+`ppi`) | `sys/amd64/conf/SMOLFIRE-VM` | "Trying to mount root" 8.9/9.0/8.7 s -> 6.8/7.1/6.2 s (about -2 s); probe span atkbdc0..psm0 = 1.4 s in the 0.5.0 transcript. Measured with `hint.{atkbdc,atkbd,psm}.0.disabled=1`, the runtime equivalent | landed (kernel build is CI-only) |
+| 3 | `hw.bus.devctl_nomatch_enabled="0"` | loader.conf (amd64; aarch64 already had it) | "Starting devd." -> "Starting dhclient.": 5.5/5.7/5.2 s -> 4.0/4.0/3.3 s (about -1.5 s). 0.5.0 serial shows `devmatch does not exist in /etc/rc.d` x3 = three wasted shell forks | landed |
+| - | all three together | | login 49.2/50.7/44.7 s -> 43.5/42.6/36.1 s (about -7 s, -15 %); sshd running, vtnet0 DHCP, serial login verified on the combined image | |
+
+Measured and **not** landed: `ttyv1-7` gettys off + `mixer/savecore/virecover/
+update_motd/ip6addrctl/kldxref` rc knobs (variant R: 51.5/46.9/42.8 s vs clean
+49.2/50.7/44.7 s, inside the noise; `ps` shows 8 `getty ttyv*` that are pure
+waste, so this is "plausible, unproven" rather than "no"). Not attempted, with
+reason: `device ahci` (six `ahcich` attach ~126 ms TCG, but q35 CD/SATA gates and
+the kernconf comment keep it), `device vga`/`sc`/`vt` (vt is the dual console;
+`vt_vga` does not depend on `vga` in files.x86 but unbuilt), `orm0` (`x86/isa/orm.c`
+is `optional isa`, cannot be dropped without ISA), `devd_enable="NO"` (section 1.2:
+3.5x worse), `background_fsck="NO"` (60 s timer is off the login path),
+`SYNCDHCP` (section 1.2: 20 % but n=3 overlapping ranges, arm64 only),
+`hw.bus.devctl_nomatch` effect on KVM unknown.
+
+**Validation order (CI/KVM only):** (1) kernel-only: build `SMOLFIRE-VM-TSLOG`
+(`kernconf=SMOLFIRE-VM-TSLOG kernel_only=true` on `build-image-hosted.yml`; both
+`sys/amd64/conf/SMOLFIRE-VM-TSLOG` and its arm64 twin exist in the tree and the
+amd64 one has already built in CI, see the evidence below) and run
+`bin/tslog-phases.nu`; expect
+`device_attach atkbdc0/atkbd0/psm0` records gone and a smaller `sysinit_devices`
+phase. (2) full image: normal `build-image-hosted.yml` amd64 run, boot gate must
+stay `VERDICT=pass`; compare serial-stamped login time against the 8-9 s KVM
+baseline (the gate's 1 s resolution is too coarse for a ~0.3 s delta: stamp
+lines, n>=5).
+
+**CI evidence already on record for this validation order (facts only):**
+- Step (1) build: the kernel-only dispatch run 37140760240 built
+  `SMOLFIRE-VM-TSLOG` successfully (buildkernel 6m38s). The kernconf is already in the tree, so nothing needs
+  to be created before dispatching it again.
+- Step (2) full image: the full amd64 run 37366841257 passed the gates (KVM boot
+  gate 7 s; size gate 65,536,000 B raw / 26,148,864 B compressed).
+
 ## 3. Measurement plan — TSLOG on the hosted runner
 
 TSLOG is Percival's timestamp framework for exactly this job: it traces from

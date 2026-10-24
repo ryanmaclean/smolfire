@@ -53,10 +53,21 @@ def tracked-py-files [root: string]: nothing -> list<string> {
     }
 }
 
+# Frozen verbatim imports (owner split of ryanmaclean/vibecode-webgui, 2026-10-24):
+# imports/vibecode/PYTHON-MANIFEST.txt lists, one per line, the exact *.py paths that
+# were moved as-is from vibecode-webgui. They are reference material, not executed by
+# smolfire CI, and are NOT a precedent: any .py not named in the manifest still fails,
+# and adding a line to the manifest needs the same owner approval as the allow-list.
+def frozen-import-manifest [root: string]: nothing -> list<string> {
+    let manifest = ($root | path join "imports" "vibecode" "PYTHON-MANIFEST.txt")
+    if not ($manifest | path exists) { return [] }
+    (open --raw $manifest | lines | each {|l| $l | str trim } | where {|l| ($l | is-not-empty) and not ($l | str starts-with "#") })
+}
+
 print "test: no tracked *.py files outside the allow-list"
 do {
     let root = (repo-root)
-    let allowed = (allow-list | columns)
+    let allowed = ((allow-list | columns) ++ (frozen-import-manifest $root))
     let found = (tracked-py-files $root)
     let offenders = ($found | where {|f| not ($f in $allowed) })
 

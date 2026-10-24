@@ -289,12 +289,13 @@ def reply-is-current [state: record, messages: list, msg: record, task_id: strin
     if ($same_id | length) != 1 { return false }
     let issued = $messages | where {|m|
         let body = extract-toml $m
+        (
         (msg-id $m) == $expected
         and ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
         and ($m.headers | get "To"? | default "") != "coordinator@smolfire.local"
         and not ("_parse_error" in $body)
         and ($body | get -o task_id | default "") == $task_id
-        and ($body | get -o action | default "") == "dispatch"
+        and ($body | get -o action | default "") == "dispatch")
     }
     ($issued | length) == 1
 }
@@ -1445,9 +1446,10 @@ def state-harvesting [state: record, spool: string, root: string, remaining: int
                         # never back to the coordinator's own address.
                         let retry_to = if $from_addr == "coordinator@smolfire.local" {
                             let prior = $messages | where {|m|
+                                (
                                 (msg-id $m) == $completed_id
                                 and ($m.headers | get "From"? | default "") == "coordinator@smolfire.local"
-                                and ((extract-toml $m) | get -o action | default "") == "dispatch"
+                                and ((extract-toml $m) | get -o action | default "") == "dispatch")
                             } | first 1
                             if ($prior | is-empty) { "" } else { ($prior | first).headers | get "To"? | default "" }
                         } else { $from_addr }
@@ -1723,13 +1725,14 @@ def state-waiting [state: record, spool: string, root: string, remaining: int] {
             let reply_id = msg-id $m
             let body = extract-toml $m
             let same_id = $messages | where {|other| (msg-id $other) == $reply_id }
+            (
             $in_reply_to == ($entry.slot | get request_id)
             and $reply_id != "" and not ($reply_id in $cur.seen_ids)
             and ($same_id | length) == 1
             and ($m.headers | get "To"? | default "") == "coordinator@smolfire.local"
             and not ("_parse_error" in $body)
             and ($body | get -o task_id | default "") == ($entry.slot | get task_id)
-            and (reply-is-current $candidate_state $messages $m ($entry.slot | get task_id))
+            and (reply-is-current $candidate_state $messages $m ($entry.slot | get task_id)))
         } | first 1
         if ($hits | length) > 0 {
             $matched_executor = $entry.executor

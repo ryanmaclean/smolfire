@@ -110,7 +110,7 @@ jobs:
         run: |
           sha=$(cut -f3 run.tsv)
           {
-            printf 'Stored copy of Actions artifact `%s` from run %s (commit %s).\n\n' "$ART" "$RUN_ID" "$sha"
+            printf 'Stored copy of Actions artifact %s from run %s (commit %s).\n\n' "$ART" "$RUN_ID" "$sha"
             printf 'Integrity: SHA256SUMS. Provenance: PROVENANCE.json. Prerelease: a build record, not a release endorsement.\n'
           } > notes.md
           gh release create "$TAG" --repo "$REPO" --target "$sha" --prerelease \

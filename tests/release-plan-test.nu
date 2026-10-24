@@ -191,6 +191,28 @@ let va = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare
 assert equal $va.exit_code 0 "artifacts present"
 let vb = (do { ^nu $rp validate-run --run ($wd | path join "run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "exp.json") --artifact-name smolfire-amd64 --workflow-id 1001 --workflow-path $builder_path --repository $repo --target-sha $target_sha } | complete)
 assert equal $vb.exit_code 1 "expired artifact refused via CLI"
+# The workflow reads artifact_id/artifact_digest from this stdout (jq -er);
+# a refusal must be a REFUSE line, never a type error from the CLI itself.
+let va_sel = ($va.stdout | from json)
+assert equal $va_sel.artifact_id 7001 "CLI emits the exact selected artifact ID"
+assert equal $va_sel.artifact_digest "sha256:1111111111111111111111111111111111111111111111111111111111111111" "CLI emits the archive digest"
+assert (not ($vb.stderr | str contains "cant_convert")) "expired refusal is a structured REFUSE"
+print "test: 2026-10-08 false pass (unrelated ci.yml run at an older main SHA + decoy artifact)"
+let old_sha = $fx.runs.old_tree.head_sha
+let decoy_run = ($fx.runs.wrong_workflow | merge {head_sha: $old_sha})
+$decoy_run | to json | save -f ($wd | path join "decoy-run.json")
+{total_count: 1, artifacts: [{name: "smolfire-amd64", expired: false, id: 7999,
+  digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  workflow_run: {id: $decoy_run.id, head_sha: $old_sha}}]} | to json | save -f ($wd | path join "decoy-art.json")
+let vd = (do { ^nu $rp validate-run --run ($wd | path join "decoy-run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "decoy-art.json") --artifact-name smolfire-amd64 --workflow-id 1001 --workflow-path $builder_path --repository $repo --target-sha $target_sha } | complete)
+assert equal $vd.exit_code 1 "decoy ci.yml run + decoy artifact refused"
+for want in ["wrong workflow_id" "wrong workflow path" "differs from release target" "artifact is from a different tree"] {
+    assert ($vd.stderr | str contains $want) $"decoy refusal names: ($want)"
+}
+assert ($vd.stdout | str trim | is-empty) "no artifact selection emitted for the decoy"
+let ve = (do { ^nu $rp validate-run --run ($wd | path join "decoy-run.json") --compare ($wd | path join "cmp.json") --artifacts ($wd | path join "decoy-art.json") --artifact-name smolfire-amd64 } | complete)
+assert equal $ve.exit_code 1 "artifact selection without source binding refused"
+assert ($ve.stderr | str contains "binding arguments are incomplete") "unbound artifact selection names the gap"
 print "test: archive digest, member selection and aarch64 verdict"
 let archive = ($wd | path join "archive.zip")
 "abc" | save $archive
@@ -205,6 +227,13 @@ assert equal ($sm.stdout | str trim) "nested/smolfire-amd64.qcow2" "one safe mem
 "nested/smolfire-amd64.qcow2\nother/smolfire-amd64.qcow2\n" | save -f $members
 let dup = (do { ^nu $rp select-member --list $members --basename smolfire-amd64.qcow2 } | complete)
 assert equal $dup.exit_code 1 "ambiguous archive member rejected"
+assert ($dup.stderr | str contains "REFUSE: archive must contain exactly one safe") "ambiguity is a structured REFUSE"
+for unsafe in ["../smolfire-amd64.qcow2" "/smolfire-amd64.qcow2" "-x/smolfire-amd64.qcow2" "a//smolfire-amd64.qcow2" "a b/smolfire-amd64.qcow2"] {
+    $"($unsafe)\n" | save -f $members
+    let r = (do { ^nu $rp select-member --list $members --basename smolfire-amd64.qcow2 } | complete)
+    assert equal $r.exit_code 1 $"unsafe archive member rejected: ($unsafe)"
+    assert ($r.stderr | str contains "REFUSE:") $"unsafe member refusal is structured: ($unsafe)"
+}
 let gate = ($wd | path join "gate-verdict.txt")
 "verdict=pass\nexit_code=0\n" | save -f $gate
 let gate_ok = (do { ^nu $rp validate-gate-verdict --file $gate } | complete)

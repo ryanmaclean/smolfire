@@ -216,7 +216,10 @@ def "main validate-run" [
             $p = ($p | append (source-problems $r $label $workflow_id $workflow_path $repository $target_sha))
         }
     }
-    mut selected = {problems: [], artifact_id: null, artifact_digest: null}
+    # Annotated as a plain record: nu infers artifact_id/artifact_digest as
+    # `nothing` from this initialiser and then rejects the int/string
+    # selection (nu::shell::cant_convert), which broke every bound release.
+    mut selected: record = {problems: [], artifact_id: null, artifact_digest: null}
     if $artifacts != null or $artifact_name != null {
         if $artifacts == null or $artifact_name == null or $target_sha == null {
             $p = ($p | append $"($label): artifact binding arguments are incomplete")
@@ -239,13 +242,16 @@ def "main verify-archive" [--archive: string, --digest: string] {
 # bsdtar lists members before extraction; emit exactly one safe name for -xO.
 def "main select-member" [--list: string, --basename: string] {
     let names = (open --raw $list | lines)
-    let hits = ($names | where {|n|
+    # One parenthesised expression: a bare newline ends a nu statement, so a
+    # leading `and` on the next line was parsed as an external command and
+    # every member selection failed.
+    let hits = ($names | where {|n| (
         ($n =~ '^[A-Za-z0-9._/-]+$')
         and (not ($n | str starts-with "/"))
         and (not ($n | str starts-with "-"))
         and (not ($n | split row "/" | any {|part| $part == ".." or $part == "" }))
         and (($n | path basename) == $basename)
-    })
+    ) })
     if ($hits | length) != 1 { refuse [$"archive must contain exactly one safe '($basename)' member"] }
     print ($hits | first)
 }

@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: Apache-2.0
+# store-artifact.yml - copy a build artifact from a green main run into a
+# durable GitHub prerelease. Actions artifacts expire (90 days); release
+# assets do not. Manual only; a release is a human judgement.
+#
+# Unlike release-image.yml (which publishes only the amd64 qcow2 under a
+# fixed name) this stores any one named artifact of any successful run that
+# built a commit on main - e.g. the smolfire-kernel-current compatibility
+# artifact - with SHA256SUMS and PROVENANCE.json, then re-downloads the
+# stored assets and re-verifies them.
+
+name: Store build artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Numeric Actions run ID of a successful run on main"
+        required: true
+      artifact:
+        description: "Artifact name inside that run (e.g. smolfire-kernel-current)"
+        required: true
+      tag:
+        description: "New release tag (must not exist), e.g. store-kernel-current-20261012"
+        required: true
+  pull_request:
+    paths:
+      - '.github/workflows/store-artifact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint store-artifact workflow
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: actionlint (pinned release, checksum verified)
+        run: |
+          v=1.7.7
+          curl -fsSL -o "$RUNNER_TEMP/al.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${v}/actionlint_${v}_linux_amd64.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/al.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/al.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" .github/workflows/store-artifact.yml
+
+  store:
+    name: Store ${{ inputs.artifact }} as ${{ inputs.tag }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      ART: ${{ inputs.artifact }}
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Validate run, artifact and tag
+        run: |
+          case "$RUN_ID" in ""|*[!0-9]*) echo "run_id must be numeric" >&2; exit 1 ;; esac
+          case "$ART" in ""|*[!A-Za-z0-9._-]*) echo "bad artifact name" >&2; exit 1 ;; esac
+          case "$TAG" in ""|*[!A-Za-z0-9._-]*) echo "bad tag" >&2; exit 1 ;; esac
+          if gh api "repos/$REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "tag $TAG exists; refusing to overwrite" >&2; exit 1
+          fi
+          gh api "repos/$REPO/actions/runs/$RUN_ID" \
+            -q '[.conclusion,.head_branch,.head_sha,.name,.run_attempt,.event]|@tsv' > run.tsv
+          cat run.tsv
+          test "$(cut -f1 run.tsv)" = success
+          test "$(cut -f2 run.tsv)" = main
+          gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+            -q ".artifacts[] | select(.name==\"$ART\" and .expired==false) | [.id,.size_in_bytes,.digest]|@tsv" > art.tsv
+          cat art.tsv
+          test "$(wc -l < art.tsv | tr -d ' ')" = 1
+
+      - name: Download artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.artifact }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: payload
+
+      - name: Checksums and provenance
+        run: |
+          sha=$(cut -f3 run.tsv)
+          wf=$(cut -f4 run.tsv)
+          mkdir out
+          find payload -type f | sort | while IFS= read -r f; do
+            b=$(basename "$f")
+            test ! -e "out/$b" || { echo "duplicate member name $b" >&2; exit 1; }
+            cp "$f" "out/$b"
+          done
+          test -n "$(ls out)"
+          ( cd out && sha256sum -- * > ../SHA256SUMS && mv ../SHA256SUMS SHA256SUMS )
+          printf '{"repo":"%s","source_run":"%s/%s/actions/runs/%s","source_workflow":"%s","commit":"%s","artifact":"%s","build_host":"github-hosted ubuntu-latest runner (source run)","stored_by_run":"%s/%s/actions/runs/%s","stored_at_utc":"%s"}\n' \
+            "$REPO" "$GITHUB_SERVER_URL" "$REPO" "$RUN_ID" "$wf" "$sha" "$ART" \
+            "$GITHUB_SERVER_URL" "$REPO" "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/PROVENANCE.json
+          cat out/PROVENANCE.json out/SHA256SUMS
+
+      - name: Create prerelease
+        run: |
+          sha=$(cut -f3 run.tsv)
+          {
+            printf 'Stored copy of Actions artifact %s from run %s (commit %s).\n\n' "$ART" "$RUN_ID" "$sha"
+            printf 'Integrity: SHA256SUMS. Provenance: PROVENANCE.json. Prerelease: a build record, not a release endorsement.\n'
+          } > notes.md
+          gh release create "$TAG" --repo "$REPO" --target "$sha" --prerelease \
+            --title "$TAG ($ART)" --notes-file notes.md out/*
+
+      - name: Re-download and verify stored assets
+        run: |
+          mkdir verify
+          gh release download "$TAG" --repo "$REPO" --dir verify
+          ( cd verify && sha256sum -c SHA256SUMS )

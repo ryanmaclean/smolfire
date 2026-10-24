@@ -16,6 +16,7 @@
 #   SMOLFIRE_NETBSD_READY
 #   SMOLFIRE_NETBSD_STATE_OK dev=<dev> mount=<path> fs=<name> mode=rw
 #   SMOLFIRE_NETBSD_WORKLOAD verdict=pass key=value ...
+#   SMOLFIRE_NETBSD_STATS t=<s> pid=<pid> rss_kb=<n> vsz_kb=<n> cpu_pct=<f>   (optional, repeated)
 #
 # The resulting JSON report (schema smolfire.netbsd-microvm-prototype/v1)
 # captures artifact size, host-measured time to READY, configured RAM/CPUs,
@@ -23,13 +24,25 @@
 # recursively before printing to match the original script's
 # `json.dump(..., sort_keys=True)` output byte-for-byte.
 #
+# Real NetBSD 11.0 artifacts: bin/netbsd-microvm-rootfs.nu builds the rootfs
+# image (--root-image, attached as virtio-blk ld0) and the state disk from the
+# official sets; the official netbsd-MICROVM kernel boots as is (PVH). The
+# MICROVM kernel has ffs/tmpfs/msdos but no lfs, hammer2, cd9660 or
+# md-root, so use --root-image with --root-device ld0a, --state-device ld1a
+# and --state-fs ffs-wapbl. --net slirp adds QEMU user networking
+# (virtio-net, no TAP/bridge) with optional --hostfwd rules.
+#
 # Usage:
 #   nu bin/netbsd-microvm-prototype.nu --kernel K --state-image S --state-fs lfs --dry-run
 #   nu bin/netbsd-microvm-prototype.nu --kernel K --state-image S --state-fs lfs --parse-log LOG
+#   nu bin/netbsd-microvm-prototype.nu --kernel netbsd-MICROVM --root-image root.img \
+#       --root-device ld0a --state-image state.img --state-device ld1a --state-fs ffs-wapbl \
+#       --net slirp --hostfwd tcp:127.0.0.1:2252-:22 --hold-seconds 600 --serial-log serial.log
 
 const READY_MARKER = "SMOLFIRE_NETBSD_READY"
 const STATE_MARKER = "SMOLFIRE_NETBSD_STATE_OK"
 const WORKLOAD_MARKER = "SMOLFIRE_NETBSD_WORKLOAD"
+const STATS_MARKER = "SMOLFIRE_NETBSD_STATS"
 const SCHEMA = "smolfire.netbsd-microvm-prototype/v1"
 
 # ---------------------------------------------------------------------------
@@ -144,9 +157,26 @@ def build-qemu-cmd [args: record]: nothing -> record {
     if ($args.rootfs != null) and ($args.rootfs | str length) > 0 {
         $cmd = ($cmd | append ["-initrd", $args.rootfs])
     }
+    # The root image is attached first so the guest probes it as ld0 and the
+    # state disk as ld1. It is opened read-only: the rootfs is immutable.
+    if ($args.root_image != null) and ($args.root_image | str length) > 0 {
+        $cmd = ($cmd | append [
+            "-drive", $"if=none,file=($args.root_image),format=raw,id=root0,readonly=on",
+            "-device", "virtio-blk-device,drive=root0",
+        ])
+    }
     $cmd = ($cmd | append [
         "-drive", $"if=none,file=($args.state_image),format=($args.state_format),id=state0",
         "-device", "virtio-blk-device,drive=state0",
+    ])
+    if $args.net == "slirp" {
+        let fwd = ($args.hostfwd | each {|r| $",hostfwd=($r)" } | str join "")
+        $cmd = ($cmd | append [
+            "-netdev", $"user,id=net0($fwd)",
+            "-device", "virtio-net-device,netdev=net0",
+        ])
+    }
+    $cmd = ($cmd | append [
         "-global", "virtio-mmio.force-legacy=false",
         "-display", "none",
         "-serial", "stdio",
@@ -159,9 +189,46 @@ def build-qemu-cmd [args: record]: nothing -> record {
 def empty-report [args: record, cmd: list, resolved_accel: string]: nothing -> record {
     let kernel_bytes = (file-size $args.kernel)
     let rootfs_bytes = (file-size $args.rootfs)
+    let root_image_bytes = (file-size $args.root_image)
     let state_bytes = (file-size $args.state_image)
-    let sizes = ([$kernel_bytes, $rootfs_bytes, $state_bytes] | where {|x| $x != null})
+    let sizes = ([$kernel_bytes, $rootfs_bytes, $root_image_bytes, $state_bytes] | where {|x| $x != null})
     let total = (if ($sizes | is-empty) { 0 } else { $sizes | math sum })
+    mut artifacts = {
+        kernel: {path: $args.kernel, bytes: $kernel_bytes},
+        rootfs: {path: $args.rootfs, bytes: $rootfs_bytes},
+        state: {path: $args.state_image, bytes: $state_bytes, format: $args.state_format},
+        total_bytes: $total,
+    }
+    if $args.root_image != null {
+        $artifacts = ($artifacts | upsert root_image {path: $args.root_image, bytes: $root_image_bytes, format: "raw", readonly: true})
+    }
+    mut config = {
+        memory_mib: $args.memory_mib,
+        cpus: $args.cpus,
+        state_fs: $args.state_fs,
+        root_device: $args.root_device,
+        state_device: $args.state_device,
+        timeout_s: $args.timeout,
+        append: (build-append $args),
+        accel: $resolved_accel,
+    }
+    if $args.net != "none" {
+        $config = ($config | upsert net {mode: $args.net, hostfwd: $args.hostfwd})
+    }
+    # NetBSD/x86 truncates the boot command line at 255 bytes ("command line
+    # exceeded limit of 255 chars. Truncated."). QEMU microvm appends one
+    # " virtio_mmio.device=512@0xfeb00e00:12" (37 bytes) per virtio-mmio
+    # device after -append, so count those too and flag a likely truncation.
+    # Observed on NetBSD 11.0: the devices still attach, but trailing
+    # -append arguments are cut.
+    let devices = (1 + (if $args.root_image != null { 1 } else { 0 }) + (if $args.net == "slirp" { 1 } else { 0 }))
+    let cmdline_bytes = ((build-append $args | str length --utf-8-bytes) + $devices * 37)
+    if $cmdline_bytes > 255 {
+        $config = ($config | upsert cmdline_estimate_bytes $cmdline_bytes | upsert append_truncated_by_netbsd true)
+    }
+    if $args.hold_seconds > 0 {
+        $config = ($config | upsert hold_seconds $args.hold_seconds)
+    }
     {
         schema: $SCHEMA,
         expected_markers: {
@@ -169,32 +236,54 @@ def empty-report [args: record, cmd: list, resolved_accel: string]: nothing -> r
             state: $STATE_MARKER,
             workload: $WORKLOAD_MARKER,
         },
-        artifacts: {
-            kernel: {path: $args.kernel, bytes: $kernel_bytes},
-            rootfs: {path: $args.rootfs, bytes: $rootfs_bytes},
-            state: {path: $args.state_image, bytes: $state_bytes, format: $args.state_format},
-            total_bytes: $total,
-        },
-        config: {
-            memory_mib: $args.memory_mib,
-            cpus: $args.cpus,
-            state_fs: $args.state_fs,
-            root_device: $args.root_device,
-            state_device: $args.state_device,
-            timeout_s: $args.timeout,
-            append: (build-append $args),
-            accel: $resolved_accel,
-        },
+        artifacts: $artifacts,
+        config: $config,
         qemu_command: $cmd,
     }
 }
 
-# Mirrors Python's parse_transcript().
+# "m:ss.cc" or "h:mm:ss" (ps time=) -> seconds
+def cputime-s [v: any]: nothing -> any {
+    if $v == null { return null }
+    let parts = ($v | into string | split row ":" | each {|p| try { $p | into float } catch { null } })
+    if ($parts | any {|p| $p == null }) { return null }
+    $parts | reduce --fold 0.0 {|it, acc| $acc * 60 + $it }
+}
+
+# Summarise SMOLFIRE_NETBSD_STATS samples (guest ps rss/vsz/%cpu/time).
+def stats-summary [samples: list]: nothing -> any {
+    let s = ($samples | where {|x| ($x | get -o rss_kb) != null })
+    if ($s | is-empty) { return null }
+    let rss = ($s | get rss_kb)
+    let cpu = ($s | each {|x| $x | get -o cpu_pct } | where {|x| $x != null })
+    let first = ($s | first)
+    let last = ($s | last)
+    let c0 = (cputime-s ($first | get -o cputime))
+    let c1 = (cputime-s ($last | get -o cputime))
+    let dt = (($last | get -o t | default 0) - ($first | get -o t | default 0))
+    let avg_cpu = if ($c0 != null) and ($c1 != null) and ($dt > 0) {
+        (($c1 - $c0) / $dt * 100 | math round --precision 3)
+    } else { null }
+    {
+        samples: ($s | length),
+        window_s: $dt,
+        pid: ($last | get -o pid),
+        rss_kb: {first: ($rss | first), last: ($rss | last), min: ($rss | math min), max: ($rss | math max)},
+        vsz_kb_last: ($last | get -o vsz_kb),
+        ps_cpu_pct: {max: (if ($cpu | is-empty) { null } else { $cpu | math max }), last: ($last | get -o cpu_pct)},
+        cputime_s: {first: $c0, last: $c1},
+        avg_cpu_pct_over_window: $avg_cpu,
+        exited: ($samples | any {|x| ($x | get -o exited) == true }),
+    }
+}
+
+# Mirrors Python's parse_transcript(), plus optional STATS samples.
 def parse-transcript [lines: list, report: record, measured_ready_ms?: any]: nothing -> record {
     mut ready_seen = false
     mut state_info: any = null
     mut workload_info: any = null
     mut time_to_ready_ms: any = $measured_ready_ms
+    mut samples = []
 
     for line in $lines {
         if $time_to_ready_ms == null {
@@ -213,6 +302,10 @@ def parse-transcript [lines: list, report: record, measured_ready_ms?: any]: not
         let wm = ($line | parse --regex ($WORKLOAD_MARKER + '(?<tail>.*)'))
         if ($wm | length) > 0 {
             $workload_info = (parse-kv-tail $wm.0.tail)
+        }
+        let xm = ($line | parse --regex ($STATS_MARKER + '(?<tail>.*)'))
+        if ($xm | length) > 0 {
+            $samples = ($samples | append (parse-kv-tail $xm.0.tail))
         }
     }
 
@@ -235,6 +328,10 @@ def parse-transcript [lines: list, report: record, measured_ready_ms?: any]: not
         workload: $workload_info,
         acceptance: $acceptance,
     })
+    let stats = (stats-summary $samples)
+    if $stats != null {
+        $r = ($r | upsert result.stats $stats)
+    }
     $r
 }
 
@@ -242,20 +339,28 @@ def parse-transcript [lines: list, report: record, measured_ready_ms?: any]: not
 # stdout/stderr into a temp file, and polls for the marker protocol. Real
 # QEMU/NetBSD-artifact runs are not part of this repo's test suite (no
 # NetBSD MICROVM kernel is available in CI); --dry-run and --parse-log are
-# the exercised, byte-for-byte-verified paths.
+# the exercised, byte-for-byte-verified paths. With --hold-seconds N the VM
+# keeps running N seconds after the WORKLOAD marker so STATS samples
+# accumulate. QEMU writes a pidfile and is killed through it, so no guest
+# outlives the runner.
 def run-qemu [args: record, cmd: list, resolved_accel: string]: nothing -> record {
     mut report = (empty-report $args $cmd $resolved_accel)
     let tmp_log = (mktemp)
+    let pidfile = (mktemp)
     let start = (date now)
     let timeout_dur = ($args.timeout * 1sec)
+    let run_cmd = ($cmd | append ["-pidfile", $pidfile])
     let job_id = (job spawn {
-        ^($cmd | first) ...($cmd | skip 1) o+e> $tmp_log
+        ^($run_cmd | first) ...($run_cmd | skip 1) o+e> $tmp_log
     })
 
     mut lines_seen = 0
     mut ready_ms: any = null
     mut workload_seen = false
+    mut workload_at: any = null
     mut timed_out = false
+    mut qpid = ""
+    mut qemu_exited = false
 
     loop {
         sleep 250ms
@@ -266,29 +371,44 @@ def run-qemu [args: record, cmd: list, resolved_accel: string]: nothing -> recor
                 if ($ready_ms == null) and ($l =~ $READY_MARKER) {
                     $ready_ms = ($elapsed / 1ms | math round)
                 }
-                if ($l =~ $WORKLOAD_MARKER) {
+                if (not $workload_seen) and ($l =~ $WORKLOAD_MARKER) {
                     $workload_seen = true
+                    $workload_at = $elapsed
                 }
             }
             $lines_seen = ($all_lines | length)
         }
-        if $workload_seen {
+        if $workload_seen and (($elapsed - $workload_at) >= ($args.hold_seconds * 1sec)) {
             break
         }
-        if $elapsed > $timeout_dur {
+        if (not $workload_seen) and $elapsed > $timeout_dur {
             $timed_out = true
+            break
+        }
+        if ($qpid | str length) == 0 {
+            $qpid = (try { open --raw $pidfile | str trim } catch { "" })
+        } else if ($nu.os-info.name == "linux") and not ($"/proc/($qpid)" | path exists) {
+            $qemu_exited = true
             break
         }
     }
 
+    # Stop QEMU via its pid (job kill alone can leave the child running).
+    if ($qpid | str length) > 0 and (not $qemu_exited) {
+        try { ^kill $qpid } catch { }
+        sleep 500ms
+    }
     try { job kill $job_id }
     let final_lines = (if ($tmp_log | path exists) { open --raw $tmp_log | lines } else { [] })
-    try { rm -f $tmp_log }
+    if ($args.serial_log != null) and ($tmp_log | path exists) {
+        cp $tmp_log $args.serial_log
+    }
+    try { rm -f $tmp_log $pidfile }
 
     if $timed_out {
         $report = ($report | upsert timeout true)
     }
-    $report = ($report | upsert process {returncode: null})
+    $report = ($report | upsert process {returncode: null, exited_before_stop: $qemu_exited})
     parse-transcript $final_lines $report $ready_ms
 }
 
@@ -334,6 +454,10 @@ def main [
     --serial-log: string      # Save combined serial transcript to this path
     --parse-log: string       # Parse an existing serial log instead of running QEMU
     --dry-run                 # Print JSON report with the generated QEMU command only
+    --root-image: string      # Immutable root disk image (raw FFS, attached read-only as the first virtio-blk, ld0)
+    --net: string = "none"    # one of: none, slirp (QEMU user networking on virtio-net; no TAP/bridge)
+    --hostfwd: string = ""  # slirp hostfwd rules, comma/space separated, e.g. tcp:127.0.0.1:2252-:22
+    --hold-seconds: int = 0   # keep the VM running this long after the WORKLOAD marker (collects STATS)
 ] {
     if $kernel == null {
         error make {msg: "--kernel is required"}
@@ -346,6 +470,13 @@ def main [
     }
     if not ($state_fs in ["lfs", "ffs-wapbl", "hammer2"]) {
         error make {msg: $"--state-fs must be one of lfs, ffs-wapbl, hammer2 \(got ($state_fs)\)"}
+    }
+    if not ($net in ["none", "slirp"]) {
+        error make {msg: $"--net must be one of none, slirp \(got ($net)\)"}
+    }
+    let hostfwd_rules = ($hostfwd | split row -r "[,\\s]+" | where {|r| ($r | str length) > 0 })
+    if ($hostfwd_rules | is-not-empty) and $net != "slirp" {
+        error make {msg: "--hostfwd needs --net slirp"}
     }
     if not ($accel in ["auto", "hvf", "kvm", "tcg"]) {
         error make {msg: $"--accel must be one of auto, hvf, kvm, tcg \(got ($accel)\)"}
@@ -368,6 +499,10 @@ def main [
         serial_log: $serial_log,
         parse_log: $parse_log,
         dry_run: $dry_run,
+        root_image: $root_image,
+        net: $net,
+        hostfwd: $hostfwd_rules,
+        hold_seconds: $hold_seconds,
     }
 
     let built = (build-qemu-cmd $args)

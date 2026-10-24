@@ -11,6 +11,11 @@ POSIX sh glue, or other languages without owner approval. This is enforced by
 `tests/no-new-python-test.nu` (run via `tests/run-all.sh` and in CI) — any
 tracked `*.py` file outside its explicit allow-list fails the build.
 
+Exception (owner-granted 2026-10-07): DUT serial drivers may be Python under
+`tools/dut_*.py` / `tools/dispatch_journal.py` — Nushell cannot do serial-port
+I/O, and these are live-proven throwaways committed verbatim (see
+`tools/README.md`).
+
 ## Owns
 
 - microVM boot/runtime

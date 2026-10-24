@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# smolfire NetBSD microVM shutdown: stop the workload, flush the state disk.
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+for f in /var/run/dd-agent-rs.pid /var/run/sshd.pid; do
+	[ -r "$f" ] && kill "$(cat "$f")" 2>/dev/null
+done
+sleep 1
+sync
+umount /state 2>/dev/null
+exit 0

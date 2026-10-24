@@ -51,12 +51,12 @@ testbench is hardware verification, not a repo test script.
 
 Icarus Verilog 13.0 (`brew install icarus-verilog`, ~7 MB):
 
-```sh
-cd rtl
-iverilog -g2012 -o sim durable_tid_v0.sv durable_tid_v0_tb.sv && ./sim
-# checks passed: 48  failed: 0  +  PASS (stable across repeat runs)
-iverilog -g2012 -Wall ...   # lint-clean, no warnings
-```
+Current execution gate: PR124 Linux CI runs `tests/pr124-offboard-gate.nu`, which
+simulates `durable_tid_v0_tb.sv` against both the `.sv` and `.v` DUTs under Icarus
+Verilog (119 passed / 0 failed, plus a deliberate-failure control per variant).
+Icarus (GPL) is owner-approved 2026-10-18 as a CI/test tool only: installed from
+the runner package manager at CI time, never vendored, shipped or linked. Source/model
+evidence only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
 
 Fixes applied to reach PASS (register map UNCHANGED — offsets, widths,
 semantics of the map itself untouched):
@@ -257,12 +257,10 @@ resumes (verify with PING). Length-known rejects (bad magic/checksum on a
 
 ### Burst TB status: PASS (42 checks, icarus 13.0)
 
-```sh
-cd rtl
-iverilog -g2012 -o sim_burst dut_top_uart.v dut_uart.v durable_tid_v0.v dut_uart_burst_tb.sv && ./sim_burst
-# checks passed: 42  failed: 0  +  PASS
-iverilog -g2012 -Wall ...   # lint-clean, no warnings
-```
+Current execution gate: **HOLD** for this testbench. The PR124 CI gate runs only
+`durable_tid_v0_tb.sv`; this UART testbench is not run by it, so the historical
+results below are not current execution admission (Icarus is allowed as a CI/test
+tool only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md)).
 
 `rtl/dut_uart_burst_tb.sv` (new; `dut_uart_tb.sv` untouched, still 43):
 B0 N=1 / B1 N=2 good; B2 mid-burst DUP (`C/DUP/C`, watermark +2, no
@@ -293,19 +291,17 @@ IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
 
 ### UART TB status: PASS (verified 2026-09-25, icarus 13.0)
 
-```sh
-cd rtl
-iverilog -g2012 -o sim_uart dut_top_uart.v dut_uart.v durable_tid_v0.v dut_uart_tb.sv && ./sim_uart
-# checks passed: 43  failed: 0  +  PASS
-iverilog -g2012 -Wall ...   # lint-clean, no warnings
-```
+Current execution gate: **HOLD** for this testbench. The PR124 CI gate runs only
+`durable_tid_v0_tb.sv`; this UART testbench is not run by it, so the historical
+results below are not current execution admission (Icarus is allowed as a CI/test
+tool only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md)).
 
 The TB drives the 50 MHz board clock (= fabric clock, direct) and runs at the HARDWARE baud
 (`BAUD=115200`, divisor 434 cycles/bit) so
 the suite exercises the exact hardware timing, including the RX 16x-tick
 truncation (434/16 → 27). It replays the original suite's functional
 cases over serial (8 good submits, duplicate, bad-CRC / reserved-CTRL /
-REQ_HI malformed vectors, idle reset + post-reset submit) plus
+REQ_HI gap (`GAP_SEQ`) vectors, idle reset + post-reset submit) plus
 UART-specific coverage (PING/MAGIC+VERSION, WRITE echo, no-response
 rejection of bad-checksum / bad-magic / unknown-CMD frames, link-alive
 after rejection, repeated-submit).
@@ -335,11 +331,12 @@ remain covered by the parallel 48-check suite (still PASS, DUT untouched).
 
 ## How the TB runs (once a simulator exists)
 
-```sh
-cd rtl
-iverilog -g2012 -o sim durable_tid_v0.sv durable_tid_v0_tb.sv && ./sim
-# expect: checks passed: <n>  failed: 0  +  PASS
-```
+Current execution gate: PR124 Linux CI runs `tests/pr124-offboard-gate.nu`, which
+simulates `durable_tid_v0_tb.sv` against both the `.sv` and `.v` DUTs under Icarus
+Verilog (119 passed / 0 failed, plus a deliberate-failure control per variant).
+Icarus (GPL) is owner-approved 2026-10-18 as a CI/test tool only: installed from
+the runner package manager at CI time, never vendored, shipped or linked. Source/model
+evidence only; see [media source gates](../docs/MEDIA-LOG-V2-SOURCE-GATES.md).
 
 The TB assumes the default `COMMIT_LATENCY=2` for the reset-mid-commit
 injection window (TEST 6); if the parameter is changed, adjust TEST 6.

@@ -119,4 +119,78 @@ do {
     rm -rf $tmp
 }
 
+print "test: root image, SLIRP networking, STATS samples, append limit"
+do {
+    let tmp = (mktemp -d)
+    let kernel = ([$tmp, "netbsd-MICROVM"] | path join)
+    let root = ([$tmp, "root.img"] | path join)
+    let state = ([$tmp, "state.img"] | path join)
+    (0..<4096 | each {|_| "K" } | str join) | save --force $kernel
+    (0..<1024 | each {|_| "R" } | str join) | save --force $root
+    (0..<8192 | each {|_| "S" } | str join) | save --force $state
+
+    let base = [
+        "--kernel", $kernel,
+        "--root-image", $root,
+        "--root-device", "ld0a",
+        "--state-image", $state,
+        "--state-device", "ld1a",
+        "--state-fs", "ffs-wapbl",
+        "--accel", "tcg",
+    ]
+    let dry = (run-json ($base | append ["--net", "slirp", "--hostfwd", "tcp:127.0.0.1:2252-:22", "--dry-run"]))
+    let cmd = $dry.qemu_command
+    let joined = ($cmd | str join " ")
+    for needle in [
+        "if=none,file=($root),format=raw,id=root0,readonly=on",
+        "virtio-blk-device,drive=root0",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:2252-:22",
+        "virtio-net-device,netdev=net0",
+        "root=ld0a",
+        "smolfire.state_dev=ld1a",
+    ] {
+        let n = ($needle | str replace "($root)" $root)
+        assert ($joined | str contains $n) $"dry-run command missing ($n)"
+    }
+    assert (not ($joined | str contains "-initrd")) "root image must not be passed as -initrd"
+    let root_idx = ($cmd | enumerate | where item == "virtio-blk-device,drive=root0" | get index | first)
+    let state_idx = ($cmd | enumerate | where item == "virtio-blk-device,drive=state0" | get index | first)
+    assert ($root_idx < $state_idx) "root disk must be attached before the state disk (ld0 vs ld1)"
+    assert equal $dry.artifacts.root_image.bytes 1024 "root image byte accounting"
+    assert equal $dry.artifacts.total_bytes 13312 "total bytes include the root image"
+    assert equal $dry.config.net.mode "slirp" "net mode in config"
+    assert equal $dry.config.append_truncated_by_netbsd true "default append exceeds NetBSD's 255-byte limit"
+
+    # no network unless asked: the legacy command shape is unchanged
+    let plain = (run-json ($base | append ["--dry-run"]))
+    assert (not (($plain.qemu_command | str join " ") | str contains "netdev")) "no netdev without --net slirp"
+    assert (($plain.config | get -o net) == null) "no net config without --net slirp"
+
+    let bad = (^nu (script-path) ...($base | append ["--hostfwd", "tcp:127.0.0.1:1-:22", "--dry-run"]) | complete)
+    assert ($bad.exit_code != 0) "--hostfwd without --net slirp must fail"
+
+    let log = ([$tmp, "agent.log"] | path join)
+    [
+        "[   1.1146703] kernel boot time: 382ms",
+        "SMOLFIRE_NETBSD_READY kernel=11.0 host=smolfire-netbsd-pop",
+        "SMOLFIRE_NETBSD_STATE_OK dev=ld1a mount=/state fs=ffs-wapbl mode=rw",
+        "SMOLFIRE_NETBSD_WORKLOAD verdict=pass workload=dd-agent-rs pid=120 binary_bytes=10809672",
+        "SMOLFIRE_NETBSD_STATS t=0 pid=120 rss_kb=9800 vsz_kb=39000 cpu_pct=1.5 cputime=0:00.10",
+        "SMOLFIRE_NETBSD_STATS t=30 pid=120 rss_kb=11420 vsz_kb=41544 cpu_pct=0.2 cputime=0:00.25",
+        "SMOLFIRE_NETBSD_STATS t=60 pid=120 rss_kb=11400 vsz_kb=41544 cpu_pct=0.1 cputime=0:00.40",
+        "TIME_TO_READY=1793ms",
+    ] | str join "\n" | save --force $log
+    let parsed = (run-json ($base | append ["--parse-log", $log]))
+    let st = $parsed.result.stats
+    assert equal $st.samples 3 "STATS sample count"
+    assert equal $st.rss_kb.max 11420 "rss max"
+    assert equal $st.rss_kb.last 11400 "rss last"
+    assert equal $st.window_s 60 "stats window"
+    assert equal $st.avg_cpu_pct_over_window 0.5 "avg cpu from cputime delta (0.3 s over 60 s)"
+    assert equal $parsed.result.workload.binary_bytes 10809672 "workload numeric field"
+    assert ($parsed.result.acceptance.mounts_one_writable_state_volume) "ffs-wapbl state mounted rw"
+
+    rm -rf $tmp
+}
+
 print "netbsd-microvm-prototype-test: ok"

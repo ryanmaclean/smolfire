@@ -82,7 +82,9 @@ test_req_06_security() {
 
 test_req_ubuntu_pivot() {
     echo "Running REQ-UBUNTU: Verify Ubuntu/vfkit Pivot Scripts"
-    if [ -f "scripts/launch_ubuntu_vm.py" ] && [ -f "scripts/ralph_loop.py" ]; then
+    # ralph_loop moved to ryanmaclean/moth contrib/vibecode/ralph_loop/ralph_loop.py (2026-10-25);
+    # it is no longer a vibecode-webgui script, so only the Ubuntu launcher is checked here.
+    if [ -f "scripts/launch_ubuntu_vm.py" ]; then
          echo "✅ REQ-UBUNTU PASS: Pivot scripts present"
     else
          echo "❌ REQ-UBUNTU FAIL: Scripts missing"
